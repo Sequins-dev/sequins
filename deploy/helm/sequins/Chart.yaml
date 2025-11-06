@@ -1,0 +1,30 @@
+apiVersion: v2
+name: sequins
+description: A cross-platform OpenTelemetry database
+type: application
+
+# This is the chart version. This version number should be incremented each time you make changes
+# to the chart and its templates, including the app version.
+version: 0.1.0
+
+# This is the version number of the application being deployed.
+appVersion: "0.1.0"
+
+keywords:
+  - opentelemetry
+  - otlp
+  - observability
+  - traces
+  - metrics
+  - logs
+  - profiling
+
+maintainers:
+  - name: Stephen Belanger
+    email: stephenbelanger@sequins.dev
+
+home: https://github.com/Sequins-dev/sequins-pro
+sources:
+  - https://github.com/Sequins-dev/sequins-pro
+
+icon: https://raw.githubusercontent.com/Sequins-dev/sequins-pro/main/assets/icon.png

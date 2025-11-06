@@ -1,0 +1,65 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your Sequins deployment is ready.
+
+OTLP Endpoints:
+  gRPC: {{ include "sequins.fullname" . }}-otlp:{{ .Values.otlp.service.grpcPort }}
+  HTTP: {{ include "sequins.fullname" . }}-otlp:{{ .Values.otlp.service.httpPort }}
+
+{{- if .Values.queryApi.enabled }}
+
+Query API:
+{{- if .Values.queryApi.ingress.enabled }}
+{{- range .Values.queryApi.ingress.hosts }}
+  External URL: http{{ if $.Values.queryApi.ingress.tls }}s{{ end }}://{{ .host }}{{ (index .paths 0).path }}
+{{- end }}
+{{- else }}
+  Internal URL: http://{{ include "sequins.fullname" . }}-query-api:{{ .Values.queryApi.service.port }}
+{{- end }}
+{{- end }}
+
+To configure your applications to send telemetry data to Sequins:
+
+1. Set the OTLP endpoint in your OpenTelemetry SDK:
+
+   OTEL_EXPORTER_OTLP_ENDPOINT=http://{{ include "sequins.fullname" . }}-otlp:{{ .Values.otlp.service.httpPort }}
+
+2. Or for gRPC:
+
+   OTEL_EXPORTER_OTLP_ENDPOINT=http://{{ include "sequins.fullname" . }}-otlp:{{ .Values.otlp.service.grpcPort }}
+
+Storage:
+  S3 Bucket: {{ .Values.storage.s3.bucket }}
+  Region: {{ .Values.storage.s3.region }}
+
+Data Retention:
+  Traces: {{ .Values.storage.retention.traces }}
+  Logs: {{ .Values.storage.retention.logs }}
+  Metrics: {{ .Values.storage.retention.metrics }}
+  Profiles: {{ .Values.storage.retention.profiles }}
+
+{{- if not .Values.storage.s3.bucket }}
+
+WARNING: S3 bucket is not configured!
+Please update your values.yaml with storage.s3.bucket and upgrade:
+
+  helm upgrade {{ .Release.Name }} sequins/sequins \
+    --set storage.s3.bucket=your-bucket-name \
+    --reuse-values
+{{- end }}
+
+{{- if and (not .Values.storage.s3.existingSecret) (not .Values.storage.s3.accessKeyId) }}
+
+WARNING: S3 credentials are not configured!
+Please provide credentials via:
+  - storage.s3.existingSecret (recommended), or
+  - storage.s3.accessKeyId and storage.s3.secretAccessKey
+
+Example:
+  helm upgrade {{ .Release.Name }} sequins/sequins \
+    --set storage.s3.existingSecret=my-s3-secret \
+    --reuse-values
+{{- end }}
+
+For more information, visit:
+  https://github.com/Sequins-dev/sequins-pro

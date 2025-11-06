@@ -1,0 +1,114 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sequins-core",
+    "crates/sequins-storage",
+    "crates/sequins-server",
+    "crates/sequins-client",
+    "crates/sequins-app",
+    "crates/sequins-daemon",
+    "crates/sequins-web",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+authors = ["Stephen Belanger"]
+
+[workspace.dependencies]
+# Core crates (internal)
+sequins-core = { path = "crates/sequins-core" }
+sequins-storage = { path = "crates/sequins-storage" }
+sequins-server = { path = "crates/sequins-server" }
+sequins-client = { path = "crates/sequins-client" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Apache Arrow & DataFusion
+arrow = "53"
+parquet = { version = "53", features = ["async"] }
+datafusion = "42"
+
+# Object storage
+object_store = { version = "0.11", features = ["aws", "http"] }
+
+# Lock-free hot tier
+papaya = "0.1"
+
+# RocksDB index for disk mode (optional, added per-crate)
+rocksdb = "0.22"
+
+# OTLP protocol
+opentelemetry = { version = "0.27", features = ["trace"] }
+opentelemetry-otlp = "0.27"
+opentelemetry_sdk = "0.27"
+tonic = { version = "0.12", features = ["gzip", "tls"] }
+prost = "0.13"
+prost-types = "0.13"
+
+# HTTP server/client
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+hyper = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+
+# GPUI (desktop UI)
+gpui = "0.2"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Time handling
+chrono = "0.4"
+
+# UUID for internal IDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# URL parsing
+url = "2"
+
+# Config parsing (YAML)
+serde_yaml = "0.9"
+
+# Logging/tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Testing
+proptest = "1"
+tempfile = "3"
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+
+# Leptos configuration for sequins-web
+[[workspace.metadata.leptos]]
+name = "sequins-web"
+bin-package = "sequins-web"
+lib-package = "sequins-web"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "crates/sequins-web/styles.css"
+assets-dir = "crates/sequins-web"
+site-addr = "0.0.0.0:8080"
+reload-port = 3001
+browserquery = "defaults"
+watch = false
+env = "PROD"
+bin-features = ["ssr"]
+lib-features = ["hydrate"]
+lib-profile-release = "wasm-release"

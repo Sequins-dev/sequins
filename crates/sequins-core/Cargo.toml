@@ -1,0 +1,21 @@
+[package]
+name = "sequins-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+uuid = { workspace = true }
+opentelemetry = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+arrow = { workspace = true }
+serde = { workspace = true }
+hex = "0.4.3"
+async-trait = "0.1"
+
+[dev-dependencies]
+proptest = { workspace = true }

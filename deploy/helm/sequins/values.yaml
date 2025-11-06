@@ -1,0 +1,171 @@
+# Default values for sequins.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/Sequins-dev/sequins-pro-daemon
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Automatically mount a ServiceAccount's API credentials?
+  automount: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  fsGroup: 2000
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# OTLP service configuration
+otlp:
+  service:
+    type: ClusterIP
+    grpcPort: 4317
+    httpPort: 4318
+    annotations: {}
+
+# Query API service configuration (enterprise feature)
+queryApi:
+  enabled: true
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations: {}
+
+  # Ingress configuration for external access
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+      # kubernetes.io/ingress.class: nginx
+      # cert-manager.io/cluster-issuer: letsencrypt-prod
+    hosts:
+      - host: sequins.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+    #  - secretName: sequins-tls
+    #    hosts:
+    #      - sequins.example.com
+
+# Storage configuration
+storage:
+  # S3-compatible storage configuration
+  s3:
+    # S3 bucket name
+    bucket: ""
+    # S3 region
+    region: us-east-1
+    # S3 endpoint (for S3-compatible services like MinIO)
+    endpoint: ""
+
+    # Credentials configuration
+    # Option 1: Use existing secret (recommended for production)
+    existingSecret: ""
+    # Keys in the existing secret
+    accessKeyIdKey: "access-key-id"
+    secretAccessKeyKey: "secret-access-key"
+
+    # Option 2: Specify credentials directly (will be stored in a secret)
+    # NOT recommended for production - use existingSecret instead
+    accessKeyId: ""
+    secretAccessKey: ""
+
+  # Data retention policies
+  retention:
+    # Retention period for traces (e.g., "24h", "7d", "30d")
+    traces: "7d"
+    # Retention period for logs
+    logs: "30d"
+    # Retention period for metrics
+    metrics: "30d"
+    # Retention period for profiles
+    profiles: "7d"
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+# Liveness and readiness probes
+livenessProbe:
+  httpGet:
+    path: /health
+    port: query-api
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: query-api
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Autoscaling configuration
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+# Additional volumes
+volumes: []
+# - name: cache
+#   emptyDir: {}
+
+volumeMounts: []
+# - name: cache
+#   mountPath: /tmp/cache
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity rules
+affinity: {}
+
+# Extra environment variables
+extraEnv: []
+# - name: RUST_LOG
+#   value: "debug"
+
+# Extra environment variables from secrets/configmaps
+extraEnvFrom: []
+# - secretRef:
+#     name: sequins-env-secrets

@@ -1,0 +1,25 @@
+[package]
+name = "sequins-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "sequins"
+path = "src/main.rs"
+
+[dependencies]
+sequins-core = { workspace = true }
+gpui = { workspace = true }
+gpui-component = "0.4.0-preview1"
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tray-icon = "0.19"
+image = { version = "0.25.6", default-features = false, features = ["png"] }
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -1,0 +1,22 @@
+{{- if .Values.queryApi.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sequins.fullname" . }}-query-api
+  labels:
+    {{- include "sequins.labels" . | nindent 4 }}
+    app.kubernetes.io/component: query-api
+  {{- with .Values.queryApi.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.queryApi.service.type }}
+  ports:
+  - port: {{ .Values.queryApi.service.port }}
+    targetPort: query-api
+    protocol: TCP
+    name: http
+  selector:
+    {{- include "sequins.selectorLabels" . | nindent 4 }}
+{{- end }}

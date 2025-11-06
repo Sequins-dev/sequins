@@ -1,0 +1,150 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sequins.fullname" . }}
+  labels:
+    {{- include "sequins.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "sequins.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "sequins.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "sequins.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: sequins
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 12 }}
+        image: {{ include "sequins.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: otlp-grpc
+          containerPort: {{ .Values.otlp.service.grpcPort }}
+          protocol: TCP
+        - name: otlp-http
+          containerPort: {{ .Values.otlp.service.httpPort }}
+          protocol: TCP
+        {{- if .Values.queryApi.enabled }}
+        - name: query-api
+          containerPort: {{ .Values.queryApi.service.port }}
+          protocol: TCP
+        {{- end }}
+        env:
+        # S3 configuration
+        - name: S3_BUCKET
+          value: {{ .Values.storage.s3.bucket | quote }}
+        - name: S3_REGION
+          value: {{ .Values.storage.s3.region | quote }}
+        {{- if .Values.storage.s3.endpoint }}
+        - name: S3_ENDPOINT
+          value: {{ .Values.storage.s3.endpoint | quote }}
+        {{- end }}
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "sequins.s3SecretName" . }}
+              key: {{ .Values.storage.s3.accessKeyIdKey }}
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "sequins.s3SecretName" . }}
+              key: {{ .Values.storage.s3.secretAccessKeyKey }}
+
+        # OTLP port configuration
+        - name: OTLP_GRPC_PORT
+          value: {{ .Values.otlp.service.grpcPort | quote }}
+        - name: OTLP_HTTP_PORT
+          value: {{ .Values.otlp.service.httpPort | quote }}
+
+        {{- if .Values.queryApi.enabled }}
+        # Query API configuration
+        - name: QUERY_API_PORT
+          value: {{ .Values.queryApi.service.port | quote }}
+        - name: QUERY_API_ENABLED
+          value: "true"
+        {{- end }}
+
+        # Retention configuration from ConfigMap
+        - name: RETENTION_TRACES
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "sequins.fullname" . }}
+              key: retention.traces
+        - name: RETENTION_LOGS
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "sequins.fullname" . }}
+              key: retention.logs
+        - name: RETENTION_METRICS
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "sequins.fullname" . }}
+              key: retention.metrics
+        - name: RETENTION_PROFILES
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "sequins.fullname" . }}
+              key: retention.profiles
+
+        {{- with .Values.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+
+        {{- with .Values.extraEnvFrom }}
+        envFrom:
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+
+        {{- if .Values.queryApi.enabled }}
+        livenessProbe:
+          {{- toYaml .Values.livenessProbe | nindent 12 }}
+        readinessProbe:
+          {{- toYaml .Values.readinessProbe | nindent 12 }}
+        {{- end }}
+
+        resources:
+          {{- toYaml .Values.resources | nindent 12 }}
+
+        {{- with .Values.volumeMounts }}
+        volumeMounts:
+        {{- toYaml . | nindent 10 }}
+        {{- end }}
+
+      {{- with .Values.volumes }}
+      volumes:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
