@@ -1,0 +1,61 @@
+[package]
+name = "sequins-cold-tier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Vortex columnar cold tier storage for Sequins"
+
+[dependencies]
+# Internal
+sequins-types = { workspace = true }
+
+# Arrow / DataFusion
+arrow               = { workspace = true }
+datafusion          = { workspace = true }
+datafusion-substrait = { workspace = true }
+
+# Vortex columnar storage
+vortex            = { workspace = true }
+vortex-datafusion = { workspace = true }
+
+# Object storage
+object_store = { workspace = true }
+
+# Companion indexes
+tantivy     = { workspace = true }
+bloomfilter = { workspace = true }
+
+# Async
+tokio        = { workspace = true }
+tokio-stream = { workspace = true }
+futures      = { workspace = true }
+async-trait  = { workspace = true }
+async-stream = { workspace = true }
+
+# Serialization
+serde      = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+bincode    = { workspace = true }
+
+# Utilities
+chrono      = { workspace = true }
+uuid        = { workspace = true }
+url         = { workspace = true }
+hex         = { workspace = true }
+base64      = { workspace = true }
+bytes       = { workspace = true }
+once_cell   = { workspace = true }
+parking_lot = { workspace = true }
+tempfile    = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow    = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["full"] }

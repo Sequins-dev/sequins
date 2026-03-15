@@ -1,0 +1,19 @@
+hot-tier:
+  max-age: 300000000000
+  max-entries: 10000
+cold-tier:
+  uri: file:///Users/stephenbelanger/Library/Application Support/SequinsSwift/sequins.db
+  row-block-size: 65536
+  compact-encodings: true
+  max-attribute-columns: 256
+  index-path: null
+  companion-index:
+    tantivy-enabled: true
+    bloom-enabled: true
+    trigram-enabled: true
+    cardinality-threshold: 10000
+    bloom-fpr: 0.01
+lifecycle:
+  retention: 604800000000000
+  flush-interval: 300000000000
+  cleanup-interval: 3600000000000

@@ -1,0 +1,35 @@
+[package]
+name = "sequins-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Remote SeQL client for Sequins — implements QueryExec over HTTP"
+
+[dependencies]
+sequins-query = { workspace = true }
+
+# DataFusion (for client-side compilation)
+datafusion = { workspace = true }
+
+# Arrow Flight (for FlightData type)
+arrow-flight = { workspace = true }
+arrow       = { workspace = true }
+
+tonic = { workspace = true }
+bytes = { workspace = true }
+prost = { workspace = true }
+
+# Async
+tokio       = { workspace = true }
+tokio-stream = { workspace = true }
+futures     = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }

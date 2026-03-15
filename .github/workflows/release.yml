@@ -1,0 +1,404 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.2.0)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Dry run — build artifacts but skip commit/tag/release'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  validate-version:
+    name: Validate version
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-tags: true
+
+      - name: Check semver format
+        run: |
+          VERSION="${{ inputs.version }}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._-]+)?$'; then
+            echo "Error: '$VERSION' is not a valid semver version"
+            exit 1
+          fi
+          echo "Version '$VERSION' is valid"
+
+      - name: Check tag does not already exist
+        run: |
+          if git ls-remote --tags origin "refs/tags/v${{ inputs.version }}" | grep -q .; then
+            echo "Error: tag v${{ inputs.version }} already exists"
+            exit 1
+          fi
+          echo "Tag v${{ inputs.version }} is available"
+
+  bump-version:
+    name: Bump version and tag
+    runs-on: ubuntu-latest
+    needs: validate-version
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: write
+    outputs:
+      commit_sha: ${{ steps.commit.outputs.sha }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Update version in Cargo.toml
+        run: |
+          sed -i '/^\[workspace\.package\]/,/^\[/ s/^version = "[^"]*"/version = "${{ inputs.version }}"/' Cargo.toml
+
+      - name: Update Cargo.lock
+        run: cargo update --workspace
+
+      - name: Commit and tag
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "release: v${{ inputs.version }}"
+          git tag -a "v${{ inputs.version }}" -m "Release v${{ inputs.version }}"
+          git push origin main
+          git push origin "v${{ inputs.version }}"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build-cli-macos:
+    name: Build CLI (macOS universal)
+    runs-on: macos-14
+    needs: bump-version
+    if: ${{ !failure() && !cancelled() }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.bump-version.outputs.commit_sha || github.sha }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install protobuf
+        run: brew install protobuf
+
+      - name: Build CLI for aarch64
+        run: |
+          MACOSX_DEPLOYMENT_TARGET=14.0 cargo build \
+            --release \
+            --package sequins-cli \
+            --target aarch64-apple-darwin
+
+      - name: Build CLI for x86_64
+        run: |
+          MACOSX_DEPLOYMENT_TARGET=14.0 cargo build \
+            --release \
+            --package sequins-cli \
+            --target x86_64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          lipo -create \
+            target/aarch64-apple-darwin/release/sequins \
+            target/x86_64-apple-darwin/release/sequins \
+            -output sequins
+
+      - name: Package tarball
+        run: |
+          ARCHIVE="sequins-${{ inputs.version }}-macos-universal.tar.gz"
+          tar -czf "$ARCHIVE" sequins
+          shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-macos
+          path: |
+            sequins-${{ inputs.version }}-macos-universal.tar.gz
+            sequins-${{ inputs.version }}-macos-universal.tar.gz.sha256
+
+  build-cli-linux-x86_64:
+    name: Build CLI (Linux x86_64)
+    runs-on: ubuntu-latest
+    needs: bump-version
+    if: ${{ !failure() && !cancelled() }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.bump-version.outputs.commit_sha || github.sha }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install protobuf
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Build CLI
+        run: cargo build --release --package sequins-cli
+
+      - name: Package tarball
+        run: |
+          ARCHIVE="sequins-${{ inputs.version }}-linux-x86_64.tar.gz"
+          cp target/release/sequins sequins
+          tar -czf "$ARCHIVE" sequins
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-linux-x86_64
+          path: |
+            sequins-${{ inputs.version }}-linux-x86_64.tar.gz
+            sequins-${{ inputs.version }}-linux-x86_64.tar.gz.sha256
+
+  build-cli-linux-aarch64:
+    name: Build CLI (Linux aarch64)
+    runs-on: ubuntu-24.04-arm
+    needs: bump-version
+    if: ${{ !failure() && !cancelled() }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.bump-version.outputs.commit_sha || github.sha }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install protobuf
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Build CLI
+        run: cargo build --release --package sequins-cli
+
+      - name: Package tarball
+        run: |
+          ARCHIVE="sequins-${{ inputs.version }}-linux-aarch64.tar.gz"
+          cp target/release/sequins sequins
+          tar -czf "$ARCHIVE" sequins
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-linux-aarch64
+          path: |
+            sequins-${{ inputs.version }}-linux-aarch64.tar.gz
+            sequins-${{ inputs.version }}-linux-aarch64.tar.gz.sha256
+
+  build-macos-app:
+    name: Build macOS app (signed DMG)
+    runs-on: macos-15
+    needs: bump-version
+    if: ${{ !failure() && !cancelled() }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.bump-version.outputs.commit_sha || github.sha }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: |
+          brew install protobuf xcodegen create-dmg librsvg
+
+      - name: Import signing certificate
+        uses: apple-actions/import-codesign-certs@v6
+        with:
+          p12-file-base64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_P12 }}
+          p12-password: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }}
+
+      - name: Store notarization credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool store-credentials "CI_NOTARY" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID"
+
+      - name: Build XCFramework (release)
+        run: |
+          rm -rf target/SequinsFFI.xcframework target/xcframework target/frameworks
+          rm -rf apps/macos/SequinsData/SequinsFFI.xcframework
+          MACOSX_DEPLOYMENT_TARGET=14.0 cargo build \
+            --release \
+            --package sequins-ffi \
+            --target aarch64-apple-darwin \
+            --target x86_64-apple-darwin
+          mkdir -p target/xcframework/libs
+          lipo -create \
+            target/aarch64-apple-darwin/release/libsequins_ffi.a \
+            target/x86_64-apple-darwin/release/libsequins_ffi.a \
+            -output target/xcframework/libs/libsequins_ffi.a
+          xcrun xcodebuild -create-xcframework \
+            -library target/xcframework/libs/libsequins_ffi.a \
+            -headers crates/sequins-ffi/include \
+            -output target/SequinsFFI.xcframework
+          cp -R target/SequinsFFI.xcframework apps/macos/SequinsData/
+
+      - name: Generate app icons
+        run: make icons
+
+      - name: Generate Xcode project
+        working-directory: apps/macos
+        run: xcodegen generate
+
+      - name: Archive app
+        working-directory: apps/macos
+        run: |
+          xcodebuild archive \
+            -scheme Sequins \
+            -configuration Release \
+            -archivePath "$RUNNER_TEMP/Sequins.xcarchive" \
+            ENABLE_HARDENED_RUNTIME=YES \
+            CODE_SIGN_IDENTITY="Developer ID Application" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
+            MARKETING_VERSION="${{ inputs.version }}" \
+            CURRENT_PROJECT_VERSION="${{ inputs.version }}"
+
+      - name: Export archive
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>developer-id</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>signingCertificate</key>
+            <string>Developer ID Application</string>
+            <key>teamID</key>
+            <string>${{ secrets.APPLE_TEAM_ID }}</string>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Sequins.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export"
+
+      - name: Notarize app
+        run: |
+          ditto -c -k --keepParent "$RUNNER_TEMP/export/Sequins.app" "$RUNNER_TEMP/Sequins-notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/Sequins-notarize.zip" \
+            --keychain-profile "CI_NOTARY" \
+            --wait
+
+      - name: Staple app
+        run: xcrun stapler staple "$RUNNER_TEMP/export/Sequins.app"
+
+      - name: Create DMG
+        run: |
+          DMG_NAME="Sequins-${{ inputs.version }}.dmg"
+          create-dmg \
+            --volname "Sequins ${{ inputs.version }}" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "Sequins.app" 175 190 \
+            --hide-extension "Sequins.app" \
+            --app-drop-link 425 190 \
+            "$DMG_NAME" \
+            "$RUNNER_TEMP/export/Sequins.app"
+
+      - name: Notarize DMG
+        run: |
+          xcrun notarytool submit "Sequins-${{ inputs.version }}.dmg" \
+            --keychain-profile "CI_NOTARY" \
+            --wait
+
+      - name: Staple and checksum DMG
+        run: |
+          DMG_NAME="Sequins-${{ inputs.version }}.dmg"
+          xcrun stapler staple "$DMG_NAME"
+          shasum -a 256 "$DMG_NAME" > "$DMG_NAME.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-app
+          path: |
+            Sequins-${{ inputs.version }}.dmg
+            Sequins-${{ inputs.version }}.dmg.sha256
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    needs:
+      - bump-version
+      - build-cli-macos
+      - build-cli-linux-x86_64
+      - build-cli-linux-aarch64
+      - build-macos-app
+    if: ${{ !inputs.dry_run && !failure() && !cancelled() }}
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+
+      - name: Determine prerelease
+        id: prerelease
+        run: |
+          if echo "${{ inputs.version }}" | grep -q '-'; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: v${{ inputs.version }}
+          generate_release_notes: true
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          files: |
+            sequins-${{ inputs.version }}-macos-universal.tar.gz
+            sequins-${{ inputs.version }}-macos-universal.tar.gz.sha256
+            sequins-${{ inputs.version }}-linux-x86_64.tar.gz
+            sequins-${{ inputs.version }}-linux-x86_64.tar.gz.sha256
+            sequins-${{ inputs.version }}-linux-aarch64.tar.gz
+            sequins-${{ inputs.version }}-linux-aarch64.tar.gz.sha256
+            Sequins-${{ inputs.version }}.dmg
+            Sequins-${{ inputs.version }}.dmg.sha256

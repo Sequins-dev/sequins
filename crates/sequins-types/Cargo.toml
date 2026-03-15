@@ -1,0 +1,55 @@
+[package]
+name = "sequins-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Core domain types and traits for Sequins"
+
+[dependencies]
+# Serialization
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+# Arrow schemas
+arrow = { workspace = true }
+
+# Vortex (for ExtDType definitions)
+vortex = { workspace = true }
+
+# OpenTelemetry (used in ID types and OTLP proto)
+opentelemetry       = { workspace = true }
+opentelemetry-proto = { workspace = true }
+
+# Profile parsing
+prost       = { workspace = true }
+prost-types = { workspace = true }
+pprof       = { workspace = true }
+
+# Data utilities
+chrono = { workspace = true }
+uuid   = { workspace = true }
+hex    = { workspace = true }
+base64 = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+tokio       = { workspace = true }
+futures     = { workspace = true }
+
+# Error handling
+anyhow    = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Concurrency
+parking_lot = { workspace = true }
+once_cell   = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+tokio    = { version = "1", features = ["test-util"] }

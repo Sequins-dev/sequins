@@ -1,0 +1,141 @@
+[workspace]
+members = [
+    "crates/sequins-types",
+    "crates/sequins-otlp",
+    "crates/sequins-query",
+    "crates/sequins-wal",
+    "crates/sequins-live-query",
+    "crates/sequins-hot-tier",
+    "crates/sequins-cold-tier",
+    "crates/sequins-storage",
+    "crates/sequins-view",
+    "crates/sequins-client",
+    "crates/sequins-server",
+    "crates/sequins-ffi",
+    "crates/sequins-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+authors = ["Stephen Belanger"]
+
+[workspace.dependencies]
+# Internal crates
+sequins-types      = { path = "crates/sequins-types" }
+sequins-otlp       = { path = "crates/sequins-otlp" }
+sequins-query      = { path = "crates/sequins-query" }
+sequins-wal        = { path = "crates/sequins-wal" }
+sequins-live-query = { path = "crates/sequins-live-query" }
+sequins-hot-tier   = { path = "crates/sequins-hot-tier" }
+sequins-cold-tier  = { path = "crates/sequins-cold-tier" }
+sequins-storage    = { path = "crates/sequins-storage" }
+sequins-view       = { path = "crates/sequins-view" }
+sequins-client     = { path = "crates/sequins-client" }
+sequins-server     = { path = "crates/sequins-server" }
+sequins-ffi        = { path = "crates/sequins-ffi" }
+
+# OpenTelemetry
+opentelemetry       = { version = "0.31", features = ["trace"] }
+opentelemetry-otlp  = "0.31"
+opentelemetry_sdk   = "0.31"
+opentelemetry-proto = { version = "0.31", features = ["with-serde", "profiles"] }
+
+# gRPC / HTTP servers
+tonic        = { version = "0.14", features = ["gzip"] }
+prost        = "0.14"
+prost-types  = "0.14"
+axum         = "0.7"
+tower        = "0.5"
+tower-http   = { version = "0.6", features = ["trace", "cors"] }
+hyper        = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream"] }
+bytes   = "1.0"
+
+# Async
+tokio        = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures      = "0.3"
+async-trait  = "0.1"
+async-stream = "0.3"
+
+# Serialization
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+bincode    = "1"
+
+# Arrow + DataFusion
+arrow               = "57"
+arrow-flight        = { version = "57", features = ["flight-sql-experimental"] }
+datafusion          = "51"
+datafusion-substrait = "51"
+
+# Vortex columnar storage
+vortex            = { version = "0.58", features = ["files", "zstd", "tokio", "object_store"] }
+vortex-datafusion = "0.58"
+
+# Object storage
+object_store = { version = "0.12", features = ["aws", "gcp", "azure", "http"] }
+
+# Companion indexes
+tantivy     = "0.25"
+bloomfilter = "1.0"
+
+# Lock-free hot tier
+papaya = "0.1"
+dashmap = "6"
+crossbeam-epoch = "0.9"
+
+# Profile parsing (CPU profiler features disabled)
+pprof = { version = "0.13", features = ["prost-codec"], default-features = false }
+
+# Data utilities
+chrono = "0.4"
+uuid   = { version = "1", features = ["v4", "v5", "serde"] }
+url    = "2"
+hex    = "0.4"
+base64 = "0.22"
+rand   = "0.8"
+
+# Concurrency
+parking_lot = "0.12"
+once_cell   = "1"
+
+# Error handling
+anyhow    = "1"
+thiserror = "1"
+
+# Logging
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender   = "0.2"
+
+# Query language
+winnow   = "0.6"
+indexmap = { version = "2", features = ["serde"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# CBOR encoding for overflow attribute map
+ciborium = "0.2"
+
+# Dev / test utilities
+tempfile = "3"
+proptest = "1"
+wiremock = "0.6"
+serial_test = "3.2"
+
+[workspace.metadata.xcframework]
+include-dir  = "crates/sequins-ffi/include"
+lib-type     = "staticlib"
+macOS        = true
+macOS-targets = ["macOS_aarch", "macOS_x86"]
+iOS          = false
+zip          = false

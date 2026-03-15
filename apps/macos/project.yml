@@ -1,0 +1,99 @@
+name: Sequins
+options:
+  bundleIdPrefix: com.sequins
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "16.0"
+  generateEmptyDirectories: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: false
+
+packages:
+  SequinsData:
+    path: SequinsData
+
+targets:
+  Sequins:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sequins
+    dependencies:
+      - package: SequinsData
+      - sdk: SwiftUI.framework
+      - sdk: AppKit.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sequins.app
+        PRODUCT_NAME: Sequins
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        COMBINE_HIDPI_IMAGES: true
+        ENABLE_HARDENED_RUNTIME: false
+    info:
+      path: Sequins/Info.plist
+      properties:
+        CFBundleDisplayName: Sequins
+        LSMinimumSystemVersion: "14.0"
+        NSHighResolutionCapable: true
+        NSPrincipalClass: NSApplication
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSSupportsAutomaticTermination: true
+        NSSupportsSuddenTermination: true
+        LSUIElement: true
+    entitlements:
+      path: Sequins/Sequins.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
+
+  SequinsTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: SequinsTests
+    dependencies:
+      - target: Sequins
+      - package: SequinsData
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sequins.tests
+        GENERATE_INFOPLIST_FILE: true
+
+  SequinsUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: SequinsUITests
+    dependencies:
+      - target: Sequins
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sequins.uitests
+        GENERATE_INFOPLIST_FILE: true
+        TEST_TARGET_NAME: Sequins
+
+schemes:
+  Sequins:
+    build:
+      targets:
+        Sequins: all
+    run:
+      config: Debug
+      executable: Sequins
+    test:
+      config: Debug
+      targets:
+        - SequinsTests
+        - SequinsUITests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

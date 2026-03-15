@@ -1,0 +1,34 @@
+[package]
+name = "sequins-hot-tier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "In-memory hot tier storage for Sequins"
+
+[dependencies]
+sequins-types = { workspace = true }
+
+# Arrow + DataFusion
+arrow      = { workspace = true }
+datafusion = { workspace = true }
+
+# Lock-free data structures
+crossbeam-epoch = { workspace = true }
+dashmap         = { workspace = true }
+
+# Async
+tokio       = { workspace = true }
+futures     = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }

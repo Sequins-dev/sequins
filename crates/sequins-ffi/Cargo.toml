@@ -1,0 +1,59 @@
+[package]
+name = "sequins-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "C FFI layer for Sequins — Swift/macOS embedding"
+
+[lib]
+crate-type = ["staticlib", "cdylib"]
+
+[features]
+default = ["local"]
+local = []
+
+[dependencies]
+sequins-types   = { workspace = true }
+sequins-query   = { workspace = true }
+sequins-view    = { workspace = true }
+arrow           = { workspace = true }
+arrow-flight    = { workspace = true }
+sequins-storage = { workspace = true }
+sequins-server  = { workspace = true }
+sequins-client  = { workspace = true }
+
+# Async
+tokio     = { workspace = true }
+futures   = { workspace = true }
+
+# Serialization
+serde_json = { workspace = true }
+base64     = { workspace = true }
+
+# Logging
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender   = { workspace = true }
+
+# Utilities
+once_cell    = { workspace = true }
+parking_lot  = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+cbindgen = "0.26"
+
+[package.metadata.xcframework]
+include-dir  = "crates/sequins-ffi/include"
+lib-type     = "staticlib"
+macOS        = true
+macOS-targets = ["macOS_aarch", "macOS_x86"]
+iOS          = false
+zip          = false

@@ -1,0 +1,53 @@
+[package]
+name = "sequins-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CLI for Sequins - query, ingest, and daemon operations"
+
+[[bin]]
+name = "sequins"
+path = "src/main.rs"
+
+[dependencies]
+sequins-types   = { workspace = true }
+sequins-query   = { workspace = true }
+sequins-storage = { workspace = true }
+sequins-server  = { workspace = true }
+sequins-client  = { workspace = true }
+arrow-flight    = { workspace = true }
+
+# OTLP proto types
+opentelemetry-proto = { workspace = true }
+prost = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Async
+tokio        = { workspace = true }
+tokio-stream = { workspace = true }
+futures      = { workspace = true }
+tonic        = { workspace = true }
+
+# Serialization
+serde      = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Logging
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Random data generation for ingest
+rand = { workspace = true }
+uuid = { workspace = true }
+
+arrow = { workspace = true }
+
+[dev-dependencies]

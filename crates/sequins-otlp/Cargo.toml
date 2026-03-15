@@ -1,0 +1,40 @@
+[package]
+name = "sequins-otlp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "OTLP protobuf → Arrow RecordBatch conversion for Sequins"
+
+[dependencies]
+sequins-types = { workspace = true }
+
+# Arrow
+arrow = { workspace = true }
+
+# OpenTelemetry proto
+opentelemetry-proto = { workspace = true }
+
+# CBOR encoding for overflow attribute map
+ciborium = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+hex    = { workspace = true }
+uuid   = { workspace = true }
+prost  = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# DataFusion UDFs (optional)
+datafusion  = { workspace = true, optional = true }
+once_cell   = { workspace = true, optional = true }
+
+[features]
+default = []
+datafusion = ["dep:datafusion", "dep:once_cell"]

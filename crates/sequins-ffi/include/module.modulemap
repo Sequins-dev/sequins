@@ -1,0 +1,4 @@
+module SequinsFFI {
+    header "sequins.h"
+    export *
+}

@@ -1,0 +1,39 @@
+[package]
+name = "sequins-live-query"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Live query infrastructure for Sequins (subscription management, streaming, heartbeats)"
+
+[dependencies]
+sequins-query = { workspace = true }
+sequins-wal   = { workspace = true }
+
+# Arrow + DataFusion
+arrow        = { workspace = true }
+arrow-flight = { workspace = true }
+datafusion   = { workspace = true }
+
+# Async
+tokio        = { workspace = true }
+tokio-stream = { workspace = true }
+futures      = { workspace = true }
+async-trait  = { workspace = true }
+async-stream = { workspace = true }
+
+# Serialization
+serde_json = { workspace = true }
+
+# Utilities
+parking_lot = { workspace = true }
+uuid        = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+[dev-dependencies]
+object_store        = { workspace = true }
+tempfile            = { workspace = true }
+opentelemetry-proto = { workspace = true }

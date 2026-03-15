@@ -1,0 +1,61 @@
+[package]
+name = "sequins-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Unified hot+cold storage engine for Sequins"
+
+[dependencies]
+sequins-types      = { workspace = true }
+sequins-otlp       = { workspace = true, features = ["datafusion"] }
+sequins-query      = { workspace = true }
+sequins-wal        = { workspace = true }
+sequins-live-query = { workspace = true }
+sequins-hot-tier   = { workspace = true }
+sequins-cold-tier  = { workspace = true }
+
+# Arrow + DataFusion
+arrow                = { workspace = true }
+arrow-flight         = { workspace = true }
+datafusion           = { workspace = true }
+datafusion-substrait = { workspace = true }
+
+# gRPC / protobuf
+prost = { workspace = true }
+
+# OpenTelemetry proto
+opentelemetry-proto = { workspace = true }
+
+# Object storage (for error type re-export)
+object_store = { workspace = true }
+
+# Async
+tokio        = { workspace = true }
+futures      = { workspace = true }
+async-trait  = { workspace = true }
+async-stream = { workspace = true }
+
+# Serialization
+serde      = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[features]
+default = []
+s3    = []
+gcs   = []
+azure = []
+
+[dev-dependencies]
+tempfile    = { workspace = true }
+proptest    = { workspace = true }
+turmoil     = "0.6"
+tokio       = { version = "1", features = ["test-util"] }

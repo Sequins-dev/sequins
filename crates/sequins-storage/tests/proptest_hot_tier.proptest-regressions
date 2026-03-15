@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d8a9096681fed464ec30e64b947ae8d932fe23600229972d296a423e99f42fc3 # shrinks to metrics_data = ["aa_a_"]
+cc 98e3e2de9d311236759a7622fecd37c539ef498e7b2dce432095e17f2da56664 # shrinks to logs_data = [(0, "aaAA aAaaa")]
+cc 9cf4a0045817274a196fd45557dcfeda5ff8ce26602458e06846a41c77655702 # shrinks to logs_data = [(0, " AAa a A A")]
+cc 0d4a7231b010e3b9d94bca37676325d4d172005fbed27da9a657b8037a2f055d # shrinks to spans_data = [([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0], "AaAAA", 0, 1)]
+cc facc3af76ba26d6437ac8d890a71ec4c27e11086a470a6c234bfbc01fb6c91a3 # shrinks to spans_data = [([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0], "aAaAA", 0, 1)]

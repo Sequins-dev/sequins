@@ -1,0 +1,36 @@
+# Rust
+/target
+data
+example/node_modules
+
+# Swift / Xcode
+*.xcodeproj
+apps/macos/Sequins/Assets.xcassets/AppIcon.appiconset/icon_*.png
+DerivedData/
+.build/
+.swiftpm/
+Package.resolved
+*.xcframework
+apps/macos/Sequins/Info.plist
+apps/macos/Sequins/Sequins.entitlements
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Node.js
+node_modules/
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# Secrets
+.env
+.env.local
+*.pem
+*.key

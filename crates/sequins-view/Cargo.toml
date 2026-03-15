@@ -1,0 +1,22 @@
+[package]
+name = "sequins-view"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Reactive view model layer for Sequins — transforms SeqlStream into entity-level deltas"
+
+[dependencies]
+sequins-query  = { workspace = true }
+sequins-types  = { workspace = true }
+arrow          = { workspace = true }
+futures        = { workspace = true }
+async-trait    = { workspace = true }
+async-stream   = { workspace = true }
+tokio          = { workspace = true }
+tracing        = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+arrow = { workspace = true }
