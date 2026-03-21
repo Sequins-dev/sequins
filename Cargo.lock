@@ -4828,7 +4828,7 @@ checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
 
 [[package]]
 name = "sequins-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -4856,7 +4856,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -4876,7 +4876,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-cold-tier"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -4911,7 +4911,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -4937,7 +4937,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-hot-tier"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "async-trait",
@@ -4955,7 +4955,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-live-query"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -4978,7 +4978,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-otlp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "ciborium",
@@ -4996,7 +4996,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-query"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5025,7 +5025,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5057,7 +5057,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5089,7 +5089,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5118,7 +5118,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-view"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "async-stream",
@@ -5132,7 +5132,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-wal"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bincode",
  "bytes",
