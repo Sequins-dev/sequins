@@ -95,14 +95,20 @@ enum ChartDataUtils {
         return ticks
     }
 
-    /// Estimate bucket duration from data using the median interval
+    /// Estimate the typical data reporting interval from a set of data points.
+    ///
+    /// Sorts by timestamp first so unsorted input doesn't produce negative intervals.
+    /// Returns the median of all positive inter-point gaps (skips duplicates).
     static func estimateBucketDuration(from dataPoints: [MetricDataPoint]) -> TimeInterval? {
         guard dataPoints.count >= 2 else { return nil }
+        let sorted = dataPoints.sorted { $0.timestamp < $1.timestamp }
         var intervals: [TimeInterval] = []
-        for i in 1..<dataPoints.count {
-            intervals.append(dataPoints[i].timestamp.timeIntervalSince(dataPoints[i-1].timestamp))
+        for i in 1..<sorted.count {
+            let gap = sorted[i].timestamp.timeIntervalSince(sorted[i-1].timestamp)
+            if gap > 0 { intervals.append(gap) }
         }
-        let sorted = intervals.sorted()
-        return sorted[sorted.count / 2]  // Median
+        guard !intervals.isEmpty else { return nil }
+        let sortedIntervals = intervals.sorted()
+        return sortedIntervals[sortedIntervals.count / 2]
     }
 }

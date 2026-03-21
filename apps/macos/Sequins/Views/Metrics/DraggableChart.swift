@@ -12,14 +12,18 @@ struct DraggableChart: View {
     let timeRange: SequinsData.TimeRange?
     let onSelection: (Date, Date) -> Void
 
-    /// Data points segmented by time gaps for gap-aware rendering
+    /// Data points segmented by time gaps for gap-aware rendering.
+    ///
+    /// Uses the larger of the expected bin size and the observed data interval so that
+    /// metrics reporting less frequently than the query bin size still draw connected lines.
     private var segmentedData: [SegmentedDataPoint] {
-        guard let bucket = bucketDuration ?? ChartDataUtils.estimateBucketDuration(from: data) else {
-            // No bucket duration available - treat as single segment, single-point only if there's exactly one point
+        let observed = ChartDataUtils.estimateBucketDuration(from: data)
+        let effective = max(bucketDuration ?? 0, observed ?? 0)
+        guard effective > 0 else {
             let isSingle = data.count == 1
             return data.map { SegmentedDataPoint(timestamp: $0.timestamp, value: $0.value, segmentId: 0, isSinglePointSegment: isSingle) }
         }
-        return ChartDataUtils.segmentDataPoints(data, bucketDuration: bucket)
+        return ChartDataUtils.segmentDataPoints(data, bucketDuration: effective)
     }
 
     @State private var isDragging = false

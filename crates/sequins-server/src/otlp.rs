@@ -88,6 +88,29 @@ impl<I: OtlpIngest + 'static> OtlpServer<I> {
     ///
     /// Returns an error if either server fails to bind or serve
     pub async fn serve(self, grpc_addr: &str, http_addr: &str) -> Result<()> {
+        self.serve_inner(grpc_addr, http_addr, None).await
+    }
+
+    /// Like [`serve`], but signals `ready_tx` once the HTTP listener is bound.
+    ///
+    /// Sends `Ok(())` on success or `Err(message)` if the HTTP bind fails.
+    /// Uses a stdlib `mpsc::Sender` so the caller can block via `recv_timeout`
+    /// without entering a second tokio async context.
+    pub async fn serve_with_ready(
+        self,
+        grpc_addr: &str,
+        http_addr: &str,
+        ready_tx: std::sync::mpsc::Sender<std::result::Result<(), String>>,
+    ) -> Result<()> {
+        self.serve_inner(grpc_addr, http_addr, Some(ready_tx)).await
+    }
+
+    async fn serve_inner(
+        self,
+        grpc_addr: &str,
+        http_addr: &str,
+        ready_tx: Option<std::sync::mpsc::Sender<std::result::Result<(), String>>>,
+    ) -> Result<()> {
         tracing::info!(
             "Starting OTLP server with gRPC={}, HTTP={}",
             grpc_addr,
@@ -121,11 +144,26 @@ impl<I: OtlpIngest + 'static> OtlpServer<I> {
             .add_service(ProfilesServiceServer::new(profiles_service))
             .serve(grpc_addr_parsed);
 
-        // Build HTTP server
+        // Build HTTP server — bind before signalling ready so callers know the port is live
         let http_app = self.router();
-        let http_listener = tokio::net::TcpListener::bind(http_addr)
-            .await
-            .map_err(|e| Error::Http(format!("Failed to bind to {}: {}", http_addr, e)))?;
+        let http_listener = match tokio::net::TcpListener::bind(http_addr).await {
+            Ok(l) => {
+                if let Some(tx) = ready_tx {
+                    let _ = tx.send(Ok(()));
+                }
+                l
+            }
+            Err(e) => {
+                let msg = format!("Failed to bind to {}: {}", http_addr, e);
+                if let Some(tx) = ready_tx {
+                    let _ = tx.send(Err(msg.clone()));
+                }
+                return Err(Error::Http(format!(
+                    "Failed to bind to {}: {}",
+                    http_addr, e
+                )));
+            }
+        };
 
         tracing::info!("gRPC listening on {}", grpc_addr);
         tracing::info!("HTTP listening on {}", http_addr);

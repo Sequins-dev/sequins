@@ -9,12 +9,28 @@ final class AppStateViewModel {
     // Environment management
     let environmentManager = EnvironmentManager()
 
-    // DataSource (local or remote)
+    // MARK: - Always-on local OTLP server
+    //
+    // The embedded server runs continuously regardless of which environment is
+    // selected in the UI.  This mirrors the behaviour of remote environments
+    // (which collect data independently of the app) and lets the local profile
+    // gather telemetry even while the user is inspecting a remote data source.
+
+    /// The always-on local DataSource that owns the embedded storage + OTLP server.
+    private var localDataSource: DataSource?
+
+    /// Status of the embedded local OTLP server.
+    private(set) var localServerStatus: ServerStatus = .stopped
+
+    // MARK: - Query data source (follows selected environment)
+
+    /// DataSource used by the UI for queries. Points to `localDataSource` when
+    /// Development is selected, or to a remote client otherwise.
     var dataSource: DataSource?
     var dataSourceError: String?
-    var dataSourceId: UUID = UUID() // Changes when dataSource changes
+    var dataSourceId: UUID = UUID()
 
-    // Server status
+    /// Status of the active query connection.
     var serverStatus: ServerStatus = .stopped
 
     // UI State
@@ -35,42 +51,27 @@ final class AppStateViewModel {
 
     // MARK: - Time Range Convenience Accessors
 
-    /// Whether we're in live mode (continuously updating)
     var isLive: Bool {
         get { timeRangeState.isLive }
         set { timeRangeState.isLive = newValue }
     }
 
-    /// Current start time for queries
-    var startTime: Date {
-        timeRangeState.startTime
-    }
+    var startTime: Date { timeRangeState.startTime }
+    var endTime: Date { timeRangeState.endTime }
 
-    /// Current end time for queries
-    var endTime: Date {
-        timeRangeState.endTime
-    }
+    func refreshTimeRange() {}
 
-    /// Refresh the time range (call before querying in live mode)
-    func refreshTimeRange() {
-        // In live mode, startTime/endTime are computed properties that always use Date()
-        // No explicit refresh needed - just accessing them gets fresh values
-        // This method exists for compatibility with existing code
-    }
-
-    /// Set a custom absolute time range (switches to paused mode)
     func setCustomTimeRange(start: Date, end: Date) {
         timeRangeState.setCustomRange(start: start, end: end)
     }
 
-    init() {
-        // Don't initialize data source in init - let it happen lazily
-        // This prevents crashes during app startup
-    }
+    init() {}
 
     func configure(with modelContext: ModelContext) {
         environmentManager.configure(with: modelContext)
     }
+
+    // MARK: - Connection entry points
 
     func connectToDataSource() {
         guard let environment = environmentManager.selectedEnvironment else {
@@ -78,89 +79,160 @@ final class AppStateViewModel {
             serverStatus = .error("No environment selected")
             return
         }
-
         connectToEnvironment(environment)
     }
 
     func connectToEnvironment(_ environment: ConnectionEnvironment) {
         dataSourceError = nil
-        serverStatus = .starting
-
-        // Stop health monitoring before switching
         healthMonitorService.stop()
 
-        // Update selection if different
         if !environment.isSelected {
             environmentManager.selectEnvironment(environment)
         }
 
-        do {
-            if environment.isLocal {
-                guard let dbPath = environment.dbPath else {
-                    dataSourceError = "No database path configured"
-                    serverStatus = .error("No database path configured")
-                    return
-                }
+        // Always start the local server (no-op if already running).
+        startLocalServerIfNeeded()
 
-                print("📂 Using database path: \(dbPath)")
-
-                let config = OTLPServerConfig(
-                    grpcPort: environment.effectiveGrpcPort,
-                    httpPort: environment.effectiveHttpPort
-                )
-                dataSource = try DataSource.local(
-                    dbPath: dbPath,
-                    config: config
-                )
-                dataSourceId = UUID() // Trigger view updates
-                serverStatus = .running(
-                    grpcPort: environment.effectiveGrpcPort,
-                    httpPort: environment.effectiveHttpPort
-                )
-                print("✅ OTLP server started - gRPC: \(environment.effectiveGrpcPort), HTTP: \(environment.effectiveHttpPort)")
-            } else {
-                guard let queryURL = environment.remoteQueryURL,
-                      let managementURL = environment.remoteManagementURL else {
-                    dataSourceError = "Remote URLs not configured"
-                    serverStatus = .error("Remote URLs not configured")
-                    return
-                }
-
-                dataSource = try DataSource.remote(
-                    queryURL: queryURL,
-                    managementURL: managementURL
-                )
-                dataSourceId = UUID() // Trigger view updates
-                serverStatus = .connected
-                print("✅ Connected to remote: \(queryURL)")
-            }
-
-            // Start health monitoring with the new data source
-            if let ds = dataSource {
-                healthMonitorService.start(
-                    dataSource: ds,
-                    environmentId: environment.id.uuidString
-                )
-            }
-        } catch {
-            dataSourceError = "Failed to connect: \(error.localizedDescription)"
-            dataSource = nil
-            dataSourceId = UUID() // Trigger view updates even on error
-            serverStatus = .error(error.localizedDescription)
-            print("❌ Failed to start data source: \(error)")
+        // Wire up the query data source for the selected environment.
+        if environment.isLocal {
+            connectQueryToLocal()
+        } else {
+            connectRemoteEnvironment(environment)
         }
     }
 
+    /// Reconnect the query data source, restarting the local server only if it's not healthy.
     func reconnect() {
+        // Only restart the local server if it's not currently running.
+        // If it's healthy, keep it alive to avoid the port-release/rebind race.
+        if case .running = localServerStatus {
+            // Local server is healthy — keep it, just reset the query connection.
+        } else {
+            localDataSource = nil
+            localServerStatus = .stopped
+        }
+
+        // Reset the query data source and emit a sentinel UUID so any in-flight
+        // .task(id: dataSourceId) bodies cancel and return early.
         dataSource = nil
+        dataSourceError = nil
         serverStatus = .stopped
+        dataSourceId = UUID()
+        healthMonitorService.stop()
+
+        // Re-connect. For a healthy local server, connectQueryToLocal() will wire up
+        // the query data source synchronously and issue a second dataSourceId change
+        // immediately — so live queries restart in the same run-loop cycle.
         connectToDataSource()
     }
 
     func switchToEnvironment(_ environment: ConnectionEnvironment) {
+        // Keep the local server running — only reset the query connection.
         dataSource = nil
+        dataSourceError = nil
         serverStatus = .stopped
+        healthMonitorService.stop()
         connectToEnvironment(environment)
+    }
+
+    // MARK: - Private helpers
+
+    /// Starts the embedded local server if it is not already running.
+    private func startLocalServerIfNeeded() {
+        guard localDataSource == nil,
+              let localEnv = environmentManager.localEnvironment,
+              let dbPath = localEnv.dbPath else { return }
+
+        let grpcPort = localEnv.effectiveGrpcPort
+        let httpPort = localEnv.effectiveHttpPort
+        let config = OTLPServerConfig(grpcPort: grpcPort, httpPort: httpPort)
+
+        localServerStatus = .starting
+
+        // If local env is currently selected, mirror the starting state in serverStatus.
+        if environmentManager.selectedEnvironment?.isLocal == true {
+            serverStatus = .starting
+        }
+
+        Task {
+            do {
+                let ds = try await Task.detached(priority: .userInitiated) {
+                    try DataSource.local(dbPath: dbPath, config: config)
+                }.value
+
+                self.localDataSource = ds
+                self.localServerStatus = .running(grpcPort: grpcPort, httpPort: httpPort)
+                print("✅ Local OTLP server running — gRPC: \(grpcPort), HTTP: \(httpPort)")
+
+                // If local env is still selected, hook up the query data source.
+                if self.environmentManager.selectedEnvironment?.isLocal == true {
+                    self.dataSource = ds
+                    self.dataSourceId = UUID()
+                    self.serverStatus = .running(grpcPort: grpcPort, httpPort: httpPort)
+                    self.healthMonitorService.start(
+                        dataSource: ds,
+                        environmentId: localEnv.id.uuidString
+                    )
+                }
+            } catch {
+                self.localDataSource = nil
+                self.localServerStatus = .error(error.localizedDescription)
+                print("❌ Local OTLP server failed: \(error)")
+
+                if self.environmentManager.selectedEnvironment?.isLocal == true {
+                    self.dataSourceError = error.localizedDescription
+                    self.serverStatus = .error(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    /// Sets up the query data source to use the already-running local server.
+    private func connectQueryToLocal() {
+        if let localDs = localDataSource {
+            // Server is already up — connect immediately.
+            dataSource = localDs
+            dataSourceId = UUID()
+            serverStatus = localServerStatus
+            if let localEnv = environmentManager.localEnvironment {
+                healthMonitorService.start(
+                    dataSource: localDs,
+                    environmentId: localEnv.id.uuidString
+                )
+            }
+        } else {
+            // Server is still starting (startLocalServerIfNeeded is in flight).
+            // When the Task completes it will set dataSource and serverStatus.
+            serverStatus = localServerStatus // .starting or .stopped
+        }
+    }
+
+    private func connectRemoteEnvironment(_ environment: ConnectionEnvironment) {
+        guard let queryURL = environment.remoteQueryURL,
+              let managementURL = environment.remoteManagementURL else {
+            dataSourceError = "Remote URLs not configured"
+            serverStatus = .error("Remote URLs not configured")
+            return
+        }
+
+        do {
+            dataSource = try DataSource.remote(
+                queryURL: queryURL,
+                managementURL: managementURL
+            )
+            dataSourceId = UUID()
+            serverStatus = .connected
+            print("✅ Connected to remote: \(queryURL)")
+            if let ds = dataSource {
+                healthMonitorService.start(dataSource: ds, environmentId: environment.id.uuidString)
+            }
+        } catch {
+            dataSourceError = "Failed to connect: \(error.localizedDescription)"
+            dataSource = nil
+            dataSourceId = UUID()
+            serverStatus = .error(error.localizedDescription)
+            print("❌ Failed to connect to remote: \(error)")
+        }
     }
 }
 
@@ -227,7 +299,6 @@ enum LogSeverity: String, CaseIterable {
     case trace = "Trace"
     case fatal = "Fatal"
 
-    /// Initialize from SequinsData.LogSeverity
     init(from dataSeverity: SequinsData.LogSeverity) {
         switch dataSeverity {
         case .trace: self = .trace
@@ -239,7 +310,6 @@ enum LogSeverity: String, CaseIterable {
         }
     }
 
-    /// Convert to SequinsData.LogSeverity for queries
     var dataLogSeverity: SequinsData.LogSeverity {
         switch self {
         case .trace: return .trace

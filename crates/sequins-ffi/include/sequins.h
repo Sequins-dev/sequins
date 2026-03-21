@@ -1528,6 +1528,18 @@ bool sequins_data_source_get_otlp_ports(struct CDataSource *data_source,
                                         uint16_t *http_port_out);
 
 /**
+ * Check whether the OTLP server task is still alive
+ *
+ * Returns `true` when the server has been started and its background task has
+ * not yet exited.  Returns `false` if the server was never started, or if the
+ * task has exited (e.g., because a port was stolen after startup).
+ *
+ * # Safety
+ * * `data_source` must be a valid local DataSource pointer (or null)
+ */
+bool sequins_data_source_is_server_alive(struct CDataSource *data_source);
+
+/**
  * Free a string allocated by Rust
  *
  * # Safety

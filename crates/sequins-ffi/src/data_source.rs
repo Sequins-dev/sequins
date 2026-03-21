@@ -22,13 +22,24 @@ pub enum CDataSource {}
 
 /// OTLP server handle for background task management
 #[cfg(feature = "local")]
-#[allow(dead_code)] // task fields will be used for graceful shutdown later
 pub(crate) struct OtlpServerHandle {
     server_task: tokio::task::JoinHandle<()>,
     health_task: tokio::task::JoinHandle<()>,
     flush_task: tokio::task::JoinHandle<()>,
     grpc_port: u16,
     http_port: u16,
+}
+
+#[cfg(feature = "local")]
+impl Drop for OtlpServerHandle {
+    fn drop(&mut self) {
+        // Abort all background tasks so they release their Arc<Storage> references
+        // and free the bound ports immediately.  Dropping a JoinHandle only detaches
+        // (the task keeps running), so we must abort explicitly.
+        self.server_task.abort();
+        self.flush_task.abort();
+        self.health_task.abort();
+    }
 }
 
 /// Internal Rust implementation of DataSource
@@ -267,15 +278,51 @@ pub extern "C" fn sequins_data_source_start_otlp_server(
             // Create OTLP server
             let server = OtlpServer::new(storage.clone());
 
-            // Spawn server task in background
             let grpc_addr = format!("0.0.0.0:{}", grpc_port);
             let http_addr = format!("0.0.0.0:{}", http_port);
 
+            // Use a stdlib sync channel so we can block on startup confirmation without
+            // requiring a second tokio `block_on` call (which can be unreliable when
+            // called from a foreign thread pool such as Swift's cooperative executor).
+            let (ready_tx, ready_rx) =
+                std::sync::mpsc::channel::<std::result::Result<(), String>>();
+
+            let grpc_addr_task = grpc_addr.clone();
+            let http_addr_task = http_addr.clone();
             let server_task = super::runtime::RUNTIME.spawn(async move {
-                if let Err(e) = server.serve(&grpc_addr, &http_addr).await {
+                if let Err(e) = server
+                    .serve_with_ready(&grpc_addr_task, &http_addr_task, ready_tx)
+                    .await
+                {
                     tracing::error!(error = %e, "OTLP server error");
                 }
             });
+
+            // Block the calling thread until the HTTP listener is bound (or fails).
+            // 5-second safety timeout in case the task is unexpectedly slow to start.
+            match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(Ok(())) => {
+                    // HTTP listener is bound — server is up.
+                }
+                Ok(Err(bind_err)) => {
+                    set_error(
+                        error_out,
+                        &format!("OTLP server failed to start: {}", bind_err),
+                    );
+                    server_task.abort();
+                    return false;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    set_error(error_out, "OTLP server task exited before signalling ready");
+                    server_task.abort();
+                    return false;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    set_error(error_out, "Timed out waiting for OTLP server to start");
+                    server_task.abort();
+                    return false;
+                }
+            }
 
             // Start background flush task to persist data from hot tier to cold tier
             // We spawn this on the FFI runtime instead of using Storage::start_background_flush
@@ -410,6 +457,34 @@ pub extern "C" fn sequins_data_source_get_otlp_ports(
         *grpc_port_out = 0;
         *http_port_out = 0;
     }
+    false
+}
+
+/// Check whether the OTLP server task is still alive
+///
+/// Returns `true` when the server has been started and its background task has
+/// not yet exited.  Returns `false` if the server was never started, or if the
+/// task has exited (e.g., because a port was stolen after startup).
+///
+/// # Safety
+/// * `data_source` must be a valid local DataSource pointer (or null)
+#[cfg(feature = "local")]
+#[no_mangle]
+pub extern "C" fn sequins_data_source_is_server_alive(data_source: *mut CDataSource) -> bool {
+    if data_source.is_null() {
+        return false;
+    }
+
+    let impl_ref = unsafe { &*(data_source as *const DataSourceImpl) };
+
+    if let DataSourceImpl::Local { otlp_server, .. } = impl_ref {
+        if let Ok(server_guard) = otlp_server.lock() {
+            if let Some(handle) = &*server_guard {
+                return !handle.server_task.is_finished();
+            }
+        }
+    }
+
     false
 }
 

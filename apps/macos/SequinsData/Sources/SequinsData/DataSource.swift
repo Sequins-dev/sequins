@@ -97,6 +97,16 @@ public final class DataSource {
         return pointer
     }
 
+    // MARK: - Server Status
+
+    /// Whether the embedded OTLP server task is still alive.
+    ///
+    /// Returns `false` if the server was never started or has crashed since startup
+    /// (e.g., because another process grabbed the port).
+    public func isServerAlive() -> Bool {
+        return sequins_data_source_is_server_alive(pointer)
+    }
+
     // MARK: - Health Configuration
 
     /// Get the current health threshold configuration

@@ -18,14 +18,20 @@ struct ChartSeries: Identifiable {
         self.bucketDuration = bucketDuration
     }
 
-    /// Data points segmented by time gaps for gap-aware rendering
+    /// Data points segmented by time gaps for gap-aware rendering.
+    ///
+    /// Uses the larger of the expected bin size and the observed data interval so that
+    /// metrics reporting less frequently than the query bin size still draw connected lines.
+    /// (e.g. a metric reporting every 30 s with bin=5s would otherwise have a 30 s gap that
+    /// exceeds the 7.5 s threshold and renders each point as a disconnected PointMark.)
     var segmentedData: [SegmentedDataPoint] {
-        guard let bucket = bucketDuration ?? ChartDataUtils.estimateBucketDuration(from: data) else {
-            // No bucket duration available - treat as single segment, single-point only if there's exactly one point
+        let observed = ChartDataUtils.estimateBucketDuration(from: data)
+        let effective = max(bucketDuration ?? 0, observed ?? 0)
+        guard effective > 0 else {
             let isSingle = data.count == 1
             return data.map { SegmentedDataPoint(timestamp: $0.timestamp, value: $0.value, segmentId: 0, isSinglePointSegment: isSingle) }
         }
-        return ChartDataUtils.segmentDataPoints(data, bucketDuration: bucket)
+        return ChartDataUtils.segmentDataPoints(data, bucketDuration: effective)
     }
 }
 
