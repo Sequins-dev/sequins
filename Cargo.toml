@@ -13,6 +13,7 @@ members = [
     "crates/sequins-server",
     "crates/sequins-ffi",
     "crates/sequins-cli",
+    "apps/linux",
 ]
 resolver = "2"
 

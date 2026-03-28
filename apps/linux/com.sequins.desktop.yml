@@ -1,0 +1,56 @@
+app-id: com.sequins.desktop
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: sequins-desktop
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --share=network
+  - --device=dri
+  - --filesystem=xdg-run/dconf
+  - --talk-name=ca.desrt.dconf
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/sequins-desktop/cargo
+    CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
+modules:
+  - name: protobuf
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -Dprotobuf_BUILD_TESTS=OFF
+      - -Dprotobuf_BUILD_SHARED_LIBS=OFF
+    sources:
+      - type: archive
+        url: https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protobuf-29.3.tar.gz
+        sha256: 008a11cc56f9b96679b4c285fd05f46d317d685be3ab524b2a310be0fbad987e
+    cleanup:
+      - /bin/protoc
+      - /include
+      - /lib/pkgconfig
+      - /lib/libprotobuf*
+      - /lib/libprotoc*
+      - /lib/libabsl*
+      - /lib/libupb*
+      - /lib/libutf8*
+
+  - name: sequins-desktop
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --offline --package sequins-linux
+      - install -Dm755 target/release/sequins-desktop /app/bin/sequins-desktop
+      - install -Dm644 apps/linux/data/com.sequins.desktop.desktop /app/share/applications/com.sequins.desktop.desktop
+      - install -Dm644 apps/linux/data/com.sequins.desktop.metainfo.xml /app/share/metainfo/com.sequins.desktop.metainfo.xml
+      - install -Dm644 apps/linux/data/icons/hicolor/scalable/apps/com.sequins.desktop.svg /app/share/icons/hicolor/scalable/apps/com.sequins.desktop.svg
+    sources:
+      - type: dir
+        path: ../..
+      - cargo-sources.json

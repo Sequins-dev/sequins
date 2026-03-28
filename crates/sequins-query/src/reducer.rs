@@ -369,7 +369,56 @@ fn col_value_to_json(array: &dyn Array, row_idx: usize) -> Value {
                 Value::Null
             }
         }
+        ArrowDataType::Map(_, _) => {
+            use arrow::array::Array as _;
+            use arrow::array::{LargeBinaryArray, MapArray, StringArray as SA};
+            if let Some(map_arr) = array.as_any().downcast_ref::<MapArray>() {
+                let entries = map_arr.value(row_idx);
+                let keys = entries.column(0);
+                let vals = entries.column(1);
+                let mut obj = serde_json::Map::new();
+                for i in 0..entries.len() {
+                    if entries.is_null(i) {
+                        continue;
+                    }
+                    let key = keys
+                        .as_any()
+                        .downcast_ref::<SA>()
+                        .map(|a| a.value(i).to_string())
+                        .unwrap_or_default();
+                    if key.is_empty() {
+                        continue;
+                    }
+                    let val = if vals.is_null(i) {
+                        Value::Null
+                    } else if let Some(ba) = vals.as_any().downcast_ref::<LargeBinaryArray>() {
+                        let bytes = ba.value(i);
+                        let decoded = cbor_decode_to_string(bytes);
+                        Value::String(decoded)
+                    } else {
+                        Value::Null
+                    };
+                    obj.insert(key, val);
+                }
+                Value::Object(obj)
+            } else {
+                Value::Null
+            }
+        }
         _ => Value::Null,
+    }
+}
+
+fn cbor_decode_to_string(bytes: &[u8]) -> String {
+    use std::io::Cursor;
+    let mut cursor = Cursor::new(bytes);
+    match ciborium::from_reader::<ciborium::Value, _>(&mut cursor) {
+        Ok(ciborium::Value::Text(s)) => s,
+        Ok(ciborium::Value::Integer(i)) => i128::from(i).to_string(),
+        Ok(ciborium::Value::Float(f)) => f.to_string(),
+        Ok(ciborium::Value::Bool(b)) => b.to_string(),
+        Ok(other) => format!("{other:?}"),
+        Err(_) => String::from("(decode error)"),
     }
 }
 

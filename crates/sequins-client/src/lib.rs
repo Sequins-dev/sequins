@@ -11,8 +11,9 @@ use async_trait::async_trait;
 use datafusion::execution::context::SessionContext;
 use futures::StreamExt;
 use prost::Message as _;
+use sequins_query::ast::QueryMode;
 use sequins_query::error::QueryError;
-use sequins_query::{compile, schema_context, QueryApi, QueryExec, SeqlStream};
+use sequins_query::{compile, compile_ast, schema_context, QueryApi, QueryExec, SeqlStream};
 use std::sync::Arc;
 use tonic::transport::{Channel, Endpoint};
 
@@ -44,6 +45,19 @@ impl RemoteClient {
         })
     }
 
+    /// Execute a SeQL query in live streaming mode.
+    ///
+    /// Forces `QueryMode::Live` before compiling — the server will push
+    /// incremental Append/Update/Expire/Replace/Heartbeat frames.
+    pub async fn query_live(&self, seql: &str) -> Result<SeqlStream, QueryError> {
+        let mut ast = sequins_query::parser::parse(seql).map_err(|e| QueryError::InvalidAst {
+            message: format!("Parse error at offset {}: {}", e.offset, e.message),
+        })?;
+        ast.mode = QueryMode::Live;
+        let plan_bytes = compile_ast(ast, &self.schema_ctx).await?;
+        self.execute_plan(plan_bytes).await
+    }
+
     /// Create a client pointing at the default localhost Flight SQL address.
     pub fn localhost() -> Result<Self, ClientError> {
         Self::new("http://localhost:4319")
@@ -61,7 +75,8 @@ impl RemoteClient {
         // connect_lazy() must be called from an async context (needs a tokio reactor).
         // execute_plan() is always called from an async context, so this is safe.
         let channel = self.endpoint.clone().connect_lazy();
-        let mut client = FlightServiceClient::new(channel);
+        let mut client =
+            FlightServiceClient::new(channel).max_decoding_message_size(64 * 1024 * 1024);
 
         // Step 1: GetFlightInfo → get ticket
         let cmd = CommandStatementSubstraitPlan {

@@ -34,8 +34,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 # Async
-async-trait = { workspace = true }
-futures     = { workspace = true }
+async-trait  = { workspace = true }
+futures      = { workspace = true }
+tokio-stream = { workspace = true }
 
 # OpenTelemetry proto (for OTLP HTTP ingest)
 opentelemetry-proto = { workspace = true }

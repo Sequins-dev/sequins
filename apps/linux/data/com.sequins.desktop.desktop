@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Sequins
+Comment=OpenTelemetry observability viewer
+Exec=sequins-desktop
+Icon=com.sequins.desktop
+Terminal=false
+Categories=Development;Debugger;Monitor;
+Keywords=OpenTelemetry;OTLP;traces;logs;metrics;observability;
+StartupWMClass=com.sequins.desktop

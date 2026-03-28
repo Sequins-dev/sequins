@@ -37,6 +37,9 @@ arrow-flight         = { workspace = true }
 # Binary encoding (for Binary Arrow column type)
 base64 = { workspace = true }
 
+# CBOR decoding (for _overflow_attrs Map<Utf8, LargeBinary> values)
+ciborium = { workspace = true }
+
 # Metadata serialization
 bytes      = { workspace = true }
 pbjson-types = "0.8"
