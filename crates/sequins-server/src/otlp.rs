@@ -77,6 +77,80 @@ impl<I: OtlpIngest + 'static> OtlpServer<I> {
             .with_state(ingest)
     }
 
+    /// Serve only the gRPC OTLP endpoint.
+    ///
+    /// Binds the listener before signalling `ready_tx` so the caller knows the
+    /// port is live before this future resolves.
+    pub async fn serve_grpc_only(
+        self,
+        grpc_addr: &str,
+        ready_tx: std::sync::mpsc::Sender<std::result::Result<(), String>>,
+    ) -> Result<()> {
+        use tokio_stream::wrappers::TcpListenerStream;
+
+        let listener = match tokio::net::TcpListener::bind(grpc_addr).await {
+            Ok(l) => {
+                let _ = ready_tx.send(Ok(()));
+                l
+            }
+            Err(e) => {
+                let msg = format!("Failed to bind gRPC to {}: {}", grpc_addr, e);
+                let _ = ready_tx.send(Err(msg.clone()));
+                return Err(crate::error::Error::Grpc(msg));
+            }
+        };
+
+        let ingest = Arc::clone(&self.ingest);
+        let trace_service = OtlpTraceService {
+            ingest: Arc::clone(&ingest),
+        };
+        let logs_service = OtlpLogsService {
+            ingest: Arc::clone(&ingest),
+        };
+        let metrics_service = OtlpMetricsService {
+            ingest: Arc::clone(&ingest),
+        };
+        let profiles_service = OtlpProfilesService { ingest };
+
+        tracing::info!("gRPC listening on {}", grpc_addr);
+        Server::builder()
+            .add_service(TraceServiceServer::new(trace_service))
+            .add_service(LogsServiceServer::new(logs_service))
+            .add_service(MetricsServiceServer::new(metrics_service))
+            .add_service(ProfilesServiceServer::new(profiles_service))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .map_err(|e| crate::error::Error::Grpc(format!("gRPC server error: {}", e)))
+    }
+
+    /// Serve only the HTTP OTLP endpoint.
+    ///
+    /// Binds the listener before signalling `ready_tx` so the caller knows the
+    /// port is live before this future resolves.
+    pub async fn serve_http_only(
+        self,
+        http_addr: &str,
+        ready_tx: std::sync::mpsc::Sender<std::result::Result<(), String>>,
+    ) -> Result<()> {
+        let http_app = self.router();
+        let http_listener = match tokio::net::TcpListener::bind(http_addr).await {
+            Ok(l) => {
+                let _ = ready_tx.send(Ok(()));
+                l
+            }
+            Err(e) => {
+                let msg = format!("Failed to bind HTTP to {}: {}", http_addr, e);
+                let _ = ready_tx.send(Err(msg.clone()));
+                return Err(crate::error::Error::Http(msg));
+            }
+        };
+
+        tracing::info!("HTTP listening on {}", http_addr);
+        axum::serve(http_listener, http_app)
+            .await
+            .map_err(|e| crate::error::Error::Http(format!("HTTP server error: {}", e)))
+    }
+
     /// Serve both gRPC and HTTP OTLP endpoints
     ///
     /// # Arguments

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.sequins.desktop</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+
+  <name>Sequins</name>
+  <summary>OpenTelemetry observability viewer for developers</summary>
+
+  <description>
+    <p>
+      Sequins is a local-first OpenTelemetry observability viewer. It ingests
+      traces, logs, metrics, and profiles over OTLP (gRPC and HTTP/JSON) and
+      lets you explore them in real time — no cloud account required.
+    </p>
+    <p>Features include:</p>
+    <ul>
+      <li>Live trace and span waterfall view</li>
+      <li>Structured log exploration with full-text search</li>
+      <li>Metrics charts for gauges, counters, and histograms</li>
+      <li>Continuous profiling with flamegraph visualization</li>
+      <li>SeQL — a pipe-based query language for cross-signal correlation</li>
+      <li>Connect to remote Sequins instances for team observability</li>
+    </ul>
+  </description>
+
+  <url type="homepage">https://github.com/Sequins-dev/sequins</url>
+  <url type="bugtracker">https://github.com/Sequins-dev/sequins/issues</url>
+
+  <launchable type="desktop-id">com.sequins.desktop.desktop</launchable>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Traces view showing span waterfall</caption>
+    </screenshot>
+  </screenshots>
+
+  <releases>
+    <release version="0.1.0" date="2025-03-15">
+      <description>
+        <p>Initial release of Sequins.</p>
+      </description>
+    </release>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+</component>

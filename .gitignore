@@ -1,6 +1,9 @@
 # Rust
 /target
-data
+
+# Flatpak (generated from Cargo.lock, never committed)
+cargo-sources.json
+/data
 example/node_modules
 
 # Swift / Xcode
