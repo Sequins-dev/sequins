@@ -29,13 +29,14 @@ final class DataSourceTests: XCTestCase {
     }
 
     func testCreateLocalDataSourceMultipleTimes() throws {
-        // Test that we can create multiple data sources
+        // Two independent data sources must use different ports
         let dbPath1 = tempDir.appendingPathComponent("test1.db").path
         let dbPath2 = tempDir.appendingPathComponent("test2.db").path
-        let config = OTLPServerConfig(grpcPort: 4317, httpPort: 4318)
+        let config1 = OTLPServerConfig(grpcPort: 14317, httpPort: 14318)
+        let config2 = OTLPServerConfig(grpcPort: 14319, httpPort: 14320)
 
-        let dataSource1 = try DataSource.local(dbPath: dbPath1, config: config)
-        let dataSource2 = try DataSource.local(dbPath: dbPath2, config: config)
+        let dataSource1 = try DataSource.local(dbPath: dbPath1, config: config1)
+        let dataSource2 = try DataSource.local(dbPath: dbPath2, config: config2)
 
         XCTAssertNotNil(dataSource1)
         XCTAssertNotNil(dataSource2)
