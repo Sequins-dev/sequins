@@ -364,7 +364,7 @@ jobs:
     needs: bump-version
     if: ${{ !failure() && !cancelled() }}
     container:
-      image: bilelmoussaoui/flatpak-github-actions:gnome-47
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
       options: --privileged
 
     steps:
@@ -374,6 +374,7 @@ jobs:
 
       - name: Generate cargo sources
         run: |
+          dnf install -y python3-pip
           pip3 install aiohttp toml tomlkit
           python3 build-aux/flatpak-cargo-generator.py Cargo.lock \
             -o apps/linux/cargo-sources.json
@@ -383,6 +384,7 @@ jobs:
         with:
           manifest-path: apps/linux/com.sequins.desktop.yml
           bundle: sequins-desktop-x86_64.flatpak
+          arch: x86_64
           cache-key: flatpak-builder-x86_64-${{ github.sha }}
 
       - name: Rename and checksum
@@ -404,7 +406,7 @@ jobs:
     needs: bump-version
     if: ${{ !failure() && !cancelled() }}
     container:
-      image: bilelmoussaoui/flatpak-github-actions:gnome-47
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
       options: --privileged
 
     steps:
@@ -414,6 +416,7 @@ jobs:
 
       - name: Generate cargo sources
         run: |
+          dnf install -y python3-pip
           pip3 install aiohttp toml tomlkit
           python3 build-aux/flatpak-cargo-generator.py Cargo.lock \
             -o apps/linux/cargo-sources.json
@@ -423,6 +426,7 @@ jobs:
         with:
           manifest-path: apps/linux/com.sequins.desktop.yml
           bundle: sequins-desktop-aarch64.flatpak
+          arch: aarch64
           cache-key: flatpak-builder-aarch64-${{ github.sha }}
 
       - name: Rename and checksum
