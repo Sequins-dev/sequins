@@ -1,0 +1,36 @@
+[package]
+name = "sequins-otel"
+version = "0.1.0"
+edition = "2021"
+description = "OpenTelemetry distro for Sequins — zero-config observability for local development"
+license = "MIT"
+keywords = ["opentelemetry", "sequins", "observability", "otel", "tracing"]
+categories = ["development-tools", "observability"]
+
+[features]
+default = []
+profiling = [
+    "dep:pprof",
+    "dep:opentelemetry-proto",
+    "dep:prost",
+    "dep:reqwest",
+]
+
+[dependencies]
+opentelemetry = { version = "0.24", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.24", features = ["rt-tokio", "logs", "metrics"] }
+opentelemetry-otlp = { version = "0.17", features = ["grpc-tonic", "logs", "metrics"] }
+opentelemetry-appender-tracing = "0.5"
+tracing-opentelemetry = "0.25"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1"
+tokio = { version = "1", features = ["time", "sync", "rt"] }
+
+# Profiling dependencies (optional)
+pprof = { version = "0.15", default-features = false, optional = true }
+opentelemetry-proto = { version = "0.31", features = ["gen-tonic-messages", "profiles"], optional = true }
+prost = { version = "0.14", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
