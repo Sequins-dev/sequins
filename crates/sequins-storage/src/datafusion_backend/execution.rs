@@ -996,6 +996,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_live_query_resources_append_delta() {
+        let (storage, _temp) = TestStorageBuilder::new().build().await;
+        let storage = Arc::new(storage);
+
+        let backend = DataFusionBackend::new(Arc::clone(&storage));
+        let mut stream = backend.query_live("resources last 24h").await.unwrap();
+
+        let _hist = collect_historical(&mut stream).await;
+
+        storage.ingest_traces(make_test_otlp_traces(1, 1)).await.unwrap();
+
+        let fd = next_fd(&mut stream).await;
+
+        if is_append(&fd) {
+            // good
+        } else if is_heartbeat(&fd) {
+            let fd2 = next_fd(&mut stream).await;
+            assert!(is_append(&fd2), "expected Append after Heartbeat");
+        } else {
+            panic!(
+                "expected Append frame for resources query, got {:?}",
+                get_metadata(&fd)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_live_query_aggregated_replace_delta() {
         let (storage, _temp) = TestStorageBuilder::new().build().await;
         let storage = Arc::new(storage);
