@@ -456,7 +456,10 @@ mod tests {
         })
         .await;
 
-        assert!(found.is_ok(), "timeout: Signal::Spans not broadcast after ingest_traces");
+        assert!(
+            found.is_ok(),
+            "timeout: Signal::Spans not broadcast after ingest_traces"
+        );
     }
 
     #[tokio::test]
@@ -478,7 +481,10 @@ mod tests {
         })
         .await;
 
-        assert!(found.is_ok(), "timeout: Signal::Logs not broadcast after ingest_logs");
+        assert!(
+            found.is_ok(),
+            "timeout: Signal::Logs not broadcast after ingest_logs"
+        );
     }
 
     #[tokio::test]
@@ -511,13 +517,20 @@ mod tests {
         let (storage, _tmp) = TestStorageBuilder::new().build().await;
         let mut rx = storage.live_broadcast.subscribe();
 
-        storage.ingest_traces(make_test_otlp_traces(1, 1)).await.unwrap();
+        storage
+            .ingest_traces(make_test_otlp_traces(1, 1))
+            .await
+            .unwrap();
 
         let found = tokio::time::timeout(Duration::from_millis(200), async {
             loop {
                 let (signal, batch) = rx.recv().await.unwrap();
                 if signal == Signal::Resources {
-                    assert_eq!(batch.num_rows(), 1, "resource broadcast should be single-row");
+                    assert_eq!(
+                        batch.num_rows(),
+                        1,
+                        "resource broadcast should be single-row"
+                    );
                     return;
                 }
             }

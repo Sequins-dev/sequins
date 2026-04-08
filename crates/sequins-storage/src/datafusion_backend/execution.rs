@@ -1005,7 +1005,10 @@ mod tests {
 
         let _hist = collect_historical(&mut stream).await;
 
-        storage.ingest_traces(make_test_otlp_traces(1, 1)).await.unwrap();
+        storage
+            .ingest_traces(make_test_otlp_traces(1, 1))
+            .await
+            .unwrap();
 
         let fd = next_fd(&mut stream).await;
 
