@@ -22,6 +22,13 @@ pub type ResourceId = u32;
 /// Compact scope ID — content-addressed FNV-1a hash of (name, version, attributes).
 pub type ScopeId = u32;
 
+/// Result of resource registration, including the new batch when the resource
+/// is first seen and a row is appended to the hot tier.
+pub struct ResourceRegistration {
+    pub id: ResourceId,
+    pub batch: Option<Arc<RecordBatch>>,
+}
+
 /// Stable FNV-1a 32-bit hash.
 ///
 /// Unlike `DefaultHasher`, this uses a fixed seed so the result is deterministic
@@ -297,13 +304,22 @@ impl HotTier {
     /// registrations for the same attributes are idempotent — the first writer wins
     /// and subsequent calls return the same ID without a data race.
     pub fn register_resource(&self, attributes: &HashMap<String, String>) -> Result<ResourceId> {
+        Ok(self.register_resource_with_batch(attributes)?.id)
+    }
+
+    /// Register a resource and return the created resource batch when the
+    /// resource is newly inserted.
+    pub fn register_resource_with_batch(
+        &self,
+        attributes: &HashMap<String, String>,
+    ) -> Result<ResourceRegistration> {
         let id = resource_hash(attributes);
 
         // DashSet::insert returns true only when the value is newly inserted,
         // so at most one row per unique ID is ever pushed to the chain —
         // concurrent insertions of the same ID are safely collapsed here.
         if !self.known_resources.insert(id) {
-            return Ok(id);
+            return Ok(ResourceRegistration { id, batch: None });
         }
 
         let service_name = attributes
@@ -314,8 +330,9 @@ impl HotTier {
         let schema = arrow_schema::resource_schema();
         let batch = build_resource_batch(id, service_name, &attrs_json, &schema)
             .map_err(HotTierError::Storage)?;
+        let batch = Arc::new(batch);
         self.resources.push(
-            Arc::new(batch),
+            Arc::clone(&batch),
             BatchMeta {
                 min_timestamp: 0,
                 max_timestamp: 0,
@@ -323,7 +340,10 @@ impl HotTier {
             },
         );
 
-        Ok(id)
+        Ok(ResourceRegistration {
+            id,
+            batch: Some(batch),
+        })
     }
 
     /// Register a scope and get its content-addressed ID.

@@ -21,13 +21,14 @@ impl Storage {
     fn register_resource(
         &self,
         resource: Option<&opentelemetry_proto::tonic::resource::v1::Resource>,
-    ) -> sequins_types::error::Result<u32> {
+    ) -> sequins_types::error::Result<(u32, Option<Arc<arrow::record_batch::RecordBatch>>)> {
         let resource_attrs = resource
             .map(|r| sequins_otlp::convert_resource_attributes(&r.attributes))
             .unwrap_or_default();
 
         self.hot_tier
-            .register_resource(&resource_attrs)
+            .register_resource_with_batch(&resource_attrs)
+            .map(|registration| (registration.id, registration.batch))
             .map_err(|e| {
                 sequins_types::error::Error::Other(format!("Failed to register resource: {}", e))
             })
@@ -71,7 +72,10 @@ impl sequins_types::OtlpIngest for Storage {
 
         for resource_spans in request.resource_spans {
             let resource = resource_spans.resource.as_ref();
-            let resource_id = self.register_resource(resource)?;
+            let (resource_id, resource_batch) = self.register_resource(resource)?;
+            if let Some(batch) = resource_batch {
+                let _ = self.live_broadcast.send((Signal::Resources, batch));
+            }
 
             for scope_spans in resource_spans.scope_spans {
                 let scope_id = self.register_scope(scope_spans.scope.as_ref())?;
@@ -168,7 +172,10 @@ impl sequins_types::OtlpIngest for Storage {
 
         for resource_logs in request.resource_logs {
             let resource = resource_logs.resource.as_ref();
-            let resource_id = self.register_resource(resource)?;
+            let (resource_id, resource_batch) = self.register_resource(resource)?;
+            if let Some(batch) = resource_batch {
+                let _ = self.live_broadcast.send((Signal::Resources, batch));
+            }
             let service_name = sequins_otlp::extract_service_name(resource);
 
             for scope_logs in resource_logs.scope_logs {
@@ -223,7 +230,10 @@ impl sequins_types::OtlpIngest for Storage {
 
         for resource_metrics in request.resource_metrics {
             let resource = resource_metrics.resource.as_ref();
-            let resource_id = self.register_resource(resource)?;
+            let (resource_id, resource_batch) = self.register_resource(resource)?;
+            if let Some(batch) = resource_batch {
+                let _ = self.live_broadcast.send((Signal::Resources, batch));
+            }
             let service_name = sequins_otlp::extract_service_name(resource);
 
             for scope_metrics in resource_metrics.scope_metrics {
@@ -347,7 +357,10 @@ impl sequins_types::OtlpIngest for Storage {
 
         for resource_profile in request.resource_profiles {
             let resource = resource_profile.resource.as_ref();
-            let resource_id = self.register_resource(resource)?;
+            let (resource_id, resource_batch) = self.register_resource(resource)?;
+            if let Some(batch) = resource_batch {
+                let _ = self.live_broadcast.send((Signal::Resources, batch));
+            }
             let service_name = sequins_otlp::extract_service_name(resource);
 
             for scope_profile in resource_profile.scope_profiles {
@@ -432,16 +445,21 @@ mod tests {
         let request = make_test_otlp_traces(1, 3);
         storage.ingest_traces(request).await.unwrap();
 
-        // A broadcast message should be available immediately
-        let result = tokio::time::timeout(Duration::from_millis(200), async {
-            rx.recv().await.unwrap()
+        let found = tokio::time::timeout(Duration::from_millis(200), async {
+            loop {
+                let (signal, batch) = rx.recv().await.unwrap();
+                if signal == Signal::Spans {
+                    assert!(batch.num_rows() > 0, "broadcast batch should be non-empty");
+                    return;
+                }
+            }
         })
-        .await
-        .expect("timeout: no broadcast received after ingest_traces");
+        .await;
 
-        let (signal, batch) = result;
-        assert_eq!(signal, Signal::Spans);
-        assert!(batch.num_rows() > 0, "broadcast batch should be non-empty");
+        assert!(
+            found.is_ok(),
+            "timeout: Signal::Spans not broadcast after ingest_traces"
+        );
     }
 
     #[tokio::test]
@@ -452,15 +470,21 @@ mod tests {
         let request = make_test_otlp_logs(1, 5);
         storage.ingest_logs(request).await.unwrap();
 
-        let result = tokio::time::timeout(Duration::from_millis(200), async {
-            rx.recv().await.unwrap()
+        let found = tokio::time::timeout(Duration::from_millis(200), async {
+            loop {
+                let (signal, batch) = rx.recv().await.unwrap();
+                if signal == Signal::Logs {
+                    assert!(batch.num_rows() > 0, "broadcast batch should be non-empty");
+                    return;
+                }
+            }
         })
-        .await
-        .expect("timeout: no broadcast received after ingest_logs");
+        .await;
 
-        let (signal, batch) = result;
-        assert_eq!(signal, Signal::Logs);
-        assert!(batch.num_rows() > 0, "broadcast batch should be non-empty");
+        assert!(
+            found.is_ok(),
+            "timeout: Signal::Logs not broadcast after ingest_logs"
+        );
     }
 
     #[tokio::test]
@@ -471,16 +495,52 @@ mod tests {
         let request = make_test_otlp_metrics(1, 2, 3);
         storage.ingest_metrics(request).await.unwrap();
 
-        // Metrics broadcasts Datapoints signal
-        let result = tokio::time::timeout(Duration::from_millis(200), async {
-            rx.recv().await.unwrap()
+        let found = tokio::time::timeout(Duration::from_millis(200), async {
+            loop {
+                let (signal, batch) = rx.recv().await.unwrap();
+                if signal == Signal::Datapoints {
+                    assert!(batch.num_rows() > 0, "broadcast batch should be non-empty");
+                    return;
+                }
+            }
         })
-        .await
-        .expect("timeout: no broadcast received after ingest_metrics");
+        .await;
 
-        let (signal, batch) = result;
-        assert_eq!(signal, Signal::Datapoints);
-        assert!(batch.num_rows() > 0, "broadcast batch should be non-empty");
+        assert!(
+            found.is_ok(),
+            "timeout: Signal::Datapoints not broadcast after ingest_metrics"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ingest_traces_broadcasts_resources_for_new_service() {
+        let (storage, _tmp) = TestStorageBuilder::new().build().await;
+        let mut rx = storage.live_broadcast.subscribe();
+
+        storage
+            .ingest_traces(make_test_otlp_traces(1, 1))
+            .await
+            .unwrap();
+
+        let found = tokio::time::timeout(Duration::from_millis(200), async {
+            loop {
+                let (signal, batch) = rx.recv().await.unwrap();
+                if signal == Signal::Resources {
+                    assert_eq!(
+                        batch.num_rows(),
+                        1,
+                        "resource broadcast should be single-row"
+                    );
+                    return;
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            found.is_ok(),
+            "timeout: Signal::Resources not broadcast after ingest_traces"
+        );
     }
 
     #[tokio::test]
@@ -522,15 +582,27 @@ mod tests {
         storage.ingest_traces(request).await.unwrap();
 
         // Both receivers should get the same batch
-        let (sig1, batch1) = tokio::time::timeout(Duration::from_millis(200), rx1.recv())
-            .await
-            .expect("rx1 timeout")
-            .unwrap();
+        let (sig1, batch1) = tokio::time::timeout(Duration::from_millis(200), async {
+            loop {
+                let (signal, batch) = rx1.recv().await.unwrap();
+                if signal == Signal::Spans {
+                    return (signal, batch);
+                }
+            }
+        })
+        .await
+        .expect("rx1 timeout");
 
-        let (sig2, batch2) = tokio::time::timeout(Duration::from_millis(200), rx2.recv())
-            .await
-            .expect("rx2 timeout")
-            .unwrap();
+        let (sig2, batch2) = tokio::time::timeout(Duration::from_millis(200), async {
+            loop {
+                let (signal, batch) = rx2.recv().await.unwrap();
+                if signal == Signal::Spans {
+                    return (signal, batch);
+                }
+            }
+        })
+        .await
+        .expect("rx2 timeout");
 
         assert_eq!(sig1, Signal::Spans);
         assert_eq!(sig2, Signal::Spans);
