@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sequins</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Severity badge colors */
+    .sev-trace { color: #a1a1aa; border-color: #a1a1aa; }
+    .sev-debug { color: #22d3ee; border-color: #22d3ee; }
+    .sev-info  { color: #93c5fd; border-color: #93c5fd; }
+    .sev-warn  { color: #fbbf24; border-color: #fbbf24; }
+    .sev-error { color: #f87171; border-color: #f87171; }
+    .sev-fatal { color: #d8b4fe; border-color: #d8b4fe; }
+
+    .sev-trace-bg  { background: #27272a; color: #a1a1aa; }
+    .sev-debug-bg  { background: #083344; color: #22d3ee; }
+    .sev-info-bg   { background: #0c2340; color: #93c5fd; }
+    .sev-warn-bg   { background: #3a1f00; color: #fbbf24; }
+    .sev-error-bg  { background: #450a0a; color: #f87171; }
+    .sev-fatal-bg  { background: #3b0764; color: #d8b4fe; }
+    .sev-unknown-bg { background: #27272a; color: #71717a; }
+
+    /* Severity toggle */
+    .sev-toggle { opacity: 0.35; background: transparent; }
+    .sev-toggle.active { opacity: 1; }
+
+    /* Active states (toggled by Datastar data-class:active) */
+    .tab-btn.active { color: #60a5fa !important; border-bottom-color: #60a5fa !important; }
+    .service-item.active { background: #1e3a5f !important; color: #e0f2fe !important; }
+    .filter-pill.active { border-color: #60a5fa !important; color: #60a5fa !important; }
+    .live-active .live-dot { background: #4ade80 !important; }
+
+    /* Waterfall bar (needs absolute positioning with % left/width from inline style) */
+    .wf-bar {
+      position: absolute;
+      top: 3px; height: 18px;
+      border-radius: 2px;
+      display: flex; align-items: center;
+      overflow: hidden; min-width: 2px;
+    }
+
+    /* Flamegraph frame states */
+    .fg-frame rect { opacity: 0.75; transition: opacity 0.08s; }
+    .fg-frame:hover rect { opacity: 0.92; stroke: #888 !important; stroke-width: 1.5 !important; }
+    .fg-frame.selected rect { opacity: 1.0 !important; stroke: #fff !important; stroke-width: 1.5 !important; }
+    .fg-frame.search-match rect { stroke: #facc15 !important; stroke-width: 1.5 !important; }
+    .fg-frame.dimmed rect { opacity: 0.2 !important; }
+    .fg-frame.dimmed text { opacity: 0.2 !important; }
+    .fg-frame.selected.dimmed rect { opacity: 1.0 !important; stroke: #fff !important; }
+
+    /* Loading bar */
+    #loading-bar {
+      display: none;
+      position: fixed; top: 0; left: 0; right: 0;
+      height: 2px; background: #60a5fa; z-index: 9999;
+      animation: loading-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes loading-pulse {
+      0%   { opacity: 1; transform: scaleX(0); transform-origin: left; }
+      50%  { opacity: 0.8; transform: scaleX(0.7); transform-origin: left; }
+      100% { opacity: 0; transform: scaleX(1); transform-origin: left; }
+    }
+  </style>
+</head>
+<body class="h-screen overflow-hidden bg-zinc-950 text-zinc-100 text-sm">
+<div id="loading-bar" data-show="$loading"></div>
+
+<div id="app"
+  class="grid h-full"
+  style="grid-template-columns: 200px 1fr"
+  data-signals="{service:'{{ initial_service }}',duration:'5m',search:'',live:true,query:'spans last 1h',tab:'logs',sev1:true,sev5:true,sev9:true,sev13:true,sev17:true,sev21:true,sort:'time',errorsOnly:false,loading:false,rowCount:0,traceId:'',spanId:''}">
+
+  <!-- Sidebar -->
+  <aside class="bg-zinc-900 border-r border-zinc-700 flex flex-col overflow-hidden">
+    <div class="flex items-center gap-2 px-4 py-3 border-b border-zinc-700 font-bold text-sm shrink-0">
+      <img src="/assets/logo.svg" alt="" width="22" height="22">
+      <span>Sequins</span>
+    </div>
+    <p class="text-[11px] font-semibold uppercase tracking-widest text-zinc-500 px-4 pt-3 pb-1 shrink-0 m-0">Services</p>
+    <ul id="service-list" class="flex-1 overflow-y-auto list-none p-0 m-0" data-init="@get('/services')">
+      <li class="px-4 py-2 text-xs text-zinc-500">Loading…</li>
+    </ul>
+  </aside>
+
+  <!-- Main area -->
+  <div id="main-area"
+    class="flex flex-col overflow-hidden"
+    data-computed:taburl="({health:'/health/view',metrics:'/metrics/view',traces:'/traces/view',logs:'/logs/view',profiles:'/profiles/view',explore:'/explore/view'})[$tab]||'/logs/view'"
+    data-effect="[$duration,$service,$live,$tab]&&@get($taburl,{retry:'never'})">
+
+    <!-- Tab bar -->
+    <nav class="flex border-b border-zinc-700 bg-zinc-900 px-2 shrink-0">
+      <button class="tab-btn px-4 py-2 text-sm text-zinc-400 border-b-2 border-transparent hover:text-zinc-100 -mb-px bg-transparent cursor-pointer"
+        data-class:active="$tab==='health'"
+        data-on:click="$tab='health'">Health</button>
+      <button class="tab-btn px-4 py-2 text-sm text-zinc-400 border-b-2 border-transparent hover:text-zinc-100 -mb-px bg-transparent cursor-pointer"
+        data-class:active="$tab==='metrics'"
+        data-on:click="$tab='metrics'">Metrics</button>
+      <button class="tab-btn px-4 py-2 text-sm text-zinc-400 border-b-2 border-transparent hover:text-zinc-100 -mb-px bg-transparent cursor-pointer"
+        data-class:active="$tab==='traces'"
+        data-on:click="$tab='traces'">Traces</button>
+      <button class="tab-btn px-4 py-2 text-sm text-zinc-400 border-b-2 border-transparent hover:text-zinc-100 -mb-px bg-transparent cursor-pointer"
+        data-class:active="$tab==='logs'"
+        data-on:click="$tab='logs'">Logs</button>
+      <button class="tab-btn px-4 py-2 text-sm text-zinc-400 border-b-2 border-transparent hover:text-zinc-100 -mb-px bg-transparent cursor-pointer"
+        data-class:active="$tab==='profiles'"
+        data-on:click="$tab='profiles'">Profiles</button>
+      <button class="tab-btn px-4 py-2 text-sm text-zinc-400 border-b-2 border-transparent hover:text-zinc-100 -mb-px bg-transparent cursor-pointer"
+        data-class:active="$tab==='explore'"
+        data-on:click="$tab='explore'">Explore</button>
+    </nav>
+
+    <!-- Universal filter bar -->
+    <div id="filter-bar" class="flex items-center gap-1.5 px-3 py-1.5 border-b border-zinc-700 bg-zinc-900 shrink-0 overflow-x-auto">
+      <!-- Live / Pause toggle -->
+      <button class="filter-pill inline-flex items-center gap-1.5 px-2.5 py-1 text-xs border border-zinc-600 rounded bg-transparent text-zinc-300 hover:border-zinc-400 cursor-pointer whitespace-nowrap shrink-0"
+        data-class:live-active="$live"
+        data-on:click="$live=!$live">
+        <span class="live-dot w-2 h-2 rounded-full bg-zinc-500 shrink-0"></span>
+        <span data-text="$live ? 'Live' : 'Paused'">Live</span>
+      </button>
+
+      <!-- Time range -->
+      <select class="px-2 py-1 text-xs border border-zinc-600 rounded bg-zinc-950 text-zinc-300 cursor-pointer shrink-0 focus:outline-none focus:border-blue-400"
+        data-bind:duration>
+        <option value="1m">1 min</option>
+        <option value="5m">5 min</option>
+        <option value="15m">15 min</option>
+        <option value="30m">30 min</option>
+        <option value="1h">1 hour</option>
+        <option value="6h">6 hours</option>
+        <option value="24h">24 hours</option>
+        <option value="7d">7 days</option>
+      </select>
+
+      <div class="w-px h-4 bg-zinc-700 shrink-0 mx-0.5"></div>
+
+      <!-- Tab-specific controls (injected by server PatchElements) -->
+      <div id="tab-controls" class="flex items-center gap-1.5 shrink-0"></div>
+    </div>
+
+    <!-- Content area -->
+    <div id="content-wrapper" class="flex-1 overflow-hidden flex flex-col">
+      <div id="content" class="flex-1 flex flex-col min-h-0">
+        <div class="flex items-center justify-center h-48 text-zinc-500">Loading…</div>
+      </div>
+    </div>
+
+  </div><!-- #main-area -->
+</div><!-- #app -->
+
+<script type="module" src="/assets/js/datastar.js"></script>
+<script>
+function initTraceResize() {
+  function makeHResize(handle, getA, getB) {
+    handle.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      var startX = e.clientX;
+      var startAW = getA().offsetWidth;
+      var startBW = getB().offsetWidth;
+      function onMove(e) {
+        var dx = e.clientX - startX;
+        var aw = Math.max(100, startAW + dx);
+        var bw = Math.max(100, startBW - dx);
+        getA().style.width = aw + 'px'; getA().style.flex = 'none';
+        getB().style.width = bw + 'px'; getB().style.flex = 'none';
+      }
+      function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  }
+  function makeVResize(handle, getTop, getBottom) {
+    handle.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      var startY = e.clientY;
+      var startTH = getTop().offsetHeight;
+      function onMove(e) {
+        var dy = e.clientY - startY;
+        var th = Math.max(80, startTH + dy);
+        getTop().style.flex = '0 0 ' + th + 'px';
+      }
+      function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+      document.body.style.cursor = 'row-resize';
+      document.body.style.userSelect = 'none';
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  }
+  setTimeout(function() {
+    var hv = document.getElementById('tr-resize-v');
+    var h1 = document.getElementById('tr-resize-1');
+    var h2 = document.getElementById('tr-resize-2');
+    if (hv) makeVResize(hv,
+      function() { return document.getElementById('trace-waterfall'); },
+      function() { return document.querySelector('#traces-view .flex.overflow-hidden'); });
+    if (h1) makeHResize(h1,
+      function() { return document.getElementById('trace-list'); },
+      function() { return document.getElementById('trace-info'); });
+    if (h2) makeHResize(h2,
+      function() { return document.getElementById('trace-info'); },
+      function() { return document.getElementById('span-details'); });
+  }, 0);
+}
+</script>
+<script>
+function initFlamegraph() {
+  // Wait for the SVG to be inserted into #flamegraph (arrives via SSE after profiles-view)
+  var container = document.getElementById('flamegraph');
+  if (!container) return;
+
+  function setup(svg) {
+
+  var grandTotal = parseInt(svg.dataset.grandTotal) || 0;
+  var ROW_H = 22;
+  var selectedKey = null;
+
+  function fmtVal(val, total) {
+    var sec = (val / 1e9).toFixed(3);
+    var pct = total > 0 ? (val / total * 100).toFixed(1) : '0.0';
+    return sec + 's (' + pct + '%)';
+  }
+
+  function resetZoom() {
+    var container = svg.parentElement;
+    svg.style.width = '100%';
+    if (container) container.scrollLeft = 0;
+    var bar = document.getElementById('fg-zoom-bar');
+    if (bar) { bar.classList.add('hidden'); bar.classList.remove('flex'); }
+  }
+
+  function zoomToFrame(g) {
+    var xPct = parseFloat(g.dataset.x);  // 0–100
+    var wPct = parseFloat(g.dataset.w);  // 0–100
+    if (wPct <= 0) return;
+
+    var container = svg.parentElement;
+    var containerWidth = container ? container.clientWidth : svg.clientWidth;
+
+    // Scale the SVG so the selected frame fills the full container width.
+    // Frame occupies wPct% of svg width. Zoomed svg width = (100/wPct) * containerWidth.
+    var scale = 100 / wPct;
+    svg.style.width = (scale * 100) + '%';
+
+    // Scroll so the frame's left edge is at the container's left edge.
+    container.scrollLeft = (xPct / 100) * scale * containerWidth;
+
+    var bar = document.getElementById('fg-zoom-bar');
+    if (bar) {
+      bar.classList.remove('hidden');
+      bar.classList.add('flex');
+      var nameEl = document.getElementById('fg-zoom-name');
+      if (nameEl) nameEl.textContent = g.dataset.fn || '';
+    }
+  }
+
+  function hideDetail() {
+    var pane = document.getElementById('fg-detail');
+    if (pane) pane.classList.add('hidden');
+  }
+
+  function showDetail(g) {
+    var pane = document.getElementById('fg-detail');
+    if (!pane) return;
+    pane.classList.remove('hidden');
+
+    var fnEl = document.getElementById('fg-detail-fn');
+    if (fnEl) fnEl.textContent = g.dataset.fn || '';
+
+    var selfVal = parseInt(g.dataset.self) || 0;
+    var totalVal = parseInt(g.dataset.total) || 0;
+    var selfEl = document.getElementById('fg-detail-self');
+    var totalEl = document.getElementById('fg-detail-total');
+    if (selfEl) selfEl.textContent = fmtVal(selfVal, grandTotal);
+    if (totalEl) totalEl.textContent = fmtVal(totalVal, grandTotal);
+
+    var file = g.dataset.file || '';
+    var line = g.dataset.line || '';
+    var fileStr = file ? (line ? file + ':' + line : file) : '(unknown)';
+    var fileEl = document.getElementById('fg-detail-file');
+    if (fileEl) fileEl.textContent = fileStr;
+
+    // Build call stack by walking parent chain to root
+    var stack = [];
+    var cur = g;
+    while (cur) {
+      stack.unshift(cur);
+      var parentKey = cur.dataset.parent;
+      if (!parentKey) break;
+      cur = svg.querySelector('[data-key="' + parentKey.replace(/"/g, '\\"') + '"]');
+    }
+
+    var stackDiv = document.getElementById('fg-detail-stack');
+    if (!stackDiv) return;
+    stackDiv.innerHTML = '';
+    stack.forEach(function(node) {
+      var isCurrent = node === g;
+      var row = document.createElement('div');
+      row.className = 'flex items-baseline gap-1.5 py-0.5';
+      var marker = document.createElement('span');
+      marker.className = 'shrink-0 ' + (isCurrent ? 'text-blue-400' : 'text-zinc-600');
+      marker.textContent = isCurrent ? '\u25B6' : '\u21B3';
+      var fnSpan = document.createElement('span');
+      fnSpan.className = isCurrent ? 'text-blue-300' : 'text-zinc-300';
+      fnSpan.textContent = node.dataset.fn || '';
+      row.appendChild(marker);
+      row.appendChild(fnSpan);
+      var nFile = node.dataset.file || '';
+      var nLine = node.dataset.line || '';
+      if (nFile) {
+        var locSpan = document.createElement('span');
+        locSpan.className = 'text-zinc-500 text-xs';
+        locSpan.textContent = nLine ? nFile + ':' + nLine : nFile;
+        row.appendChild(locSpan);
+      }
+      stackDiv.appendChild(row);
+    });
+  }
+
+  // Click: select + zoom
+  svg.addEventListener('click', function(e) {
+    var g = e.target.closest('.fg-frame');
+
+    // Clear previous selection
+    var prev = svg.querySelector('.fg-frame.selected');
+    if (prev) prev.classList.remove('selected');
+
+    if (!g || g.dataset.key === selectedKey) {
+      selectedKey = null;
+      resetZoom();
+      hideDetail();
+      return;
+    }
+
+    selectedKey = g.dataset.key;
+    g.classList.add('selected');
+    zoomToFrame(g);
+    showDetail(g);
+  });
+
+  // Zoom reset button
+  var resetBtn = document.getElementById('fg-zoom-reset');
+  if (resetBtn) {
+    resetBtn.onclick = function() {
+      var prev = svg.querySelector('.fg-frame.selected');
+      if (prev) prev.classList.remove('selected');
+      selectedKey = null;
+      resetZoom();
+      hideDetail();
+    };
+  }
+
+  // Detail close button
+  var closeBtn = document.getElementById('fg-detail-close');
+  if (closeBtn) {
+    closeBtn.onclick = function() {
+      var prev = svg.querySelector('.fg-frame.selected');
+      if (prev) prev.classList.remove('selected');
+      selectedKey = null;
+      resetZoom();
+      hideDetail();
+    };
+  }
+
+  // Search
+  window.flamegraphSearch = function(query) {
+    var frames = svg.querySelectorAll('.fg-frame');
+    if (!query) {
+      frames.forEach(function(frame) { frame.classList.remove('search-match', 'dimmed'); });
+      return;
+    }
+    var q = query.toLowerCase();
+    frames.forEach(function(frame) {
+      var fn_ = (frame.dataset.fn || '').toLowerCase();
+      var file = (frame.dataset.file || '').toLowerCase();
+      if (fn_.indexOf(q) >= 0 || file.indexOf(q) >= 0) {
+        frame.classList.add('search-match');
+        frame.classList.remove('dimmed');
+      } else {
+        frame.classList.remove('search-match');
+        frame.classList.add('dimmed');
+      }
+    });
+  };
+  } // end setup()
+
+  // If SVG already present (e.g. re-init), set up immediately
+  var existingSvg = document.getElementById('fg-svg');
+  if (existingSvg && !existingSvg._fgInit) {
+    existingSvg._fgInit = true;
+    setup(existingSvg);
+    return;
+  }
+
+  // Otherwise watch #flamegraph for the SVG arriving via SSE
+  var obs = new MutationObserver(function() {
+    var svg = document.getElementById('fg-svg');
+    if (svg && !svg._fgInit) {
+      svg._fgInit = true;
+      obs.disconnect();
+      setup(svg);
+    }
+  });
+  obs.observe(container, { childList: true, subtree: true });
+}
+</script>
+</body>
+</html>
