@@ -3,7 +3,7 @@
 //! Tests parser invariants using proptest to verify robustness across random inputs.
 
 use proptest::prelude::*;
-use sequins_query::parser::parse;
+use seql_parser::parse;
 
 // Test 1: Parsing valid signal keywords doesn't panic
 proptest! {

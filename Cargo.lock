@@ -5357,7 +5357,7 @@ checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
 
 [[package]]
 name = "seql-ast"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5365,10 +5365,9 @@ dependencies = [
 
 [[package]]
 name = "seql-parser"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "seql-ast",
- "sequins-types",
  "serde",
  "serde_json",
  "winnow 0.6.26",
@@ -5376,7 +5375,7 @@ dependencies = [
 
 [[package]]
 name = "seql-substrait"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5396,6 +5395,7 @@ dependencies = [
  "prost-build 0.13.5",
  "seql-ast",
  "seql-parser",
+ "sequins-arrow-schema",
  "sequins-flight",
  "sequins-traits",
  "sequins-types",
@@ -5407,7 +5407,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-arrow-schema"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "once_cell",
@@ -5417,7 +5417,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-attribute-codec"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "ciborium",
@@ -5429,7 +5429,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-batch-chain"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -5443,7 +5443,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5454,11 +5454,14 @@ dependencies = [
  "prost 0.14.3",
  "rand 0.8.5",
  "reqwest",
+ "seql-ast",
+ "seql-substrait",
  "sequins-client",
  "sequins-datafusion-backend",
- "sequins-query",
+ "sequins-flight",
  "sequins-server",
  "sequins-storage",
+ "sequins-traits",
  "sequins-types",
  "serde",
  "serde_json",
@@ -5473,7 +5476,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-client"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5482,7 +5485,10 @@ dependencies = [
  "datafusion",
  "futures",
  "prost 0.14.3",
- "sequins-query",
+ "seql-ast",
+ "seql-parser",
+ "seql-substrait",
+ "sequins-traits",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -5493,7 +5499,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-cold-tier"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5509,6 +5515,7 @@ dependencies = [
  "object_store",
  "once_cell",
  "parking_lot",
+ "sequins-arrow-schema",
  "sequins-companion-index",
  "sequins-series-index",
  "sequins-types",
@@ -5528,7 +5535,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-companion-index"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "bincode",
@@ -5541,7 +5548,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-datafusion-backend"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5552,10 +5559,17 @@ dependencies = [
  "futures",
  "opentelemetry-proto",
  "prost 0.14.3",
+ "seql-ast",
+ "seql-parser",
+ "seql-substrait",
+ "sequins-arrow-schema",
+ "sequins-attribute-codec",
+ "sequins-cold-tier",
+ "sequins-flight",
+ "sequins-hot-tier",
  "sequins-live-query",
- "sequins-otlp",
- "sequins-query",
  "sequins-storage",
+ "sequins-traits",
  "sequins-types",
  "tempfile",
  "tokio",
@@ -5564,7 +5578,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-ffi"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5573,11 +5587,14 @@ dependencies = [
  "futures",
  "once_cell",
  "parking_lot",
+ "seql-ast",
+ "seql-parser",
  "sequins-client",
  "sequins-datafusion-backend",
- "sequins-query",
+ "sequins-flight",
  "sequins-server",
  "sequins-storage",
+ "sequins-traits",
  "sequins-types",
  "sequins-view",
  "serde_json",
@@ -5591,7 +5608,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-flight"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5604,7 +5621,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-hot-tier"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -5612,6 +5629,7 @@ dependencies = [
  "dashmap",
  "datafusion",
  "futures",
+ "sequins-arrow-schema",
  "sequins-batch-chain",
  "sequins-types",
  "serde",
@@ -5623,7 +5641,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-linux"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5636,9 +5654,9 @@ dependencies = [
  "relm4",
  "sequins-client",
  "sequins-datafusion-backend",
- "sequins-query",
  "sequins-server",
  "sequins-storage",
+ "sequins-traits",
  "sequins-types",
  "sequins-view",
  "serde",
@@ -5652,7 +5670,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-live-query"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow-flight",
  "async-stream",
@@ -5660,7 +5678,7 @@ dependencies = [
  "object_store",
  "opentelemetry-proto",
  "parking_lot",
- "sequins-query",
+ "sequins-flight",
  "sequins-wal",
  "tempfile",
  "thiserror 1.0.69",
@@ -5670,14 +5688,13 @@ dependencies = [
 
 [[package]]
 name = "sequins-otlp"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
- "datafusion",
  "hex",
- "once_cell",
  "opentelemetry-proto",
  "prost 0.14.3",
+ "sequins-arrow-schema",
  "sequins-attribute-codec",
  "sequins-types",
  "serde",
@@ -5688,7 +5705,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-pprof"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "pprof",
  "prost 0.14.3",
@@ -5700,42 +5717,16 @@ dependencies = [
 
 [[package]]
 name = "sequins-query"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
- "arrow",
- "arrow-flight",
- "async-trait",
- "base64",
- "bincode",
- "bytes",
- "ciborium",
- "datafusion",
- "datafusion-expr",
- "datafusion-functions-aggregate",
- "datafusion-substrait",
- "futures",
- "indexmap 2.13.0",
- "pbjson-types",
  "proptest",
- "prost 0.14.3",
- "prost-build 0.13.5",
- "seql-ast",
  "seql-parser",
  "seql-substrait",
- "sequins-flight",
- "sequins-traits",
- "sequins-types",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "winnow 0.6.26",
 ]
 
 [[package]]
 name = "sequins-series-index"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "object_store",
  "serde",
@@ -5746,7 +5737,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-server"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5760,9 +5751,11 @@ dependencies = [
  "object_store",
  "opentelemetry-proto",
  "prost 0.14.3",
+ "seql-substrait",
  "sequins-datafusion-backend",
- "sequins-query",
+ "sequins-flight",
  "sequins-storage",
+ "sequins-traits",
  "sequins-types",
  "serde",
  "serde_json",
@@ -5779,7 +5772,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-storage"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5792,11 +5785,13 @@ dependencies = [
  "opentelemetry-proto",
  "proptest",
  "prost 0.14.3",
+ "seql-ast",
+ "sequins-arrow-schema",
  "sequins-cold-tier",
  "sequins-hot-tier",
  "sequins-live-query",
  "sequins-otlp",
- "sequins-query",
+ "sequins-traits",
  "sequins-types",
  "sequins-wal",
  "serde",
@@ -5811,7 +5806,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-traits"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow-flight",
  "async-trait",
@@ -5825,7 +5820,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-types"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5837,7 +5832,6 @@ dependencies = [
  "opentelemetry-proto",
  "parking_lot",
  "proptest",
- "sequins-arrow-schema",
  "sequins-traits",
  "serde",
  "serde_json",
@@ -5850,13 +5844,14 @@ dependencies = [
 
 [[package]]
 name = "sequins-view"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "async-stream",
  "async-trait",
  "futures",
- "sequins-query",
+ "sequins-flight",
+ "sequins-traits",
  "sequins-types",
  "tokio",
  "tracing",
@@ -5864,7 +5859,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-vortex-indexed-layout"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -5880,7 +5875,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-wal"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "bytes",

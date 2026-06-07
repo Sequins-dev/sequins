@@ -14,7 +14,7 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
-use sequins_types::ManagementApi;
+use sequins_traits::ManagementApi;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
@@ -116,16 +116,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ManagementApi for MockManagementApi {
-        async fn run_retention_cleanup(&self) -> Result<usize, sequins_types::Error> {
+        async fn run_retention_cleanup(&self) -> Result<usize, sequins_traits::Error> {
             if self.should_fail {
-                return Err(sequins_types::Error::Other("Cleanup failed".to_string()));
+                return Err(sequins_traits::Error::Other("Cleanup failed".to_string()));
             }
             Ok(42)
         }
 
-        async fn get_retention_policy(&self) -> Result<RetentionPolicy, sequins_types::Error> {
+        async fn get_retention_policy(&self) -> Result<RetentionPolicy, sequins_traits::Error> {
             if self.should_fail {
-                return Err(sequins_types::Error::Other(
+                return Err(sequins_traits::Error::Other(
                     "Failed to get policy".to_string(),
                 ));
             }
@@ -140,18 +140,18 @@ mod tests {
         async fn update_retention_policy(
             &self,
             _policy: RetentionPolicy,
-        ) -> Result<(), sequins_types::Error> {
+        ) -> Result<(), sequins_traits::Error> {
             if self.should_fail {
-                return Err(sequins_types::Error::Other(
+                return Err(sequins_traits::Error::Other(
                     "Failed to update policy".to_string(),
                 ));
             }
             Ok(())
         }
 
-        async fn run_maintenance(&self) -> Result<MaintenanceStats, sequins_types::Error> {
+        async fn run_maintenance(&self) -> Result<MaintenanceStats, sequins_traits::Error> {
             if self.should_fail {
-                return Err(sequins_types::Error::Other(
+                return Err(sequins_traits::Error::Other(
                     "Maintenance failed".to_string(),
                 ));
             }
@@ -161,9 +161,9 @@ mod tests {
             })
         }
 
-        async fn get_storage_stats(&self) -> Result<StorageStats, sequins_types::Error> {
+        async fn get_storage_stats(&self) -> Result<StorageStats, sequins_traits::Error> {
             if self.should_fail {
-                return Err(sequins_types::Error::Other(
+                return Err(sequins_traits::Error::Other(
                     "Failed to get stats".to_string(),
                 ));
             }

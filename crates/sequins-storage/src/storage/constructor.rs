@@ -1,13 +1,13 @@
 use super::Storage;
-use crate::cold_tier::ColdTier;
 use crate::config::StorageConfig;
 use crate::error::Result;
-use crate::hot_tier::SignalColdFlushFn;
-use crate::live_query::{LiveQueryConfig, LiveQueryManager};
-use crate::wal::{Wal, WalConfig};
 use arrow::array::RecordBatch;
-use sequins_query::ast::Signal;
+use seql_ast::ast::Signal;
+use sequins_cold_tier::ColdTier;
+use sequins_hot_tier::{HotTier, SignalColdFlushFn};
+use sequins_live_query::{LiveQueryConfig, LiveQueryManager};
 use sequins_types::{NowTime, SystemNowTime};
+use sequins_wal::{Wal, WalConfig};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
@@ -43,7 +43,7 @@ impl Storage {
                 })
             })
         };
-        let hot_tier = Arc::new(crate::hot_tier::HotTier::new_with_cold_writer(
+        let hot_tier = Arc::new(HotTier::new_with_cold_writer(
             config.hot_tier.clone(),
             cold_flush,
         ));

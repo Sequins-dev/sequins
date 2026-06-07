@@ -5,9 +5,9 @@ use arrow::array::{Array, BooleanArray, StringViewArray, UInt32Array, UInt64Arra
 use arrow::compute::filter_record_batch;
 use arrow::record_batch::RecordBatch;
 use dashmap::DashSet;
-use sequins_types::arrow_schema;
+use sequins_arrow_schema::arrow_schema;
+use sequins_arrow_schema::SignalType;
 use sequins_types::models::InstrumentationScope;
-use sequins_types::SignalType;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -628,7 +628,7 @@ mod tests {
     async fn test_chain_mapping_for_all_signal_types() {
         let hot_tier = HotTier::new(create_test_config());
 
-        for signal in sequins_types::SignalType::all() {
+        for signal in sequins_arrow_schema::SignalType::all() {
             let chain_schema = hot_tier.chain(signal).schema();
             let type_schema = signal.schema();
             assert_eq!(

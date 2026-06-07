@@ -8,7 +8,10 @@ authors.workspace = true
 description = "Remote SeQL client for Sequins — implements QueryExec over HTTP"
 
 [dependencies]
-sequins-query = { workspace = true }
+seql-ast     = { workspace = true }
+seql-parser  = { workspace = true }
+seql-substrait = { workspace = true }
+sequins-traits = { workspace = true }
 
 # DataFusion (for client-side compilation)
 datafusion = { workspace = true }

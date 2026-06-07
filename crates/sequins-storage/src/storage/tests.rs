@@ -2,12 +2,13 @@ use super::Storage;
 use crate::config::{
     ColdTierConfig, CompanionIndexConfig, HotTierConfig, LifecycleConfig, StorageConfig,
 };
-use crate::wal::WalPayload;
+use sequins_arrow_schema::SignalType;
+use sequins_traits::{ManagementApi, OtlpIngest};
 use sequins_types::models::{
     AttributeValue, Duration, LogEntry, LogId, Metric, MetricType, Profile, ProfileId, ProfileType,
     Span, SpanId, SpanKind, SpanStatus, Timestamp, TraceId,
 };
-use sequins_types::{ManagementApi, OtlpIngest, SignalType};
+use sequins_wal::WalPayload;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -135,11 +136,11 @@ fn create_test_profile() -> Profile {
 impl Storage {
     #[cfg(test)]
     async fn ingest_spans_test(&self, spans: Vec<Span>) -> crate::error::Result<()> {
-        use crate::hot_tier::batch_chain::BatchMeta;
         use arrow::array::new_null_array;
         use arrow::array::{
             Int64Array, StringViewArray, TimestampNanosecondArray, UInt32Array, UInt8Array,
         };
+        use sequins_hot_tier::BatchMeta;
         use std::sync::Arc;
 
         if spans.is_empty() {
@@ -148,7 +149,7 @@ impl Storage {
 
         // Use the full span schema (includes promoted attribute columns + overflow map)
         // so the batch is compatible with the hot-tier BatchChain schema invariant.
-        let schema = sequins_types::arrow_schema::span_schema();
+        let schema = sequins_arrow_schema::arrow_schema::span_schema();
         let n = spans.len();
 
         let trace_ids: Vec<String> = spans.iter().map(|s| s.trace_id.to_hex()).collect();
@@ -204,9 +205,9 @@ impl Storage {
 
     #[cfg(test)]
     async fn ingest_logs_test(&self, logs: Vec<LogEntry>) -> crate::error::Result<()> {
-        use crate::hot_tier::batch_chain::BatchMeta;
         use arrow::array::new_null_array;
         use arrow::array::{StringViewArray, TimestampNanosecondArray, UInt32Array, UInt8Array};
+        use sequins_hot_tier::BatchMeta;
         use std::sync::Arc;
 
         if logs.is_empty() {
@@ -215,7 +216,7 @@ impl Storage {
 
         // Use the full log schema (includes promoted attribute columns + overflow map)
         // so the batch is compatible with the hot-tier BatchChain schema invariant.
-        let schema = sequins_types::arrow_schema::log_schema();
+        let schema = sequins_arrow_schema::arrow_schema::log_schema();
         let n = logs.len();
 
         let log_ids: Vec<String> = logs.iter().map(|l| l.id.to_hex()).collect();
@@ -282,8 +283,8 @@ impl Storage {
 
     #[cfg(test)]
     async fn ingest_metrics_test(&self, metrics: Vec<Metric>) -> crate::error::Result<()> {
-        use crate::hot_tier::batch_chain::BatchMeta;
         use arrow::array::{StringViewArray, UInt32Array};
+        use sequins_hot_tier::BatchMeta;
         use sequins_types::models::MetricType;
         use std::sync::Arc;
 
@@ -292,7 +293,7 @@ impl Storage {
         }
 
         // Use metric_schema() so the batch matches the chain's schema invariant.
-        let schema = sequins_types::arrow_schema::metric_schema();
+        let schema = sequins_arrow_schema::arrow_schema::metric_schema();
 
         let metric_ids: Vec<String> = metrics.iter().map(|m| m.id.to_hex()).collect();
         let names: Vec<&str> = metrics.iter().map(|m| m.name.as_str()).collect();
@@ -343,8 +344,8 @@ impl Storage {
 
     #[cfg(test)]
     async fn ingest_profiles_test(&self, profiles: Vec<Profile>) -> crate::error::Result<()> {
-        use crate::hot_tier::batch_chain::BatchMeta;
         use arrow::array::{BinaryArray, StringViewArray, TimestampNanosecondArray, UInt32Array};
+        use sequins_hot_tier::BatchMeta;
         use sequins_types::models::ProfileType;
         use std::sync::Arc;
 
@@ -353,7 +354,7 @@ impl Storage {
         }
 
         // Use profile_schema() so the batch matches the chain's schema invariant.
-        let schema = sequins_types::arrow_schema::profile_schema();
+        let schema = sequins_arrow_schema::arrow_schema::profile_schema();
         let n = profiles.len();
 
         let profile_ids: Vec<String> = profiles.iter().map(|p| p.id.to_hex()).collect();

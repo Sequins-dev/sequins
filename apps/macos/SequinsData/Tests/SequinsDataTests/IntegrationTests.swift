@@ -49,7 +49,7 @@ final class SeQLIntegrationTests: XCTestCase {
             .appendingPathComponent("SequinsDataTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
 
-        // Port 0 = OS-assigned ephemeral port, avoids test conflicts and we don't need OTLP
+        // Port 0 = OS-assigned ephemeral port, avoids test conflicts and we don't need OTLP.
         let config = OTLPServerConfig(grpcPort: 0, httpPort: 0)
         dataSource = try DataSource.local(
             dbPath: tempDir.appendingPathComponent("test.db").path,
@@ -162,6 +162,59 @@ final class SeQLIntegrationTests: XCTestCase {
         XCTAssertTrue(cols.contains("resource_id"), "Missing resource_id in \(cols)")
         XCTAssertTrue(cols.contains("service_name"), "Missing service_name in \(cols)")
         XCTAssertTrue(cols.contains("attributes"), "Missing attributes in \(cols)")
+    }
+
+    func testLiveResourcesStreamReceivesGeneratedServiceNames() throws {
+        let liveTempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SequinsDataLiveResources-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: liveTempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: liveTempDir) }
+
+        let liveDataSource = try DataSource.local(
+            dbPath: liveTempDir.appendingPathComponent("test.db").path,
+            config: OTLPServerConfig(grpcPort: 0, httpPort: 0)
+        )
+
+        let servicesArrived = expectation(description: "live resources service names")
+        servicesArrived.assertForOverFulfill = false
+        var serviceNames = Set<String>()
+
+        func recordServices(from batch: RecordBatch) {
+            for row in batch.toRows() {
+                guard row.count >= 2, let serviceName = row[1] as? String else { continue }
+                guard !serviceName.isEmpty, serviceName != "unknown" else { continue }
+                serviceNames.insert(serviceName)
+            }
+
+            if serviceNames.contains("web-service"),
+               serviceNames.contains("api-gateway"),
+               serviceNames.contains("worker-service") {
+                servicesArrived.fulfill()
+            }
+        }
+
+        let stream = try liveDataSource.executeLiveSeQL("resources last 24h")
+        stream.onBatchCallback = { batch, table in
+            guard table == nil else { return }
+            recordServices(from: batch)
+        }
+        stream.onDeltaCallback = { ops in
+            for op in ops {
+                guard case .append = op.type, let batch = op.data as? RecordBatch else { continue }
+                recordServices(from: batch)
+            }
+        }
+
+        let generatedCount = try liveDataSource.generateTestData()
+        XCTAssertGreaterThan(generatedCount, 0, "generateTestData should create at least one span")
+
+        wait(for: [servicesArrived], timeout: 10)
+        XCTAssertTrue(serviceNames.contains("web-service"), "Missing web-service in \(serviceNames)")
+        XCTAssertTrue(serviceNames.contains("api-gateway"), "Missing api-gateway in \(serviceNames)")
+        XCTAssertTrue(serviceNames.contains("worker-service"), "Missing worker-service in \(serviceNames)")
+
+        withExtendedLifetime(stream) {}
+        withExtendedLifetime(liveDataSource) {}
     }
 
     // MARK: - Spans table

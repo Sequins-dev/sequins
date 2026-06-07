@@ -220,10 +220,10 @@ impl ColdTier {
     /// is evicted.  The batch is already in Arrow format so no conversion is needed.
     pub async fn write_signal(
         &self,
-        signal: sequins_types::SignalType,
+        signal: sequins_arrow_schema::SignalType,
         batch: RecordBatch,
     ) -> Result<()> {
-        use sequins_types::SignalType;
+        use sequins_arrow_schema::SignalType;
         if batch.num_rows() == 0 {
             return Ok(());
         }

@@ -17,7 +17,8 @@ use sequins_storage::{
     config::{ColdTierConfig, CompanionIndexConfig, HotTierConfig, LifecycleConfig, StorageConfig},
     Storage,
 };
-use sequins_types::{ingest::OtlpIngest, models::Duration};
+use sequins_traits::OtlpIngest;
+use sequins_types::models::Duration;
 use std::sync::Arc;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -100,7 +101,7 @@ fn make_logs(n: usize) -> ExportLogsServiceRequest {
     }
 }
 
-// Local intermediary types for test assertions (DeltaFrame/DeltaOp deleted from sequins_query)
+// Local intermediary types for test assertions.
 #[allow(dead_code)]
 struct DeltaFrame {
     watermark_ns: u64,
@@ -129,11 +130,11 @@ enum DeltaOp {
 /// until `timeout` milliseconds have elapsed.  Returns the first `DeltaFrame`
 /// seen, or `None` on timeout.
 async fn wait_for_delta(
-    stream: &mut sequins_query::SeqlStream,
+    stream: &mut sequins_traits::SeqlStream,
     timeout_ms: u64,
 ) -> Option<DeltaFrame> {
-    use sequins_query::flight::{decode_metadata, SeqlMetadata};
-    use sequins_query::frame::ipc_to_batch;
+    use sequins_flight::ipc_to_batch;
+    use sequins_flight::{decode_metadata, SeqlMetadata};
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
 
     loop {
@@ -220,7 +221,7 @@ async fn test_wal_broadcast_triggers_delta_frames() {
     // We collect until we see a Heartbeat or until the stream stalls briefly,
     // then proceed to ingest.
     let _ = tokio::time::timeout(tokio::time::Duration::from_millis(200), async {
-        use sequins_query::flight::{decode_metadata, SeqlMetadata};
+        use sequins_flight::{decode_metadata, SeqlMetadata};
         while let Some(Ok(frame)) = stream.next().await {
             if let Some(meta) = decode_metadata(&frame.app_metadata) {
                 if matches!(

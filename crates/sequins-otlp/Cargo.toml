@@ -8,8 +8,9 @@ authors.workspace = true
 description = "OTLP protobuf → Arrow RecordBatch conversion for Sequins"
 
 [dependencies]
+sequins-arrow-schema   = { workspace = true }
 sequins-types          = { workspace = true }
-sequins-attribute-codec = { workspace = true, features = ["datafusion"] }
+sequins-attribute-codec = { workspace = true }
 
 # Arrow
 arrow = { workspace = true }
@@ -28,11 +29,3 @@ prost  = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
-
-# DataFusion UDFs (optional)
-datafusion  = { workspace = true, optional = true }
-once_cell   = { workspace = true, optional = true }
-
-[features]
-default = []
-datafusion = ["dep:datafusion", "dep:once_cell"]

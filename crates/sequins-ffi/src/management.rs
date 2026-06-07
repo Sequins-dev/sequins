@@ -5,8 +5,8 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use super::data_source::DataSourceImpl;
+use sequins_traits::ManagementApi;
 use sequins_types::models::{Duration, MaintenanceStats, RetentionPolicy, StorageStats};
-use sequins_types::ManagementApi;
 use std::os::raw::c_char;
 
 /// C-compatible retention policy configuration
@@ -137,7 +137,7 @@ pub extern "C" fn sequins_management_update_retention_policy(
         }
 
         // Remote mode doesn't support management API yet
-        Err(sequins_types::Error::Other(
+        Err(sequins_traits::Error::Other(
             "Management API not supported in remote mode".to_string(),
         ))
     });
@@ -202,7 +202,7 @@ pub extern "C" fn sequins_management_get_retention_policy(
         }
 
         // Remote mode doesn't support management API yet
-        Err(sequins_types::Error::Other(
+        Err(sequins_traits::Error::Other(
             "Management API not supported in remote mode".to_string(),
         ))
     });
@@ -272,7 +272,7 @@ pub extern "C" fn sequins_management_get_storage_stats(
         }
 
         // Remote mode doesn't support management API yet
-        Err(sequins_types::Error::Other(
+        Err(sequins_traits::Error::Other(
             "Management API not supported in remote mode".to_string(),
         ))
     });
@@ -345,7 +345,7 @@ pub extern "C" fn sequins_management_run_retention_cleanup(
         }
 
         // Remote mode doesn't support management API yet
-        Err(sequins_types::Error::Other(
+        Err(sequins_traits::Error::Other(
             "Management API not supported in remote mode".to_string(),
         ))
     });
@@ -415,7 +415,7 @@ pub extern "C" fn sequins_management_run_maintenance(
         }
 
         // Remote mode doesn't support management API yet
-        Err(sequins_types::Error::Other(
+        Err(sequins_traits::Error::Other(
             "Management API not supported in remote mode".to_string(),
         ))
     });

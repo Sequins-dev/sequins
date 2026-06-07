@@ -8,15 +8,14 @@ use arrow::array::{
 };
 use arrow::record_batch::RecordBatch;
 use proptest::prelude::*;
-use sequins_storage::cold_tier::series_index::SeriesIndex;
+use sequins_arrow_schema::SignalType;
+use sequins_cold_tier::SeriesIndex;
+use sequins_hot_tier::{BatchMeta, HotTier};
 use sequins_storage::config::HotTierConfig;
-use sequins_storage::hot_tier::batch_chain::BatchMeta;
-use sequins_storage::hot_tier::core::HotTier;
 use sequins_types::models::{
     AttributeValue, Duration, LogEntry, LogId, LogSeverity, MetricDataPoint, MetricId, Span,
     SpanId, Timestamp, TraceId,
 };
-use sequins_types::SignalType;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -84,7 +83,7 @@ fn spans_to_batch(spans: &[Span]) -> RecordBatch {
     use arrow::array::new_null_array;
 
     // Use the full span schema so the batch matches the chain's schema invariant.
-    let schema = sequins_types::arrow_schema::span_schema();
+    let schema = sequins_arrow_schema::arrow_schema::span_schema();
     let n = spans.len();
 
     let trace_ids: Vec<String> = spans.iter().map(|s| s.trace_id.to_hex()).collect();
@@ -131,7 +130,7 @@ fn logs_to_batch(logs: &[LogEntry]) -> RecordBatch {
     use arrow::array::new_null_array;
 
     // Use the full log schema so the batch matches the chain's schema invariant.
-    let schema = sequins_types::arrow_schema::log_schema();
+    let schema = sequins_arrow_schema::arrow_schema::log_schema();
     let n = logs.len();
 
     let log_ids: Vec<String> = logs.iter().map(|l| l.id.to_hex()).collect();
@@ -185,7 +184,7 @@ fn logs_to_batch(logs: &[LogEntry]) -> RecordBatch {
 
 // Helper: Convert metric data points to a RecordBatch directly (without ColdTier)
 fn data_points_to_batch(data_points: &[MetricDataPoint]) -> RecordBatch {
-    let schema = sequins_types::arrow_schema::series_data_point_schema();
+    let schema = sequins_arrow_schema::arrow_schema::series_data_point_schema();
 
     let series_ids: Vec<u64> = data_points.iter().map(|_| 0u64).collect();
     let metric_ids: Vec<String> = data_points.iter().map(|dp| dp.metric_id.to_hex()).collect();

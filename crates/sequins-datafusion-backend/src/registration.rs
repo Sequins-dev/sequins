@@ -11,8 +11,10 @@ use datafusion::datasource::listing::{
 };
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionContext;
-use sequins_query::error::QueryError;
-use sequins_storage::hot_tier::SignalType;
+use sequins_arrow_schema::SignalType;
+use sequins_cold_tier::ColdTier;
+use sequins_hot_tier::HotTier;
+use sequins_traits::QueryError;
 use std::sync::Arc;
 
 /// Definition of a signal table for registration
@@ -24,7 +26,7 @@ pub(super) struct SignalTableDef {
     pub hot_signal_type: SignalType,
     /// Cold tier path suffix (relative to cold_tier base path)
     pub cold_path: &'static str,
-    /// Schema function from sequins_types::arrow_schema
+    /// Schema function from sequins_arrow_schema::arrow_schema
     pub schema_fn: fn() -> SchemaRef,
 }
 
@@ -36,91 +38,91 @@ pub(super) static SIGNAL_TABLE_DEFS: &[SignalTableDef] = &[
         table_name: "spans",
         hot_signal_type: SignalType::Spans,
         cold_path: "spans",
-        schema_fn: sequins_types::arrow_schema::span_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::span_schema,
     },
     SignalTableDef {
         table_name: "logs",
         hot_signal_type: SignalType::Logs,
         cold_path: "logs",
-        schema_fn: sequins_types::arrow_schema::log_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::log_schema,
     },
     SignalTableDef {
         table_name: "datapoints",
         hot_signal_type: SignalType::Metrics,
         cold_path: "metrics/data",
-        schema_fn: sequins_types::arrow_schema::series_data_point_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::series_data_point_schema,
     },
     SignalTableDef {
         table_name: "metrics",
         hot_signal_type: SignalType::MetricsMetadata,
         cold_path: "metrics/metadata",
-        schema_fn: sequins_types::arrow_schema::metric_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::metric_schema,
     },
     SignalTableDef {
         table_name: "samples",
         hot_signal_type: SignalType::ProfileSamples,
         cold_path: "profiles/samples",
-        schema_fn: sequins_types::arrow_schema::profile_samples_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::profile_samples_schema,
     },
     SignalTableDef {
         table_name: "profiles",
         hot_signal_type: SignalType::ProfilesMetadata,
         cold_path: "profiles/metadata",
-        schema_fn: sequins_types::arrow_schema::profile_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::profile_schema,
     },
     SignalTableDef {
         table_name: "histogram_data_points",
         hot_signal_type: SignalType::Histograms,
         cold_path: "metrics/histograms",
-        schema_fn: sequins_types::arrow_schema::histogram_series_data_point_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::histogram_series_data_point_schema,
     },
     SignalTableDef {
         table_name: "exp_histogram_data_points",
         hot_signal_type: SignalType::ExpHistograms,
         cold_path: "metrics/exp_histograms",
-        schema_fn: sequins_types::arrow_schema::exp_histogram_data_point_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::exp_histogram_data_point_schema,
     },
     SignalTableDef {
         table_name: "profile_stacks",
         hot_signal_type: SignalType::ProfileStacks,
         cold_path: "profiles/stacks",
-        schema_fn: sequins_types::arrow_schema::profile_stacks_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::profile_stacks_schema,
     },
     SignalTableDef {
         table_name: "profile_frames",
         hot_signal_type: SignalType::ProfileFrames,
         cold_path: "profiles/frames",
-        schema_fn: sequins_types::arrow_schema::profile_frames_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::profile_frames_schema,
     },
     SignalTableDef {
         table_name: "profile_mappings",
         hot_signal_type: SignalType::ProfileMappings,
         cold_path: "profiles/mappings",
-        schema_fn: sequins_types::arrow_schema::profile_mappings_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::profile_mappings_schema,
     },
     SignalTableDef {
         table_name: "resources",
         hot_signal_type: SignalType::Resources,
         cold_path: "resources",
-        schema_fn: sequins_types::arrow_schema::resource_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::resource_schema,
     },
     SignalTableDef {
         table_name: "scopes",
         hot_signal_type: SignalType::Scopes,
         cold_path: "scopes",
-        schema_fn: sequins_types::arrow_schema::scope_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::scope_schema,
     },
     SignalTableDef {
         table_name: "span_links",
         hot_signal_type: SignalType::SpanLinks,
         cold_path: "spans/links",
-        schema_fn: sequins_types::arrow_schema::span_links_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::span_links_schema,
     },
     SignalTableDef {
         table_name: "span_events",
         hot_signal_type: SignalType::SpanEvents,
         cold_path: "spans/events",
-        schema_fn: sequins_types::arrow_schema::span_events_schema,
+        schema_fn: sequins_arrow_schema::arrow_schema::span_events_schema,
     },
 ];
 
@@ -128,9 +130,9 @@ pub(super) static SIGNAL_TABLE_DEFS: &[SignalTableDef] = &[
 pub(super) async fn register_union_table(
     ctx: &SessionContext,
     def: &SignalTableDef,
-    hot_tier: Arc<sequins_storage::hot_tier::HotTier>,
+    hot_tier: Arc<HotTier>,
     cold_tier_base_path: &str,
-    cold_tier: Arc<tokio::sync::RwLock<sequins_storage::cold_tier::ColdTier>>,
+    cold_tier: Arc<tokio::sync::RwLock<ColdTier>>,
 ) -> Result<(), QueryError> {
     // Use the BatchChain for this signal type directly as a TableProvider.
     // BatchChain already implements TableProvider, so we just hand the Arc in.

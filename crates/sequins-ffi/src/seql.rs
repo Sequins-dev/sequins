@@ -21,12 +21,12 @@ use crate::types::frames::{
 };
 use crate::types::frames::{DeltaFrame, DeltaOp};
 use futures::StreamExt;
-use sequins_query::ast::QueryAst;
-use sequins_query::error::QueryError;
-use sequins_query::flight::{decode_metadata, SeqlMetadata};
-use sequins_query::frame::{ipc_to_batch, SchemaFrame};
-use sequins_query::parser::{parse, ParseError};
-use sequins_query::QueryApi;
+use seql_ast::ast::QueryAst;
+use seql_parser::{parse, ParseError};
+use sequins_flight::{decode_metadata, SeqlMetadata};
+use sequins_flight::{ipc_to_batch, SchemaFrame};
+use sequins_traits::QueryApi;
+use sequins_traits::QueryError;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};

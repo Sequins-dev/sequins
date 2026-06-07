@@ -24,9 +24,9 @@ use arrow::record_batch::RecordBatch;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
-use sequins_query::flight::{decode_metadata, SeqlMetadata};
-use sequins_query::frame::batch_to_ipc;
-use sequins_query::SeqlStream;
+use sequins_flight::batch_to_ipc;
+use sequins_flight::{decode_metadata, SeqlMetadata};
+use sequins_traits::SeqlStream;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -446,7 +446,7 @@ impl ViewStrategy for FlamegraphStrategy {
                         if fd.data_body.is_empty() {
                             continue;
                         }
-                        let batch = match sequins_query::frame::ipc_to_batch(&fd.data_body) {
+                        let batch = match sequins_flight::ipc_to_batch(&fd.data_body) {
                             Ok(b) => b,
                             Err(e) => {
                                 tracing::warn!("FlamegraphStrategy: failed to decode batch: {e}");

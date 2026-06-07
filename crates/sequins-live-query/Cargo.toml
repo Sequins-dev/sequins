@@ -8,7 +8,7 @@ authors.workspace = true
 description = "Live query subscription management and heartbeat streaming for Sequins"
 
 [dependencies]
-sequins-query = { workspace = true }
+sequins-flight = { workspace = true }
 sequins-wal   = { workspace = true }
 
 # Arrow + Flight

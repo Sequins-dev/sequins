@@ -4,7 +4,6 @@
 //! to Arrow `RecordBatch`es, following Sequins' Arrow-native pipeline design principle.
 //!
 //! # Modules
-//! - `overflow_map` — CBOR-encoded `_overflow_attrs` column builder and DataFusion UDFs
 //! - `helpers` — Resource/scope conversion and service name extraction utilities
 //! - `spans` — `otlp_spans_to_batch`
 //! - `logs` — `otlp_logs_to_batch`
@@ -17,8 +16,6 @@
 pub mod helpers;
 pub mod logs;
 pub mod metrics;
-// overflow_map now lives in sequins-attribute-codec; re-exported here for back-compat.
-pub use sequins_attribute_codec as overflow_map;
 pub mod profiles;
 pub mod span_events;
 pub mod span_links;
@@ -34,15 +31,7 @@ pub use metrics::{
     otlp_datapoints_to_batch, otlp_exp_histograms_to_batch, otlp_histograms_to_batch,
     otlp_metric_type, otlp_metrics_to_batch,
 };
-pub use overflow_map::{build_overflow_column, build_overflow_column_domain};
 pub use profiles::{otlp_profiles_to_batches, ProfileBatches};
 pub use span_events::otlp_span_events_to_batch;
 pub use span_links::otlp_span_links_to_batch;
 pub use spans::otlp_spans_to_batch;
-
-// DataFusion UDF registration (requires the "datafusion" feature)
-#[cfg(feature = "datafusion")]
-pub use overflow_map::{
-    make_overflow_get_bool_udf, make_overflow_get_f64_udf, make_overflow_get_i64_udf,
-    make_overflow_get_str_udf, register_overflow_udfs,
-};

@@ -1,7 +1,7 @@
 //! Arrow data conversion utilities
 
 use arrow::datatypes::DataType as ArrowDataType;
-use sequins_query::schema::{ColumnDef, ColumnRole, DataType};
+use seql_ast::schema::{ColumnDef, ColumnRole, DataType};
 
 /// Convert an Arrow schema into a list of ColumnDef (no batch data needed)
 pub(crate) fn schema_to_col_defs(schema: &arrow::datatypes::Schema) -> Vec<ColumnDef> {
@@ -42,12 +42,12 @@ pub(crate) fn arrow_type_to_data_type(dt: &ArrowDataType) -> DataType {
 
 #[cfg(test)]
 mod tests {
+    use sequins_arrow_schema::SignalType;
     use sequins_storage::test_fixtures::{
         make_test_otlp_logs, make_test_otlp_metrics, make_test_otlp_profiles,
         make_test_otlp_traces, TestStorageBuilder,
     };
-    use sequins_types::ingest::OtlpIngest;
-    use sequins_types::SignalType;
+    use sequins_traits::OtlpIngest;
 
     #[tokio::test]
     async fn test_spans_to_arrow_arrays() {
@@ -65,7 +65,7 @@ mod tests {
         );
 
         // Verify we can convert to Arrow schema
-        let schema = sequins_types::arrow_schema::span_schema();
+        let schema = sequins_arrow_schema::arrow_schema::span_schema();
         assert!(schema.field_with_name("trace_id").is_ok());
         assert!(schema.field_with_name("span_id").is_ok());
         assert!(schema.field_with_name("name").is_ok());
@@ -89,7 +89,7 @@ mod tests {
         );
 
         // Verify we can convert to Arrow schema
-        let schema = sequins_types::arrow_schema::log_schema();
+        let schema = sequins_arrow_schema::arrow_schema::log_schema();
         assert!(schema.field_with_name("log_id").is_ok());
         assert!(schema.field_with_name("body").is_ok());
         assert!(schema.field_with_name("severity_text").is_ok());
@@ -111,13 +111,13 @@ mod tests {
         );
 
         // Verify we can convert to Arrow schema
-        let schema = sequins_types::arrow_schema::metric_schema();
+        let schema = sequins_arrow_schema::arrow_schema::metric_schema();
         assert!(schema.field_with_name("metric_id").is_ok());
         assert!(schema.field_with_name("name").is_ok());
         assert!(schema.field_with_name("metric_type").is_ok());
 
         // Verify data point schema
-        let dp_schema = sequins_types::arrow_schema::metric_data_point_schema();
+        let dp_schema = sequins_arrow_schema::arrow_schema::metric_data_point_schema();
         assert!(dp_schema.field_with_name("metric_id").is_ok());
         assert!(dp_schema.field_with_name("value").is_ok());
         assert!(dp_schema.field_with_name("time_unix_nano").is_ok());
@@ -138,7 +138,7 @@ mod tests {
         );
 
         // Verify we can convert to Arrow schema
-        let schema = sequins_types::arrow_schema::profile_schema();
+        let schema = sequins_arrow_schema::arrow_schema::profile_schema();
         assert!(schema.field_with_name("profile_id").is_ok());
         assert!(schema.field_with_name("time_unix_nano").is_ok());
         assert!(schema.field_with_name("profile_type").is_ok());

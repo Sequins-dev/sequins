@@ -51,8 +51,8 @@ async fn start_server() -> (Channel, tokio::sync::oneshot::Sender<()>, TempDir) 
 }
 
 async fn compile_plan(seql: &str) -> Vec<u8> {
-    let ctx = sequins_query::schema_context().expect("schema_context failed");
-    sequins_query::compile(seql, &ctx)
+    let ctx = seql_substrait::schema_context().expect("schema_context failed");
+    seql_substrait::compile(seql, &ctx)
         .await
         .expect("compile failed")
 }
@@ -152,8 +152,8 @@ async fn test_do_get_invalid_plan_returns_error() {
 #[tokio::test]
 async fn test_seql_metadata_complete_encoding() {
     // Verify SeqlMetadata::Complete round-trips through bincode correctly
-    use sequins_query::flight::{complete_flight_data, decode_metadata, SeqlMetadata};
-    use sequins_query::frame::QueryStats;
+    use sequins_flight::QueryStats;
+    use sequins_flight::{complete_flight_data, decode_metadata, SeqlMetadata};
 
     let fd = complete_flight_data(QueryStats::zero());
     let metadata = decode_metadata(&fd.app_metadata);

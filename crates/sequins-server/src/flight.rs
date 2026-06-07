@@ -32,7 +32,7 @@ use arrow_flight::{
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use prost::Message as _;
-use sequins_query::QueryExec;
+use sequins_traits::QueryExec;
 use std::sync::Arc;
 use tonic::{Request, Response, Status, Streaming};
 

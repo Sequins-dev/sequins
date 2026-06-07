@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use sequins_client::RemoteClient;
 use sequins_datafusion_backend::DataFusionBackend;
-use sequins_query::flight::{decode_metadata, SeqlMetadata};
-use sequins_query::frame::{ipc_to_batch, SchemaFrame, WarningFrame};
-use sequins_query::QueryApi;
+use sequins_flight::{decode_metadata, SeqlMetadata};
+use sequins_flight::{ipc_to_batch, SchemaFrame, WarningFrame};
+use sequins_traits::QueryApi;
 
 use crate::storage::open_local_storage;
 use crate::OutputFormat;
@@ -47,7 +47,7 @@ pub async fn execute(query_str: String, target: String, format: OutputFormat) ->
     }
 }
 
-async fn print_stream_as_table(stream: &mut sequins_query::SeqlStream) -> Result<()> {
+async fn print_stream_as_table(stream: &mut sequins_traits::SeqlStream) -> Result<()> {
     while let Some(result) = stream.next().await {
         let fd = result.context("Query stream error")?;
         let Some(metadata) = decode_metadata(&fd.app_metadata) else {
@@ -88,7 +88,7 @@ async fn print_stream_as_table(stream: &mut sequins_query::SeqlStream) -> Result
 
 /// For JSON output — collect all data rows as serde_json::Value objects.
 async fn collect_data_rows(
-    stream: &mut sequins_query::SeqlStream,
+    stream: &mut sequins_traits::SeqlStream,
 ) -> Result<Vec<serde_json::Value>> {
     let mut rows = Vec::new();
     while let Some(result) = stream.next().await {
@@ -99,7 +99,7 @@ async fn collect_data_rows(
         if matches!(metadata, SeqlMetadata::Data { .. }) {
             if let Ok(batch) = ipc_to_batch(&fd.data_body) {
                 rows.extend(
-                    sequins_query::reducer::batch_to_rows(&batch)
+                    seql_substrait::reducer::batch_to_rows(&batch)
                         .into_iter()
                         .map(serde_json::Value::Array),
                 );
@@ -110,7 +110,7 @@ async fn collect_data_rows(
 }
 
 fn warning_from_parts(code: u32, message: String) -> WarningFrame {
-    use sequins_query::error::WarningCode;
+    use sequins_traits::WarningCode;
     let wc = match code {
         1 => WarningCode::SlowQuery,
         2 => WarningCode::ApproximateResult,
@@ -145,7 +145,7 @@ fn print_batch(batch: &arrow::record_batch::RecordBatch) -> Result<()> {
     println!("{}", col_names.join(" | "));
     println!("{}", "-".repeat(col_names.len() * 20));
 
-    let rows = sequins_query::reducer::batch_to_rows(batch);
+    let rows = seql_substrait::reducer::batch_to_rows(batch);
     for row in &rows {
         let values: Vec<String> = row
             .iter()
@@ -181,8 +181,8 @@ mod tests {
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use sequins_query::error::WarningCode;
-    use sequins_query::schema::{ColumnDef, ColumnRole, DataType, ResponseShape};
+    use seql_ast::schema::{ColumnDef, ColumnRole, DataType, ResponseShape};
+    use sequins_traits::WarningCode;
     use std::sync::Arc;
 
     fn make_string_batch(values: Vec<&str>) -> RecordBatch {
@@ -262,8 +262,8 @@ mod tests {
 
     #[test]
     fn test_flight_data_schema_dispatches() {
-        use sequins_query::flight::schema_flight_data;
-        use sequins_query::schema::ResponseShape;
+        use seql_ast::schema::ResponseShape;
+        use sequins_flight::schema_flight_data;
         let schema_ref = arrow::datatypes::SchemaRef::new(arrow::datatypes::Schema::empty());
         let fd = schema_flight_data(None, schema_ref, ResponseShape::Table, vec![], 0);
         let metadata = decode_metadata(&fd.app_metadata);
@@ -272,8 +272,8 @@ mod tests {
 
     #[test]
     fn test_flight_data_complete_dispatches() {
-        use sequins_query::flight::complete_flight_data;
-        use sequins_query::frame::QueryStats;
+        use sequins_flight::complete_flight_data;
+        use sequins_flight::QueryStats;
         let fd = complete_flight_data(QueryStats::zero());
         let metadata = decode_metadata(&fd.app_metadata);
         assert!(matches!(metadata, Some(SeqlMetadata::Complete { .. })));

@@ -33,9 +33,13 @@ pub fn parse_last(input: &mut &str) -> ModalResult<TimeRange> {
 }
 
 /// Parse `today` → absolute range covering today in UTC
+#[cfg(test)]
 pub fn parse_today(input: &mut &str) -> ModalResult<TimeRange> {
+    parse_today_at(input, system_now_ns())
+}
+
+pub(crate) fn parse_today_at(input: &mut &str, now_ns: u64) -> ModalResult<TimeRange> {
     literal(KW_TODAY).parse_next(input)?;
-    let now_ns = now_ns();
     let day_ns = NS_PER_DAY;
     let start_ns = (now_ns / day_ns) * day_ns;
     Ok(TimeRange::Absolute {
@@ -45,9 +49,13 @@ pub fn parse_today(input: &mut &str) -> ModalResult<TimeRange> {
 }
 
 /// Parse `yesterday` → absolute range covering yesterday in UTC
+#[cfg(test)]
 pub fn parse_yesterday(input: &mut &str) -> ModalResult<TimeRange> {
+    parse_yesterday_at(input, system_now_ns())
+}
+
+pub(crate) fn parse_yesterday_at(input: &mut &str, now_ns: u64) -> ModalResult<TimeRange> {
     literal(KW_YESTERDAY).parse_next(input)?;
-    let now_ns = now_ns();
     let day_ns = NS_PER_DAY;
     let today_start = (now_ns / day_ns) * day_ns;
     let start_ns = today_start - day_ns;
@@ -69,13 +77,22 @@ pub fn parse_between(input: &mut &str) -> ModalResult<TimeRange> {
     Ok(TimeRange::Absolute { start_ns, end_ns })
 }
 
-/// Parse the time scope part of a query: `last <duration>`, `today`, `yesterday`, or `between(...)`
-pub fn parse_time_scope(input: &mut &str) -> ModalResult<TimeRange> {
-    alt((parse_last, parse_today, parse_yesterday, parse_between)).parse_next(input)
+pub(crate) fn parse_time_scope_at(input: &mut &str, now_ns: u64) -> ModalResult<TimeRange> {
+    alt((
+        parse_last,
+        |input: &mut &str| parse_today_at(input, now_ns),
+        |input: &mut &str| parse_yesterday_at(input, now_ns),
+        parse_between,
+    ))
+    .parse_next(input)
 }
 
-fn now_ns() -> u64 {
-    sequins_types::NowTime::now_ns(&sequins_types::SystemNowTime)
+pub(crate) fn system_now_ns() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    nanos.min(u64::MAX as u128) as u64
 }
 
 #[cfg(test)]

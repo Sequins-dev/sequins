@@ -15,7 +15,7 @@ use arrow::datatypes::{DataType, Field};
 use arrow::record_batch::RecordBatch;
 use opentelemetry_proto::tonic::metrics::v1::metric::Data;
 use opentelemetry_proto::tonic::metrics::v1::Metric as OtlpMetric;
-use sequins_types::arrow_schema::{
+use sequins_arrow_schema::arrow_schema::{
     exp_histogram_data_point_schema, histogram_series_data_point_schema, metric_schema,
     series_data_point_schema,
 };

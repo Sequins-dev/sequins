@@ -1,6 +1,6 @@
 //! DataFusion-based SeQL query backend
 //!
-//! Implements `QueryApi` and `QueryExec` from `sequins-query` using multi-root Substrait plans.
+//! Implements query execution traits using multi-root Substrait plans.
 //!
 //! # Architecture
 //!
@@ -25,8 +25,8 @@
 //! - All signal types via `registration::SIGNAL_TABLE_DEFS` — union providers (hot + cold)
 
 use datafusion::execution::context::SessionContext;
-use sequins_query::error::QueryError;
 use sequins_storage::Storage;
+use sequins_traits::QueryError;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -85,7 +85,7 @@ impl DataFusionBackend {
 
     async fn build_session_ctx(&self) -> Result<SessionContext, QueryError> {
         let ctx = SessionContext::new();
-        sequins_otlp::register_overflow_udfs(&ctx);
+        sequins_attribute_codec::register_overflow_udfs(&ctx);
         let hot_tier = self.storage.hot_tier_arc();
         let cold_tier = self.storage.cold_tier_arc();
 

@@ -12,12 +12,15 @@ name = "sequins"
 path = "src/main.rs"
 
 [dependencies]
+seql-ast                   = { workspace = true }
+seql-substrait             = { workspace = true }
+sequins-flight             = { workspace = true }
 sequins-types              = { workspace = true }
-sequins-query              = { workspace = true }
 sequins-storage            = { workspace = true }
 sequins-datafusion-backend = { workspace = true }
 sequins-server             = { workspace = true }
 sequins-client             = { workspace = true }
+sequins-traits             = { workspace = true }
 arrow-flight    = { workspace = true }
 
 # OTLP proto types

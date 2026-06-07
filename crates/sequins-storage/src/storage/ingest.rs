@@ -1,8 +1,8 @@
 use super::Storage;
-use crate::hot_tier::batch_chain::BatchMeta;
-use crate::wal::WalPayload;
-use sequins_query::ast::Signal;
-use sequins_types::SignalType;
+use seql_ast::ast::Signal;
+use sequins_arrow_schema::SignalType;
+use sequins_hot_tier::BatchMeta;
+use sequins_wal::WalPayload;
 use std::sync::Arc;
 
 /// Build a simple `BatchMeta` from a batch — uses row count only for now.
@@ -23,7 +23,7 @@ impl Storage {
     fn register_resource(
         &self,
         resource: Option<&opentelemetry_proto::tonic::resource::v1::Resource>,
-    ) -> sequins_types::error::Result<(u32, Option<Arc<arrow::record_batch::RecordBatch>>)> {
+    ) -> sequins_traits::Result<(u32, Option<Arc<arrow::record_batch::RecordBatch>>)> {
         let resource_attrs = resource
             .map(|r| sequins_otlp::convert_resource_attributes(&r.attributes))
             .unwrap_or_default();
@@ -32,7 +32,7 @@ impl Storage {
             .register_resource_with_batch(&resource_attrs)
             .map(|registration| (registration.id, registration.batch))
             .map_err(|e| {
-                sequins_types::error::Error::Other(format!("Failed to register resource: {}", e))
+                sequins_traits::Error::Other(format!("Failed to register resource: {}", e))
             })
     }
 
@@ -40,21 +40,21 @@ impl Storage {
     fn register_scope(
         &self,
         scope: Option<&opentelemetry_proto::tonic::common::v1::InstrumentationScope>,
-    ) -> sequins_types::error::Result<u32> {
+    ) -> sequins_traits::Result<u32> {
         let scope_model = sequins_otlp::convert_otlp_scope(scope);
-        self.hot_tier.register_scope(&scope_model).map_err(|e| {
-            sequins_types::error::Error::Other(format!("Failed to register scope: {}", e))
-        })
+        self.hot_tier
+            .register_scope(&scope_model)
+            .map_err(|e| sequins_traits::Error::Other(format!("Failed to register scope: {}", e)))
     }
 }
 
 #[async_trait::async_trait]
-impl sequins_types::OtlpIngest for Storage {
+impl sequins_traits::OtlpIngest for Storage {
     #[tracing::instrument(skip_all, name = "ingest_traces")]
     async fn ingest_traces(
         &self,
         request: opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest,
-    ) -> sequins_types::error::Result<
+    ) -> sequins_traits::Result<
         opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceResponse,
     > {
         use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceResponse;
@@ -62,11 +62,9 @@ impl sequins_types::OtlpIngest for Storage {
         self.wal
             .append(WalPayload::Traces(request.clone()), self.clock.now_ns())
             .await
-            .map_err(|e| {
-                sequins_types::error::Error::Other(format!("Failed to append to WAL: {}", e))
-            })?;
+            .map_err(|e| sequins_traits::Error::Other(format!("Failed to append to WAL: {}", e)))?;
 
-        let catalog = sequins_types::arrow_schema::default_schema_catalog();
+        let catalog = sequins_arrow_schema::arrow_schema::default_schema_catalog();
 
         let mut span_items = Vec::new();
         let mut span_events = Vec::new();
@@ -157,7 +155,7 @@ impl sequins_types::OtlpIngest for Storage {
     async fn ingest_logs(
         &self,
         request: opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest,
-    ) -> sequins_types::error::Result<
+    ) -> sequins_traits::Result<
         opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceResponse,
     > {
         use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceResponse;
@@ -165,11 +163,9 @@ impl sequins_types::OtlpIngest for Storage {
         self.wal
             .append(WalPayload::Logs(request.clone()), self.clock.now_ns())
             .await
-            .map_err(|e| {
-                sequins_types::error::Error::Other(format!("Failed to append to WAL: {}", e))
-            })?;
+            .map_err(|e| sequins_traits::Error::Other(format!("Failed to append to WAL: {}", e)))?;
 
-        let catalog = sequins_types::arrow_schema::default_schema_catalog();
+        let catalog = sequins_arrow_schema::arrow_schema::default_schema_catalog();
 
         let mut log_items: Vec<(
             opentelemetry_proto::tonic::logs::v1::LogRecord,
@@ -218,7 +214,7 @@ impl sequins_types::OtlpIngest for Storage {
     async fn ingest_metrics(
         &self,
         request: opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest,
-    ) -> sequins_types::error::Result<
+    ) -> sequins_traits::Result<
         opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceResponse,
     > {
         use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceResponse;
@@ -226,9 +222,7 @@ impl sequins_types::OtlpIngest for Storage {
         self.wal
             .append(WalPayload::Metrics(request.clone()), self.clock.now_ns())
             .await
-            .map_err(|e| {
-                sequins_types::error::Error::Other(format!("Failed to append to WAL: {}", e))
-            })?;
+            .map_err(|e| sequins_traits::Error::Other(format!("Failed to append to WAL: {}", e)))?;
 
         // Collect (OtlpMetric, resource_id, scope_id, service_name) tuples for direct conversion
         let mut items: Vec<(
@@ -347,7 +341,7 @@ impl sequins_types::OtlpIngest for Storage {
     async fn ingest_profiles(
         &self,
         request: opentelemetry_proto::tonic::collector::profiles::v1development::ExportProfilesServiceRequest,
-    ) -> sequins_types::error::Result<
+    ) -> sequins_traits::Result<
         opentelemetry_proto::tonic::collector::profiles::v1development::ExportProfilesServiceResponse,
     >{
         use opentelemetry_proto::tonic::collector::profiles::v1development::ExportProfilesServiceResponse;
@@ -355,9 +349,7 @@ impl sequins_types::OtlpIngest for Storage {
         self.wal
             .append(WalPayload::Profiles(request.clone()), self.clock.now_ns())
             .await
-            .map_err(|e| {
-                sequins_types::error::Error::Other(format!("Failed to append to WAL: {}", e))
-            })?;
+            .map_err(|e| sequins_traits::Error::Other(format!("Failed to append to WAL: {}", e)))?;
 
         let dictionary = request.dictionary.as_ref();
 
@@ -458,7 +450,7 @@ mod tests {
         make_test_otlp_logs, make_test_otlp_metrics, make_test_otlp_profiles_with_samples,
         make_test_otlp_traces, TestStorageBuilder,
     };
-    use sequins_types::OtlpIngest;
+    use sequins_traits::OtlpIngest;
     use std::time::Duration;
 
     #[tokio::test]

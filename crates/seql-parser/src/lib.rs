@@ -7,6 +7,21 @@ mod time;
 use seql_ast::ast::QueryAst;
 use serde::{Deserialize, Serialize};
 
+/// Parser options for query syntax that needs external context.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ParseOptions {
+    /// Current timestamp in nanoseconds since the Unix epoch.
+    pub now_ns: u64,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self {
+            now_ns: time::system_now_ns(),
+        }
+    }
+}
+
 /// A parse error with byte offset for UI highlighting
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ParseError {
@@ -28,7 +43,12 @@ impl std::error::Error for ParseError {}
 
 /// Parse a SeQL text query into a [`QueryAst`]
 pub fn parse(input: &str) -> Result<QueryAst, ParseError> {
-    stages::parse_query(input)
+    parse_with_options(input, ParseOptions::default())
+}
+
+/// Parse a SeQL text query using explicit parser context.
+pub fn parse_with_options(input: &str, options: ParseOptions) -> Result<QueryAst, ParseError> {
+    stages::parse_query_with_options(input, options)
 }
 
 #[cfg(test)]
@@ -143,5 +163,31 @@ mod tests {
     fn parse_simple_histograms() {
         let ast = parse("histograms last 1h").unwrap();
         assert_eq!(ast.scan.signal, Signal::Histograms);
+    }
+
+    #[test]
+    fn parse_with_options_uses_injected_now_for_day_scopes() {
+        let day_ns = 86_400_000_000_000;
+        let options = ParseOptions {
+            now_ns: day_ns * 3 + 123,
+        };
+
+        let today = parse_with_options("spans today", options).unwrap();
+        assert_eq!(
+            today.scan.time_range,
+            seql_ast::ast::TimeRange::Absolute {
+                start_ns: day_ns * 3,
+                end_ns: day_ns * 4,
+            }
+        );
+
+        let yesterday = parse_with_options("spans yesterday", options).unwrap();
+        assert_eq!(
+            yesterday.scan.time_range,
+            seql_ast::ast::TimeRange::Absolute {
+                start_ns: day_ns * 2,
+                end_ns: day_ns * 3,
+            }
+        );
     }
 }

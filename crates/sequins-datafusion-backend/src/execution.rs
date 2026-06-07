@@ -15,16 +15,18 @@ use datafusion_substrait::substrait::proto::{plan_rel, Plan};
 use futures::stream;
 use futures::StreamExt;
 use prost::Message;
-use sequins_query::ast::{QueryMode, Signal};
-use sequins_query::error::QueryError;
-use sequins_query::flight::{
+use seql_ast::ast::{QueryMode, Signal};
+use seql_substrait::seql_ext;
+use seql_substrait::time_column_for_signal;
+use sequins_flight::QueryStats;
+use sequins_flight::{
     append_flight_data, complete_flight_data, data_flight_data, replace_flight_data,
     schema_flight_data,
 };
-use sequins_query::frame::QueryStats;
-use sequins_query::seql_ext;
-use sequins_query::SeqlStream;
+use sequins_live_query::HeartbeatEmitter;
 use sequins_storage::Storage;
+use sequins_traits::QueryError;
+use sequins_traits::SeqlStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -119,8 +121,8 @@ async fn execute_snapshot(
     let plan: Plan = Message::decode(&plan_bytes[..])
         .map_err(|e| exec_err(format!("Failed to decode Substrait plan: {}", e)))?;
     let ext = extract_seql_extension(&plan)?;
-    let response_shape = sequins_query::schema::ResponseShape::from_shape_str(&ext.response_shape)
-        .unwrap_or(sequins_query::schema::ResponseShape::Table);
+    let response_shape = seql_ast::schema::ResponseShape::from_shape_str(&ext.response_shape)
+        .unwrap_or(seql_ast::schema::ResponseShape::Table);
 
     let primary_extensions = Extensions::try_from(&plan.extensions)
         .map_err(|e| exec_err(format!("Failed to parse Substrait extensions: {}", e)))?;
@@ -252,7 +254,7 @@ async fn execute_aux_plans(
         frames.push(Ok(schema_flight_data(
             alias,
             arrow_schema,
-            sequins_query::schema::ResponseShape::Table,
+            seql_ast::schema::ResponseShape::Table,
             col_defs,
             watermark,
         )));
@@ -321,8 +323,8 @@ async fn execute_live(
     let ext = extract_seql_extension(&plan)?;
     tracing::Span::current().record("signal", ext.signal.as_str());
     let primary_signal = signal_from_str(&ext.signal);
-    let response_shape = sequins_query::schema::ResponseShape::from_shape_str(&ext.response_shape)
-        .unwrap_or(sequins_query::schema::ResponseShape::Table);
+    let response_shape = seql_ast::schema::ResponseShape::from_shape_str(&ext.response_shape)
+        .unwrap_or(seql_ast::schema::ResponseShape::Table);
 
     let mut auxiliary_signal_map: Vec<(Signal, String)> = Vec::new();
     for (idx, sig_name) in ext.auxiliary_signals.iter().enumerate() {
@@ -360,7 +362,7 @@ async fn execute_live(
                     .state()
                     .optimize(&logical_plan)
                     .unwrap_or_else(|_| logical_plan.clone());
-                let time_col = sequins_query::compiler::time_column_for_signal(primary_signal);
+                let time_col = time_column_for_signal(primary_signal);
                 primary_filter =
                     extract_filter_predicates(&optimized_for_filter).and_then(|(expr, schema)| {
                         let live_expr = strip_time_upper_bound(expr, time_col);
@@ -392,7 +394,7 @@ async fn execute_live(
 
     // Extract sliding window duration for live expiry scheduling.
     let window_ns: Option<u64> = ext.time_range.as_ref().and_then(|tr| match &tr.range {
-        Some(sequins_query::seql_ext::time_range::Range::SlidingWindowNs(ns)) => Some(*ns),
+        Some(seql_ext::time_range::Range::SlidingWindowNs(ns)) => Some(*ns),
         _ => None,
     });
 
@@ -440,14 +442,13 @@ fn execute_live_append_stream(
     let broadcast_tx = storage.live_broadcast_tx();
     let mut broadcast_rx = broadcast_tx.subscribe();
 
-    let heartbeat_emitter = Arc::new(sequins_storage::live_query::HeartbeatEmitter::new(
+    let heartbeat_emitter = Arc::new(HeartbeatEmitter::new(
         Duration::from_secs(5),
         Arc::clone(storage.wal()),
     ));
 
     // Name of the time column for this signal — used to extract timestamps for expiry.
-    let time_col =
-        sequins_query::compiler::time_column_for_signal(primary_signal).map(|s| s.to_owned());
+    let time_col = time_column_for_signal(primary_signal).map(|s| s.to_owned());
 
     Box::pin(async_stream::stream! {
         let hb_stream = heartbeat_emitter.start();
@@ -527,7 +528,7 @@ fn execute_live_append_stream(
                         if expiry <= now {
                             expiry_queue.pop_front();
                             tracing::debug!(row_id, "live_append expiring batch");
-                            yield Ok(sequins_query::flight::expire_flight_data(None, row_id, 0));
+                            yield Ok(sequins_flight::expire_flight_data(None, row_id, 0));
                         } else {
                             break;
                         }
@@ -585,7 +586,7 @@ fn execute_live_replace_stream(
     let broadcast_tx = storage.live_broadcast_tx();
     let mut broadcast_rx = broadcast_tx.subscribe();
 
-    let heartbeat_emitter = Arc::new(sequins_storage::live_query::HeartbeatEmitter::new(
+    let heartbeat_emitter = Arc::new(HeartbeatEmitter::new(
         Duration::from_secs(5),
         Arc::clone(storage.wal()),
     ));
@@ -750,14 +751,14 @@ mod tests {
     use crate::DataFusionBackend;
     use arrow_flight::FlightData;
     use futures::StreamExt;
-    use sequins_query::flight::{decode_metadata, SeqlMetadata};
-    use sequins_query::QueryApi;
+    use sequins_arrow_schema::SignalType;
+    use sequins_flight::{decode_metadata, SeqlMetadata};
     use sequins_storage::test_fixtures::{
         make_test_otlp_logs, make_test_otlp_logs_at, make_test_otlp_metrics, make_test_otlp_traces,
         make_test_otlp_traces_at, now_ns, TestStorageBuilder,
     };
-    use sequins_types::ingest::OtlpIngest;
-    use sequins_types::SignalType;
+    use sequins_traits::OtlpIngest;
+    use sequins_traits::QueryApi;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -874,7 +875,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// Receive the next FlightData from a stream, with a 2-second wall-clock timeout.
-    async fn next_fd(stream: &mut sequins_query::SeqlStream) -> FlightData {
+    async fn next_fd(stream: &mut sequins_traits::SeqlStream) -> FlightData {
         tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
             .expect("timeout waiting for next frame")
@@ -883,7 +884,7 @@ mod tests {
     }
 
     /// Collect all historical frames (Schema + any Data) until the stream would block.
-    async fn collect_historical(stream: &mut sequins_query::SeqlStream) -> Vec<FlightData> {
+    async fn collect_historical(stream: &mut sequins_traits::SeqlStream) -> Vec<FlightData> {
         let mut frames = Vec::new();
         loop {
             match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {

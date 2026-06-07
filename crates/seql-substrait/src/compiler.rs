@@ -552,58 +552,70 @@ pub fn schema_context() -> Result<SessionContext, QueryError> {
     register_overflow_stubs(&ctx);
 
     // Register empty MemTable for every signal type (needed for Navigate JOINs and Merge aux roots)
-    register_empty_table(&ctx, "spans", sequins_types::arrow_schema::span_schema())?;
-    register_empty_table(&ctx, "logs", sequins_types::arrow_schema::log_schema())?;
+    register_empty_table(
+        &ctx,
+        "spans",
+        sequins_arrow_schema::arrow_schema::span_schema(),
+    )?;
+    register_empty_table(
+        &ctx,
+        "logs",
+        sequins_arrow_schema::arrow_schema::log_schema(),
+    )?;
     register_empty_table(
         &ctx,
         "metrics",
-        sequins_types::arrow_schema::metric_schema(),
+        sequins_arrow_schema::arrow_schema::metric_schema(),
     )?;
     register_empty_table(
         &ctx,
         "datapoints",
-        sequins_types::arrow_schema::series_data_point_schema(),
+        sequins_arrow_schema::arrow_schema::series_data_point_schema(),
     )?;
     register_empty_table(
         &ctx,
         "histogram_data_points",
-        sequins_types::arrow_schema::histogram_series_data_point_schema(),
+        sequins_arrow_schema::arrow_schema::histogram_series_data_point_schema(),
     )?;
     register_empty_table(
         &ctx,
         "samples",
-        sequins_types::arrow_schema::profile_samples_schema(),
+        sequins_arrow_schema::arrow_schema::profile_samples_schema(),
     )?;
     register_empty_table(
         &ctx,
         "profiles",
-        sequins_types::arrow_schema::profile_schema(),
+        sequins_arrow_schema::arrow_schema::profile_schema(),
     )?;
     register_empty_table(
         &ctx,
         "profile_stacks",
-        sequins_types::arrow_schema::profile_stacks_schema(),
+        sequins_arrow_schema::arrow_schema::profile_stacks_schema(),
     )?;
     register_empty_table(
         &ctx,
         "profile_frames",
-        sequins_types::arrow_schema::profile_frames_schema(),
+        sequins_arrow_schema::arrow_schema::profile_frames_schema(),
     )?;
     register_empty_table(
         &ctx,
         "profile_mappings",
-        sequins_types::arrow_schema::profile_mappings_schema(),
+        sequins_arrow_schema::arrow_schema::profile_mappings_schema(),
     )?;
     register_empty_table(
         &ctx,
         "resources",
-        sequins_types::arrow_schema::resource_schema(),
+        sequins_arrow_schema::arrow_schema::resource_schema(),
     )?;
-    register_empty_table(&ctx, "scopes", sequins_types::arrow_schema::scope_schema())?;
+    register_empty_table(
+        &ctx,
+        "scopes",
+        sequins_arrow_schema::arrow_schema::scope_schema(),
+    )?;
     register_empty_table(
         &ctx,
         "span_links",
-        sequins_types::arrow_schema::span_links_schema(),
+        sequins_arrow_schema::arrow_schema::span_links_schema(),
     )?;
 
     Ok(ctx)
@@ -990,7 +1002,7 @@ fn field_to_expr(field: &FieldRef, ctx: &SessionContext) -> Result<DfExpr, Query
     use seql_ast::ast::AttrScope;
     match field.scope {
         AttrScope::Attribute => {
-            let catalog = sequins_types::arrow_schema::default_schema_catalog();
+            let catalog = sequins_arrow_schema::arrow_schema::default_schema_catalog();
             if let Some(idx) = catalog.column_index(&field.name) {
                 // Promoted attribute: use the catalog column name directly (no prefix).
                 // e.g. "http.request.method" → col("http_request_method")

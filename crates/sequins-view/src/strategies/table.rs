@@ -13,8 +13,8 @@ use crate::strategy::{ViewDeltaStream, ViewStrategy};
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
-use sequins_query::flight::{decode_metadata, SeqlMetadata};
-use sequins_query::SeqlStream;
+use sequins_flight::{decode_metadata, SeqlMetadata};
+use sequins_traits::SeqlStream;
 
 // ── Routing mode ──────────────────────────────────────────────────────────────
 

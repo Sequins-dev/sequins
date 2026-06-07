@@ -20,7 +20,7 @@ final class DataSourceTests: XCTestCase {
 
     func testCreateLocalDataSource() throws {
         let dbPath = tempDir.appendingPathComponent("test.db").path
-        let config = OTLPServerConfig(grpcPort: 4317, httpPort: 4318)
+        let config = OTLPServerConfig(grpcPort: 0, httpPort: 0)
 
         let dataSource = try DataSource.local(dbPath: dbPath, config: config)
         XCTAssertNotNil(dataSource)
@@ -60,5 +60,10 @@ final class DataSourceTests: XCTestCase {
         let customConfig = OTLPServerConfig(grpcPort: 5000, httpPort: 5001)
         XCTAssertEqual(customConfig.grpcPort, 5000)
         XCTAssertEqual(customConfig.httpPort, 5001)
+
+        // Test ephemeral-port configuration for isolated test/runtime instances
+        let ephemeralConfig = OTLPServerConfig(grpcPort: 0, httpPort: 0)
+        XCTAssertEqual(ephemeralConfig.grpcPort, 0)
+        XCTAssertEqual(ephemeralConfig.httpPort, 0)
     }
 }

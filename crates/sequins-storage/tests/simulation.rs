@@ -12,15 +12,13 @@ use arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans};
-use sequins_storage::{
-    config::HotTierConfig,
-    hot_tier::{batch_chain::BatchMeta, core::HotTier},
-    wal::{Wal, WalConfig, WalPayload},
-};
+use sequins_arrow_schema::SignalType;
+use sequins_hot_tier::{BatchMeta, HotTier};
+use sequins_storage::config::HotTierConfig;
 use sequins_types::models::{
     AttributeValue, Duration, LogEntry, LogId, LogSeverity, Span, SpanId, Timestamp, TraceId,
 };
-use sequins_types::SignalType;
+use sequins_wal::{Wal, WalConfig, WalPayload};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;

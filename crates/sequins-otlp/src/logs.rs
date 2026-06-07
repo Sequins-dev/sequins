@@ -1,12 +1,12 @@
 //! Direct OTLP log → Arrow RecordBatch conversion
 
 use crate::helpers::PromotedAttrBuilder;
-use crate::overflow_map::build_overflow_column;
 use arrow::array::{ArrayRef, StringViewArray, TimestampNanosecondArray, UInt32Array, UInt8Array};
 use arrow::record_batch::RecordBatch;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 use opentelemetry_proto::tonic::logs::v1::LogRecord;
-use sequins_types::arrow_schema::log_schema_with_catalog;
+use sequins_arrow_schema::arrow_schema::log_schema_with_catalog;
+use sequins_attribute_codec::build_overflow_column;
 use sequins_types::models::{LogId, LogSeverity, SpanId, Timestamp, TraceId};
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// The output schema is `log_schema_with_catalog(catalog)`.
 pub fn otlp_logs_to_batch(
     items: Vec<(LogRecord, u32, u32, String)>,
-    catalog: &sequins_types::SchemaCatalog,
+    catalog: &sequins_arrow_schema::SchemaCatalog,
 ) -> Result<RecordBatch, String> {
     let schema = log_schema_with_catalog(catalog);
     let n = items.len();
@@ -148,7 +148,7 @@ mod tests {
     use arrow::array::Array;
     use opentelemetry_proto::tonic::common::v1::AnyValue as OtlpAnyValue;
     use opentelemetry_proto::tonic::logs::v1::LogRecord;
-    use sequins_types::schema_catalog::SchemaCatalog;
+    use sequins_arrow_schema::schema_catalog::SchemaCatalog;
 
     fn empty_catalog() -> SchemaCatalog {
         SchemaCatalog::new(vec![])

@@ -1,13 +1,13 @@
 //! Direct OTLP span → Arrow RecordBatch conversion
 
 use crate::helpers::PromotedAttrBuilder;
-use crate::overflow_map::build_overflow_column;
 use arrow::array::{
     ArrayRef, Int64Array, StringViewArray, TimestampNanosecondArray, UInt32Array, UInt8Array,
 };
 use arrow::record_batch::RecordBatch;
 use opentelemetry_proto::tonic::trace::v1::Span as OtlpSpan;
-use sequins_types::arrow_schema::span_schema_with_catalog;
+use sequins_arrow_schema::arrow_schema::span_schema_with_catalog;
+use sequins_attribute_codec::build_overflow_column;
 use sequins_types::models::{SpanId, TraceId};
 use std::sync::Arc;
 
@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// The output schema is `span_schema_with_catalog(catalog)`.
 pub fn otlp_spans_to_batch(
     items: Vec<(OtlpSpan, u32, u32)>,
-    catalog: &sequins_types::SchemaCatalog,
+    catalog: &sequins_arrow_schema::SchemaCatalog,
 ) -> Result<RecordBatch, String> {
     let schema = span_schema_with_catalog(catalog);
     let n = items.len();
@@ -148,7 +148,7 @@ mod tests {
         any_value::Value as OtlpValue, AnyValue, KeyValue,
     };
     use opentelemetry_proto::tonic::trace::v1::{span::SpanKind, Status};
-    use sequins_types::schema_catalog::{
+    use sequins_arrow_schema::schema_catalog::{
         AttributeValueType, EncodingHint, PromotedAttribute, SchemaCatalog,
     };
 

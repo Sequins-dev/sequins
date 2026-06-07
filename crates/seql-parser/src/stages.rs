@@ -5,8 +5,8 @@ use crate::lexer::{
     KW_GROUP, KW_LAST, KW_MERGE, KW_NAVIGATE, KW_OFFSET, KW_PATTERNS, KW_SELECT, KW_SORT, KW_TAKE,
     KW_UNIQ, KW_WHERE,
 };
-use crate::time::{duration_ns, parse_time_scope};
-use crate::ParseError;
+use crate::time::{duration_ns, parse_time_scope_at};
+use crate::{ParseError, ParseOptions};
 use seql_ast::ast::{
     AggregateFn, AggregateStage, Aggregation, AttrScope, CompareExpr, CompareOp, ComputeStage,
     Derivation, Expr, FieldRef, FilterStage, GroupExpr, LimitStage, Literal, MergeStage,
@@ -39,10 +39,10 @@ fn parse_signal(input: &mut &str) -> ModalResult<Signal> {
     .parse_next(input)
 }
 
-fn parse_scan(input: &mut &str) -> ModalResult<Scan> {
+fn parse_scan_with_options(input: &mut &str, options: ParseOptions) -> ModalResult<Scan> {
     let signal = parse_signal.parse_next(input)?;
     ws1.parse_next(input)?;
-    let time_range = parse_time_scope.parse_next(input)?;
+    let time_range = parse_time_scope_at(input, options.now_ns)?;
     Ok(Scan { signal, time_range })
 }
 
@@ -469,8 +469,11 @@ fn parse_stage(input: &mut &str) -> ModalResult<Stage> {
     .parse_next(input)
 }
 
-/// Parse a complete SeQL query string
-pub fn parse_query(input: &str) -> Result<QueryAst, ParseError> {
+/// Parse a complete SeQL query string with explicit parser context.
+pub fn parse_query_with_options(
+    input: &str,
+    options: ParseOptions,
+) -> Result<QueryAst, ParseError> {
     let mut s = input.trim();
     let original = s;
 
@@ -487,7 +490,7 @@ pub fn parse_query(input: &str) -> Result<QueryAst, ParseError> {
         // (simple implementation — let bindings not yet supported)
 
         // Parse the primary scan
-        let scan = match parse_scan.parse_next(&mut s) {
+        let scan = match parse_scan_with_options(&mut s, options) {
             Ok(scan) => scan,
             Err(_) => {
                 return Err(ParseError {
@@ -548,6 +551,10 @@ mod tests {
         AttrScope, CompareExpr, CompareOp, Expr, FieldRef, FilterStage, LimitStage, Literal,
         NavigateStage, Predicate, Signal, TimeRange,
     };
+
+    fn parse_query(input: &str) -> Result<QueryAst, ParseError> {
+        parse_query_with_options(input, ParseOptions::default())
+    }
 
     #[test]
     fn parse_spans_last_1h() {

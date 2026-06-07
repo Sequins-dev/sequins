@@ -9,6 +9,7 @@ description = "Vortex columnar cold tier storage for Sequins"
 
 [dependencies]
 # Internal
+sequins-arrow-schema          = { workspace = true }
 sequins-types                 = { workspace = true }
 sequins-companion-index       = { workspace = true }
 sequins-series-index          = { workspace = true }

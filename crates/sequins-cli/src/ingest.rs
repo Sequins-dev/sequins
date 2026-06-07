@@ -8,7 +8,7 @@ use opentelemetry_proto::tonic::collector::{
     trace::v1::{ExportTraceServiceRequest, ExportTraceServiceResponse},
 };
 use prost::Message;
-use sequins_types::OtlpIngest;
+use sequins_traits::OtlpIngest;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;

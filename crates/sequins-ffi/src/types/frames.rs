@@ -1,9 +1,9 @@
 //! C-compatible frame types for SeQL streaming results
 
-use sequins_query::error::QueryError;
-use sequins_query::frame::{batch_to_ipc, QueryStats, SchemaFrame, WarningFrame};
+use sequins_flight::{batch_to_ipc, QueryStats, SchemaFrame, WarningFrame};
+use sequins_traits::QueryError;
 
-// Local intermediary types for constructing CDeltaFrame — were previously in sequins_query::frame
+// Local intermediary types for constructing CDeltaFrame.
 pub struct DeltaFrame {
     pub watermark_ns: u64,
     pub ops: Vec<DeltaOp>,
@@ -25,7 +25,7 @@ pub enum DeltaOp {
         batch: arrow::record_batch::RecordBatch,
     },
 }
-use sequins_query::schema::ResponseShape;
+use seql_ast::schema::ResponseShape;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_uint};
 
@@ -194,7 +194,7 @@ pub struct CWarningFrame {
 impl CWarningFrame {
     /// Convert from a Rust `WarningFrame`. Caller must free with `c_warning_frame_free`.
     pub fn from_warning(w: &WarningFrame) -> Box<Self> {
-        use sequins_query::error::WarningCode;
+        use sequins_traits::WarningCode;
         let code = match w.code {
             WarningCode::ResultTruncated => 0,
             WarningCode::SlowQuery => 1,
@@ -331,8 +331,8 @@ pub struct CHeartbeatFrame {
     pub watermark_ns: u64,
 }
 
-impl From<&sequins_query::frame::HeartbeatFrame> for CHeartbeatFrame {
-    fn from(h: &sequins_query::frame::HeartbeatFrame) -> Self {
+impl From<&sequins_flight::HeartbeatFrame> for CHeartbeatFrame {
+    fn from(h: &sequins_flight::HeartbeatFrame) -> Self {
         CHeartbeatFrame {
             watermark_ns: h.watermark_ns,
         }
@@ -493,7 +493,7 @@ mod tests {
     use arrow::array::{Array, StringArray, UInt64Array};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use sequins_query::frame::{ipc_to_batch, HeartbeatFrame};
+    use sequins_flight::{ipc_to_batch, HeartbeatFrame};
     use std::sync::Arc;
 
     fn make_test_batch() -> RecordBatch {

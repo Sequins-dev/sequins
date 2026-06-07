@@ -9,7 +9,6 @@ description = "SeQL text parser — no DataFusion or Arrow dependencies"
 
 [dependencies]
 seql-ast       = { workspace = true }
-sequins-types  = { workspace = true }
 winnow         = { workspace = true }
 serde          = { workspace = true }
 

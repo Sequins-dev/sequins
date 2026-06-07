@@ -110,10 +110,8 @@ impl LayoutReader for IndexedLayoutReader {
                     let bytes = load_bytes(&segment_source, seg).await?;
                     let bloom = BloomFilterSet::deserialize(bytes.as_ref())
                         .map_err(|e| vortex_err!("Failed to deserialize bloom filter: {}", e))?;
-                    for (field, value) in &predicates.equalities {
-                        if !bloom.check(field, value) {
-                            return Ok(Mask::new_false(row_len));
-                        }
+                    if !bloom_may_match_equalities(&bloom, &predicates.equalities) {
+                        return Ok(Mask::new_false(row_len));
                     }
                 }
             }
@@ -231,6 +229,17 @@ fn extract_predicates(expr: &Expression) -> CompanionPredicates {
     predicates
 }
 
+fn bloom_may_match_equalities(bloom: &BloomFilterSet, equalities: &[(String, String)]) -> bool {
+    let bloom_fields = bloom.field_names();
+    for (field, value) in equalities {
+        if bloom_fields.iter().any(|bloom_field| bloom_field == field) && !bloom.check(field, value)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn collect_predicates(expr: &Expression, out: &mut CompanionPredicates) {
     use vortex::array::expr::{Binary, Operator};
 
@@ -317,4 +326,37 @@ fn extract_equality_predicate(expr: &Expression) -> Option<(String, String)> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bloom_pruning_ignores_equalities_for_non_bloom_fields() {
+        let mut bloom = BloomFilterSet::new();
+        bloom.build(
+            "trace_id".to_string(),
+            vec!["trace-1".to_string(), "trace-2".to_string()],
+            0.01,
+        );
+
+        let equalities = vec![("service_name".to_string(), "api".to_string())];
+
+        assert!(bloom_may_match_equalities(&bloom, &equalities));
+    }
+
+    #[test]
+    fn bloom_pruning_rejects_missing_values_for_bloom_fields() {
+        let mut bloom = BloomFilterSet::new();
+        bloom.build(
+            "trace_id".to_string(),
+            vec!["trace-1".to_string(), "trace-2".to_string()],
+            0.01,
+        );
+
+        let equalities = vec![("trace_id".to_string(), "trace-404".to_string())];
+
+        assert!(!bloom_may_match_equalities(&bloom, &equalities));
+    }
 }

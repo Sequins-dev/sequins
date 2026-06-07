@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
             let flush_handle = Storage::start_background_flush(Arc::clone(&storage));
 
             // Wrap storage in DataFusion backend for query execution
-            let backend: Arc<dyn sequins_query::QueryExec> =
+            let backend: Arc<dyn sequins_traits::QueryExec> =
                 Arc::new(DataFusionBackend::new(Arc::clone(&storage)));
 
             let flight_svc = flight_service_server(backend);

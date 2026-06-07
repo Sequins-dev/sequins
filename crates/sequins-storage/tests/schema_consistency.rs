@@ -6,12 +6,12 @@
 //! backend, and OTLP ingest path will all silently disagree about column
 //! layouts.
 
+use sequins_arrow_schema::schema_catalog::SchemaCatalog;
+use sequins_arrow_schema::SignalType;
 use sequins_otlp::{
     otlp_datapoints_to_batch, otlp_exp_histograms_to_batch, otlp_histograms_to_batch,
     otlp_logs_to_batch, otlp_metrics_to_batch, otlp_spans_to_batch,
 };
-use sequins_types::schema_catalog::SchemaCatalog;
-use sequins_types::SignalType;
 
 // ── 5A.1: OTLP batch schemas match SignalType schemas ────────────────────────
 

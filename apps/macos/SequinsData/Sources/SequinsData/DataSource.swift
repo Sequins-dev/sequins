@@ -3,10 +3,10 @@ import SequinsFFI
 
 /// Configuration for the embedded OTLP server
 public struct OTLPServerConfig {
-    /// gRPC port (0 = disabled, default 4317)
+    /// gRPC port. Use 0 to request an OS-assigned ephemeral port.
     public let grpcPort: UInt16
 
-    /// HTTP port (0 = disabled, default 4318)
+    /// HTTP port. Use 0 to request an OS-assigned ephemeral port.
     public let httpPort: UInt16
 
     public init(grpcPort: UInt16 = 4317, httpPort: UInt16 = 4318) {

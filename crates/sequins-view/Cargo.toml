@@ -8,8 +8,9 @@ authors.workspace = true
 description = "Reactive view model layer for Sequins — transforms SeqlStream into entity-level deltas"
 
 [dependencies]
-sequins-query  = { workspace = true }
+sequins-flight = { workspace = true }
 sequins-types  = { workspace = true }
+sequins-traits = { workspace = true }
 arrow          = { workspace = true }
 futures        = { workspace = true }
 async-trait    = { workspace = true }

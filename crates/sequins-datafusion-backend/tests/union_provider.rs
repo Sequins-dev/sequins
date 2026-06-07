@@ -6,9 +6,9 @@
 
 use futures::StreamExt;
 use sequins_datafusion_backend::DataFusionBackend;
-use sequins_query::QueryApi;
 use sequins_storage::test_fixtures::{make_test_otlp_traces, TestStorageBuilder};
-use sequins_types::ingest::OtlpIngest;
+use sequins_traits::OtlpIngest;
+use sequins_traits::QueryApi;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -36,7 +36,7 @@ async fn test_union_provider_hot_and_cold() {
     let mut stream = backend.query(query).await.unwrap();
 
     // Collect results
-    use sequins_query::flight::{decode_metadata, SeqlMetadata};
+    use sequins_flight::{decode_metadata, SeqlMetadata};
     let mut frames = Vec::new();
     while let Some(result) = stream.next().await {
         frames.push(result.unwrap());
@@ -67,7 +67,7 @@ async fn test_union_provider_with_filters() {
     let mut stream = backend.query(query).await.unwrap();
 
     // Collect results
-    use sequins_query::flight::{decode_metadata, SeqlMetadata};
+    use sequins_flight::{decode_metadata, SeqlMetadata};
     let mut frames = Vec::new();
     while let Some(result) = stream.next().await {
         frames.push(result.unwrap());

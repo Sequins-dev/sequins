@@ -1,10 +1,10 @@
 //! Direct OTLP span link → Arrow RecordBatch conversion
 
-use crate::overflow_map::build_overflow_column;
 use arrow::array::{ArrayRef, StringViewArray};
 use arrow::record_batch::RecordBatch;
 use opentelemetry_proto::tonic::common::v1::KeyValue;
-use sequins_types::arrow_schema::span_links_schema;
+use sequins_arrow_schema::arrow_schema::span_links_schema;
+use sequins_attribute_codec::build_overflow_column;
 use sequins_types::models::{SpanId, TraceId};
 use std::sync::Arc;
 
@@ -78,7 +78,7 @@ mod tests {
     use super::*;
     use arrow::array::Array;
     use opentelemetry_proto::tonic::trace::v1::span::Link;
-    use sequins_types::arrow_schema::span_links_schema;
+    use sequins_arrow_schema::arrow_schema::span_links_schema;
 
     fn make_link(target_trace: Vec<u8>, target_span: Vec<u8>, trace_state: &str) -> Link {
         Link {

@@ -9,8 +9,7 @@ description = "Core domain types and traits for Sequins"
 
 [dependencies]
 # Internal crates
-sequins-arrow-schema = { workspace = true }
-sequins-traits       = { workspace = true }
+sequins-traits = { workspace = true }
 
 # Serialization
 serde      = { workspace = true }

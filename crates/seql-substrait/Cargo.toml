@@ -11,6 +11,7 @@ description = "SeQL to Substrait compiler and plan reducer"
 # Internal crates
 seql-ast        = { workspace = true }
 seql-parser     = { workspace = true }
+sequins-arrow-schema = { workspace = true }
 sequins-flight  = { workspace = true }
 sequins-traits  = { workspace = true }
 sequins-types   = { workspace = true }

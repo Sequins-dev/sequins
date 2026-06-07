@@ -38,7 +38,7 @@ use opentelemetry_proto::tonic::collector::{
     },
 };
 use prost::Message as ProstMessage;
-use sequins_types::OtlpIngest;
+use sequins_traits::OtlpIngest;
 use std::sync::Arc;
 use tonic::{transport::Server, Request as TonicRequest, Response as TonicResponse, Status};
 use tower_http::cors::CorsLayer;
@@ -400,7 +400,7 @@ where
     Req: ProstMessage + Default + serde::de::DeserializeOwned,
     Resp: ProstMessage + serde::Serialize,
     F: FnOnce(Arc<dyn OtlpIngest>, Req) -> Fut,
-    Fut: std::future::Future<Output = std::result::Result<Resp, sequins_types::Error>>,
+    Fut: std::future::Future<Output = std::result::Result<Resp, sequins_traits::Error>>,
 {
     let (parts, body) = request.into_parts();
 
@@ -567,10 +567,12 @@ mod tests {
         async fn ingest_traces(
             &self,
             request: ExportTraceServiceRequest,
-        ) -> std::result::Result<ExportTraceServiceResponse, sequins_types::Error> {
+        ) -> std::result::Result<ExportTraceServiceResponse, sequins_traits::Error> {
             // Validate request has data
             if request.resource_spans.is_empty() {
-                return Err(sequins_types::Error::Other("No resource spans".to_string()));
+                return Err(sequins_traits::Error::Other(
+                    "No resource spans".to_string(),
+                ));
             }
             Ok(ExportTraceServiceResponse {
                 partial_success: None,
@@ -580,10 +582,10 @@ mod tests {
         async fn ingest_logs(
             &self,
             request: ExportLogsServiceRequest,
-        ) -> std::result::Result<ExportLogsServiceResponse, sequins_types::Error> {
+        ) -> std::result::Result<ExportLogsServiceResponse, sequins_traits::Error> {
             // Validate request has data
             if request.resource_logs.is_empty() {
-                return Err(sequins_types::Error::Other("No resource logs".to_string()));
+                return Err(sequins_traits::Error::Other("No resource logs".to_string()));
             }
             Ok(ExportLogsServiceResponse {
                 partial_success: None,
@@ -593,10 +595,10 @@ mod tests {
         async fn ingest_metrics(
             &self,
             request: ExportMetricsServiceRequest,
-        ) -> std::result::Result<ExportMetricsServiceResponse, sequins_types::Error> {
+        ) -> std::result::Result<ExportMetricsServiceResponse, sequins_traits::Error> {
             // Validate request has data
             if request.resource_metrics.is_empty() {
-                return Err(sequins_types::Error::Other(
+                return Err(sequins_traits::Error::Other(
                     "No resource metrics".to_string(),
                 ));
             }
@@ -608,10 +610,10 @@ mod tests {
         async fn ingest_profiles(
             &self,
             request: ExportProfilesServiceRequest,
-        ) -> std::result::Result<ExportProfilesServiceResponse, sequins_types::Error> {
+        ) -> std::result::Result<ExportProfilesServiceResponse, sequins_traits::Error> {
             // Validate request has data
             if request.resource_profiles.is_empty() {
-                return Err(sequins_types::Error::Other(
+                return Err(sequins_traits::Error::Other(
                     "No resource profiles".to_string(),
                 ));
             }

@@ -4,7 +4,7 @@ use super::cold_tier::ColdTier;
 use super::helpers;
 use crate::error::{Error, Result};
 use arrow::array::{ArrayRef, RecordBatch};
-use sequins_types::arrow_schema;
+use sequins_arrow_schema::arrow_schema;
 use sequins_types::models::{
     ExponentialHistogramDataPoint, HistogramDataPoint, MetricDataPoint, Timestamp,
 };

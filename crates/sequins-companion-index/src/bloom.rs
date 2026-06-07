@@ -177,10 +177,16 @@ mod tests {
         // Deserialize
         let restored = BloomFilterSet::deserialize(&bytes).unwrap();
 
-        // Verify it works the same
+        // Verify restored membership checks match the original filter. Bloom
+        // filters may return false positives for non-members, so compare the
+        // restored behavior instead of asserting a specific negative result.
         assert!(restored.check("field1", "value1"));
         assert!(restored.check("field1", "value2"));
-        assert!(!restored.check("field1", "value999"));
+        assert_eq!(
+            restored.check("field1", "value999"),
+            bloom_set.check("field1", "value999")
+        );
+        assert!(!restored.check("unknown_field", "value1"));
     }
 
     #[test]

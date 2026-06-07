@@ -3,8 +3,8 @@
 use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringViewArray};
 use opentelemetry_proto::tonic::common::v1::{any_value::Value as OtlpValue, KeyValue};
 use opentelemetry_proto::tonic::resource::v1::Resource;
+use sequins_arrow_schema::schema_catalog::AttributeValueType;
 use sequins_types::models::AttributeValue;
-use sequins_types::schema_catalog::AttributeValueType;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -21,7 +21,7 @@ use std::sync::Arc;
 /// let arrays = builder.finish();
 /// ```
 pub struct PromotedAttrBuilder<'a> {
-    catalog: &'a sequins_types::SchemaCatalog,
+    catalog: &'a sequins_arrow_schema::SchemaCatalog,
     col_strings: Vec<Vec<Option<String>>>,
     col_i64: Vec<Vec<Option<i64>>>,
     col_f64: Vec<Vec<Option<f64>>>,
@@ -31,7 +31,7 @@ pub struct PromotedAttrBuilder<'a> {
 
 impl<'a> PromotedAttrBuilder<'a> {
     /// Create a new builder for the given catalog.
-    pub fn new(catalog: &'a sequins_types::SchemaCatalog) -> Self {
+    pub fn new(catalog: &'a sequins_arrow_schema::SchemaCatalog) -> Self {
         let n = catalog.len();
         Self {
             catalog,

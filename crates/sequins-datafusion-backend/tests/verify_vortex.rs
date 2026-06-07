@@ -1,7 +1,7 @@
 use futures::StreamExt;
 use sequins_datafusion_backend::DataFusionBackend;
-use sequins_query::QueryApi;
 use sequins_storage::{Storage, StorageConfig};
+use sequins_traits::QueryApi;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -29,12 +29,12 @@ async fn check_vortex_query() {
         }
     };
 
-    use sequins_query::flight::{decode_metadata, SeqlMetadata};
+    use sequins_flight::{decode_metadata, SeqlMetadata};
     while let Some(frame_result) = stream.next().await {
         match frame_result {
             Ok(frame) => {
                 if let Some(SeqlMetadata::Data { .. }) = decode_metadata(&frame.app_metadata) {
-                    let batch = sequins_query::frame::ipc_to_batch(&frame.data_body).unwrap();
+                    let batch = sequins_flight::ipc_to_batch(&frame.data_body).unwrap();
                     eprintln!("✅ Got {} rows", batch.num_rows());
                 }
             }

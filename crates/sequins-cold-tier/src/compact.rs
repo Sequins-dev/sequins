@@ -12,7 +12,7 @@ use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use object_store::path::Path as ObjectPath;
-use sequins_types::SignalType;
+use sequins_arrow_schema::SignalType;
 use std::collections::HashMap;
 #[allow(unused_imports)]
 use vortex::VortexSessionDefault;

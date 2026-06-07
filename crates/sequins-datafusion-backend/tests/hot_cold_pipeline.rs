@@ -14,13 +14,15 @@ use opentelemetry_proto::tonic::{
     resource::v1::Resource,
     trace::v1::{ResourceSpans, ScopeSpans, Span, Status},
 };
+use sequins_arrow_schema::SignalType;
 use sequins_datafusion_backend::DataFusionBackend;
-use sequins_query::QueryApi;
 use sequins_storage::{
     config::{ColdTierConfig, CompanionIndexConfig, HotTierConfig, LifecycleConfig, StorageConfig},
     Storage,
 };
-use sequins_types::{ingest::OtlpIngest, models::Duration, SignalType};
+use sequins_traits::OtlpIngest;
+use sequins_traits::QueryApi;
+use sequins_types::models::Duration;
 use std::sync::Arc;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -120,13 +122,13 @@ fn make_spans(n: usize) -> ExportTraceServiceRequest {
 
 /// Collect the total row count from all `Data` frames in a query stream.
 async fn collect_total_rows(backend: &DataFusionBackend, query: &str) -> usize {
-    use sequins_query::flight::{decode_metadata, SeqlMetadata};
+    use sequins_flight::{decode_metadata, SeqlMetadata};
     let mut stream = backend.query(query).await.expect("query failed");
     let mut total = 0usize;
     while let Some(result) = stream.next().await {
         if let Ok(fd) = result {
             if let Some(SeqlMetadata::Data { .. }) = decode_metadata(&fd.app_metadata) {
-                if let Ok(batch) = sequins_query::frame::ipc_to_batch(&fd.data_body) {
+                if let Ok(batch) = sequins_flight::ipc_to_batch(&fd.data_body) {
                     total += batch.num_rows();
                 }
             }

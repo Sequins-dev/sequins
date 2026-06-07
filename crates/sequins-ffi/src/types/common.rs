@@ -227,11 +227,10 @@ impl From<HashMap<String, AttributeValue>> for CKeyValueArray {
 pub extern "C" fn sequins_attribute_value_free(value: CAttributeValue) {
     unsafe {
         match value.tag {
-            CAttributeValueTag::String => {
-                if !value.value.string_val.is_null() {
-                    let _ = CString::from_raw(value.value.string_val);
-                }
+            CAttributeValueTag::String if !value.value.string_val.is_null() => {
+                let _ = CString::from_raw(value.value.string_val);
             }
+            CAttributeValueTag::String => {}
             CAttributeValueTag::StringArray => {
                 let arr = value.value.string_array;
                 if !arr.data.is_null() && arr.len > 0 {
