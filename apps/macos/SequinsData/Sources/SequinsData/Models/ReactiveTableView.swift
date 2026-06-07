@@ -18,8 +18,6 @@ public final class ReactiveTableView {
     public private(set) var isReady: Bool = false
     public private(set) var lastWatermarkNs: UInt64 = 0
     public private(set) var errorMessage: String?
-    /// Incremented whenever `batches` changes. Observers can watch this to schedule reprocessing.
-    public private(set) var batchVersion: Int = 0
 
     private var viewHandle: ViewHandle?
     private var seqlStream: SeQLStream?
@@ -76,7 +74,6 @@ public final class ReactiveTableView {
             guard table == nil else { return }
             DispatchQueue.main.async { [weak self] in
                 self?.owner?.batches.append(batch)
-                self?.owner?.batchVersion += 1
             }
         }
 
@@ -124,6 +121,5 @@ public final class ReactiveTableView {
                 break
             }
         }
-        batchVersion += 1
     }
 }

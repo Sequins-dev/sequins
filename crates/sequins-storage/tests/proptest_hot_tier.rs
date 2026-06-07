@@ -16,6 +16,7 @@ use sequins_types::models::{
     AttributeValue, Duration, LogEntry, LogId, LogSeverity, MetricDataPoint, MetricId, Span,
     SpanId, Timestamp, TraceId,
 };
+use sequins_types::SignalType;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -293,9 +294,9 @@ proptest! {
         let expected_count = spans.len();
 
         let batch = spans_to_batch(&spans);
-        hot_tier.spans.push(Arc::new(batch), simple_meta(expected_count));
+        hot_tier.chain(&SignalType::Spans).push(Arc::new(batch), simple_meta(expected_count));
 
-        prop_assert_eq!(hot_tier.spans.row_count(), expected_count, "Should retrieve all inserted spans");
+        prop_assert_eq!(hot_tier.chain(&SignalType::Spans).row_count(), expected_count, "Should retrieve all inserted spans");
     }
 }
 
@@ -323,9 +324,9 @@ proptest! {
         let expected_count = logs.len();
 
         let batch = logs_to_batch(&logs);
-        hot_tier.logs.push(Arc::new(batch), simple_meta(expected_count));
+        hot_tier.chain(&SignalType::Logs).push(Arc::new(batch), simple_meta(expected_count));
 
-        prop_assert_eq!(hot_tier.logs.row_count(), expected_count, "Should retrieve all inserted logs");
+        prop_assert_eq!(hot_tier.chain(&SignalType::Logs).row_count(), expected_count, "Should retrieve all inserted logs");
     }
 }
 
@@ -350,9 +351,9 @@ proptest! {
         let expected_count = data_points.len();
 
         let batch = data_points_to_batch(&data_points);
-        hot_tier.datapoints.push(Arc::new(batch), simple_meta(expected_count));
+        hot_tier.chain(&SignalType::Metrics).push(Arc::new(batch), simple_meta(expected_count));
 
-        prop_assert_eq!(hot_tier.datapoints.row_count(), expected_count, "Should retrieve all inserted data points");
+        prop_assert_eq!(hot_tier.chain(&SignalType::Metrics).row_count(), expected_count, "Should retrieve all inserted data points");
     }
 }
 
@@ -382,7 +383,7 @@ proptest! {
         let expected_count = spans.len();
 
         let batch = spans_to_batch(&spans);
-        hot_tier.spans.push(Arc::new(batch), simple_meta(expected_count));
+        hot_tier.chain(&SignalType::Spans).push(Arc::new(batch), simple_meta(expected_count));
 
         let stats = hot_tier.stats();
         prop_assert_eq!(stats.span_count, expected_count, "Span count should match inserted count");
@@ -413,7 +414,7 @@ proptest! {
         let expected_count = logs.len();
 
         let batch = logs_to_batch(&logs);
-        hot_tier.logs.push(Arc::new(batch), simple_meta(expected_count));
+        hot_tier.chain(&SignalType::Logs).push(Arc::new(batch), simple_meta(expected_count));
 
         let stats = hot_tier.stats();
         prop_assert_eq!(stats.log_count, expected_count, "Log count should match inserted count");

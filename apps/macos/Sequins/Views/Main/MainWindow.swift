@@ -68,14 +68,30 @@ struct MainWindow: View {
         }
         .toolbar {
             // Service name with expander (left of tabs)
-            ToolbarItem(placement: .navigation) {
-                if let service = appState.selectedService {
-                    ServiceNameView(
-                        serviceName: service.name,
-                        isExpanded: appState.isServiceAttributesExpanded
-                    ) {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            appState.isServiceAttributesExpanded.toggle()
+            if #available(macOS 26.0, *) {
+                ToolbarItem(placement: .navigation) {
+                    if let service = appState.selectedService {
+                        ServiceNameView(
+                            serviceName: service.name,
+                            isExpanded: appState.isServiceAttributesExpanded
+                        ) {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                appState.isServiceAttributesExpanded.toggle()
+                            }
+                        }
+                    }
+                }
+                .sharedBackgroundVisibility(.hidden)
+            } else {
+                ToolbarItem(placement: .navigation) {
+                    if let service = appState.selectedService {
+                        ServiceNameView(
+                            serviceName: service.name,
+                            isExpanded: appState.isServiceAttributesExpanded
+                        ) {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                appState.isServiceAttributesExpanded.toggle()
+                            }
                         }
                     }
                 }

@@ -8,15 +8,12 @@ use opentelemetry_proto::tonic::collector::{
     trace::v1::{ExportTraceServiceRequest, ExportTraceServiceResponse},
 };
 use prost::Message;
-use sequins_storage::config::ColdTierConfig;
-use sequins_storage::{Storage, StorageConfig};
-use sequins_types::models::Duration;
 use sequins_types::OtlpIngest;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
 
+use crate::storage::open_local_storage;
 use crate::{IngestFormat, SignalType};
 
 pub async fn execute(
@@ -29,9 +26,23 @@ pub async fn execute(
     let is_remote = target.starts_with("http://") || target.starts_with("https://");
 
     if is_remote {
-        anyhow::bail!(
-            "Remote OTLP ingestion not yet implemented - need to send HTTP POST to OTLP endpoint"
-        );
+        // Read file, detect format/signal, then POST to the remote OTLP HTTP endpoint.
+        let bytes =
+            fs::read(&file).with_context(|| format!("Failed to read file: {}", file.display()))?;
+        if bytes.is_empty() {
+            anyhow::bail!("File is empty: {}", file.display());
+        }
+        let format = match format {
+            Some(f) => f,
+            None => detect_format(&file, &bytes)?,
+        };
+        let signal = match signal {
+            Some(s) => s,
+            None => anyhow::bail!(
+                "Signal type not specified. Please specify --signal (traces|logs|metrics|profiles)"
+            ),
+        };
+        return ingest_remote(&target, signal, format, bytes).await;
     }
 
     // Read file contents
@@ -59,20 +70,7 @@ pub async fn execute(
     };
 
     // Local ingestion
-    let mut config = StorageConfig {
-        cold_tier: ColdTierConfig {
-            uri: target.clone(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    // Set flush_interval to 0 so run_maintenance_internal() will flush all data immediately
-    config.lifecycle.flush_interval = Duration::from_secs(0);
-    let storage = Arc::new(
-        Storage::new(config)
-            .await
-            .context("Failed to open database")?,
-    );
+    let storage = open_local_storage(&target).await?;
 
     // Decode and ingest based on signal type
     match signal {
@@ -114,6 +112,60 @@ pub async fn execute(
     );
 
     Ok(())
+}
+
+/// Send OTLP data to a remote HTTP endpoint via POST.
+///
+/// The signal is routed to the standard OTLP path:
+/// - traces   → `{base}/v1/traces`
+/// - logs     → `{base}/v1/logs`
+/// - metrics  → `{base}/v1/metrics`
+/// - profiles → `{base}/v1development/profiles`
+async fn ingest_remote(
+    base: &str,
+    signal: SignalType,
+    format: IngestFormat,
+    bytes: Vec<u8>,
+) -> Result<()> {
+    let path = match signal {
+        SignalType::Traces => "v1/traces",
+        SignalType::Logs => "v1/logs",
+        SignalType::Metrics => "v1/metrics",
+        SignalType::Profiles => "v1development/profiles",
+    };
+    let url = format!("{}/{}", base.trim_end_matches('/'), path);
+
+    let (content_type, body) = match format {
+        IngestFormat::Protobuf => ("application/x-protobuf", bytes),
+        IngestFormat::Json => ("application/json", bytes),
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .header("Content-Type", content_type)
+        .body(body)
+        .send()
+        .await
+        .with_context(|| format!("Failed to POST to {}", url))?;
+
+    let status = resp.status();
+    if status.is_success() {
+        println!("✅ Ingested {} to {}", signal_name(signal), url);
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Server returned {} for {}: {}", status, url, body);
+    }
+    Ok(())
+}
+
+fn signal_name(signal: SignalType) -> &'static str {
+    match signal {
+        SignalType::Traces => "traces",
+        SignalType::Logs => "logs",
+        SignalType::Metrics => "metrics",
+        SignalType::Profiles => "profiles",
+    }
 }
 
 fn detect_format(file: &Path, bytes: &[u8]) -> Result<IngestFormat> {

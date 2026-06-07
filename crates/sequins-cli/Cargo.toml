@@ -12,11 +12,12 @@ name = "sequins"
 path = "src/main.rs"
 
 [dependencies]
-sequins-types   = { workspace = true }
-sequins-query   = { workspace = true }
-sequins-storage = { workspace = true }
-sequins-server  = { workspace = true }
-sequins-client  = { workspace = true }
+sequins-types              = { workspace = true }
+sequins-query              = { workspace = true }
+sequins-storage            = { workspace = true }
+sequins-datafusion-backend = { workspace = true }
+sequins-server             = { workspace = true }
+sequins-client             = { workspace = true }
 arrow-flight    = { workspace = true }
 
 # OTLP proto types
@@ -31,6 +32,9 @@ tokio        = { workspace = true }
 tokio-stream = { workspace = true }
 futures      = { workspace = true }
 tonic        = { workspace = true }
+
+# HTTP client (for remote OTLP ingest)
+reqwest = { workspace = true }
 
 # Serialization
 serde      = { workspace = true }

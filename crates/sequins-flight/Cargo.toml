@@ -1,0 +1,24 @@
+[package]
+name = "sequins-flight"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Arrow IPC helpers and Flight metadata encoding for Sequins"
+
+[dependencies]
+# Internal crates
+seql-ast       = { workspace = true }
+sequins-traits = { workspace = true }
+
+# Arrow / Flight
+arrow       = { workspace = true }
+arrow-flight = { workspace = true }
+
+# Serialization
+serde   = { workspace = true }
+bincode = { workspace = true }
+bytes   = { workspace = true }
+
+[dev-dependencies]

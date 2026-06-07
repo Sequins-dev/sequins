@@ -27,7 +27,7 @@ impl ColdTier {
 
         // Build companion index and embed it in the Vortex file.
         use super::index::log_index::LogCompanionIndex;
-        let companion_index = LogCompanionIndex::build_for_batch(&batch)
+        let companion_index = LogCompanionIndex::build_for_batch(&batch, 0.01)
             .map_err(|e| Error::Storage(format!("Failed to build log companion index: {}", e)))?;
         let companion_bytes = companion_index
             .into_companion_bytes()

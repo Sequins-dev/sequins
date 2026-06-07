@@ -48,11 +48,15 @@ thiserror = { workspace = true }
 # Logging
 tracing = { workspace = true }
 
+# Test utilities — only included when test-utils feature is enabled
+tempfile = { workspace = true, optional = true }
+
 [features]
 default = []
-s3    = []
-gcs   = []
-azure = []
+s3         = []
+gcs        = []
+azure      = []
+test-utils = ["dep:tempfile"]
 
 [dev-dependencies]
 tempfile    = { workspace = true }

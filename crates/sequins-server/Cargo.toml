@@ -50,6 +50,7 @@ hex  = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+sequins-datafusion-backend = { workspace = true }
 datafusion = { workspace = true }
 object_store = { workspace = true }
 tempfile = { workspace = true }

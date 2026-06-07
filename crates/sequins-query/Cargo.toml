@@ -9,7 +9,12 @@ description = "SeQL query language — AST, parser, frames, reducer"
 
 [dependencies]
 # Internal crates
-sequins-types = { workspace = true }
+seql-ast        = { workspace = true }
+seql-parser     = { workspace = true }
+sequins-traits  = { workspace = true }
+sequins-types   = { workspace = true }
+sequins-flight  = { workspace = true }
+seql-substrait  = { workspace = true }
 
 # Serialization
 serde      = { workspace = true }

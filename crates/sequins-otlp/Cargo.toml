@@ -8,16 +8,14 @@ authors.workspace = true
 description = "OTLP protobuf → Arrow RecordBatch conversion for Sequins"
 
 [dependencies]
-sequins-types = { workspace = true }
+sequins-types          = { workspace = true }
+sequins-attribute-codec = { workspace = true, features = ["datafusion"] }
 
 # Arrow
 arrow = { workspace = true }
 
 # OpenTelemetry proto
 opentelemetry-proto = { workspace = true }
-
-# CBOR encoding for overflow attribute map
-ciborium = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

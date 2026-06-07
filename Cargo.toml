@@ -1,13 +1,26 @@
 [workspace]
 members = [
+    "crates/seql-ast",
+    "crates/seql-parser",
+    "crates/sequins-flight",
+    "crates/seql-substrait",
+    "crates/sequins-traits",
+    "crates/sequins-arrow-schema",
+    "crates/sequins-pprof",
+    "crates/sequins-companion-index",
+    "crates/sequins-vortex-indexed-layout",
+    "crates/sequins-attribute-codec",
+    "crates/sequins-series-index",
     "crates/sequins-types",
     "crates/sequins-otlp",
     "crates/sequins-query",
     "crates/sequins-wal",
     "crates/sequins-live-query",
+    "crates/sequins-batch-chain",
     "crates/sequins-hot-tier",
     "crates/sequins-cold-tier",
     "crates/sequins-storage",
+    "crates/sequins-datafusion-backend",
     "crates/sequins-view",
     "crates/sequins-client",
     "crates/sequins-server",
@@ -26,6 +39,18 @@ authors = ["Stephen Belanger"]
 
 [workspace.dependencies]
 # Internal crates
+seql-ast        = { path = "crates/seql-ast" }
+seql-parser     = { path = "crates/seql-parser" }
+sequins-flight  = { path = "crates/sequins-flight" }
+seql-substrait  = { path = "crates/seql-substrait" }
+sequins-batch-chain           = { path = "crates/sequins-batch-chain" }
+sequins-traits                = { path = "crates/sequins-traits" }
+sequins-arrow-schema          = { path = "crates/sequins-arrow-schema" }
+sequins-pprof                 = { path = "crates/sequins-pprof" }
+sequins-companion-index       = { path = "crates/sequins-companion-index" }
+sequins-vortex-indexed-layout = { path = "crates/sequins-vortex-indexed-layout" }
+sequins-attribute-codec       = { path = "crates/sequins-attribute-codec" }
+sequins-series-index          = { path = "crates/sequins-series-index" }
 sequins-types      = { path = "crates/sequins-types" }
 sequins-otlp       = { path = "crates/sequins-otlp" }
 sequins-query      = { path = "crates/sequins-query" }
@@ -33,8 +58,9 @@ sequins-wal        = { path = "crates/sequins-wal" }
 sequins-live-query = { path = "crates/sequins-live-query" }
 sequins-hot-tier   = { path = "crates/sequins-hot-tier" }
 sequins-cold-tier  = { path = "crates/sequins-cold-tier" }
-sequins-storage    = { path = "crates/sequins-storage" }
-sequins-view       = { path = "crates/sequins-view" }
+sequins-storage              = { path = "crates/sequins-storage" }
+sequins-datafusion-backend   = { path = "crates/sequins-datafusion-backend" }
+sequins-view                 = { path = "crates/sequins-view" }
 sequins-client     = { path = "crates/sequins-client" }
 sequins-server     = { path = "crates/sequins-server" }
 sequins-ffi        = { path = "crates/sequins-ffi" }

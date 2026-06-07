@@ -123,6 +123,12 @@ struct ServiceListView: View {
         do {
             let stream = try dataSource.executeLiveSeQL("resources last 24h")
 
+            stream.onSchemaCallback = { _ in
+                Task { @MainActor in
+                    self.isLoading = false
+                }
+            }
+
             stream.onBatchCallback = { batch, _ in
                 Task { @MainActor in
                     self.resourceRows.append(contentsOf: self.parseRows(from: batch))
@@ -148,14 +154,10 @@ struct ServiceListView: View {
                             break
                         }
                     }
-                    self.isLoading = false
                 }
             }
 
             liveStream = stream
-            // Clear loading immediately — all data (including historical) arrives via
-            // onDeltaCallback for live queries. If no data exists yet, show empty state.
-            isLoading = false
         } catch {
             print("[ServiceListView] Failed to start live stream: \(error)")
             isLoading = false

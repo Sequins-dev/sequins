@@ -8,99 +8,23 @@ use sequins_types::models::Timestamp;
 
 impl ColdTier {
     pub async fn write_profile_frames(&self, batch: RecordBatch) -> Result<String> {
-        if batch.num_rows() == 0 {
-            return Ok(String::new());
-        }
-
-        let partition_path = helpers::generate_partition_path(
-            "profiles/frames",
-            &Timestamp::now()
-                .map_err(|e| Error::Storage(format!("Failed to get current time: {}", e)))?,
-        );
-
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
-        let full_path = format!("{}/{}", base_path, partition_path);
-
-        self.write_record_batch(batch.clone(), batch.schema(), &full_path, None)
-            .await?;
-
-        Ok(partition_path)
+        self.write_signal_batch("profiles/frames", batch, None)
+            .await
     }
 
     pub async fn write_profile_stacks(&self, batch: RecordBatch) -> Result<String> {
-        if batch.num_rows() == 0 {
-            return Ok(String::new());
-        }
-
-        let partition_path = helpers::generate_partition_path(
-            "profiles/stacks",
-            &Timestamp::now()
-                .map_err(|e| Error::Storage(format!("Failed to get current time: {}", e)))?,
-        );
-
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
-        let full_path = format!("{}/{}", base_path, partition_path);
-
-        self.write_record_batch(batch.clone(), batch.schema(), &full_path, None)
-            .await?;
-
-        Ok(partition_path)
+        self.write_signal_batch("profiles/stacks", batch, None)
+            .await
     }
 
     pub async fn write_profile_mappings(&self, batch: RecordBatch) -> Result<String> {
-        if batch.num_rows() == 0 {
-            return Ok(String::new());
-        }
-
-        let partition_path = helpers::generate_partition_path(
-            "profiles/mappings",
-            &Timestamp::now()
-                .map_err(|e| Error::Storage(format!("Failed to get current time: {}", e)))?,
-        );
-
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
-        let full_path = format!("{}/{}", base_path, partition_path);
-
-        self.write_record_batch(batch.clone(), batch.schema(), &full_path, None)
-            .await?;
-
-        Ok(partition_path)
+        self.write_signal_batch("profiles/mappings", batch, None)
+            .await
     }
 
     pub async fn write_profile_samples(&self, batch: RecordBatch) -> Result<String> {
-        if batch.num_rows() == 0 {
-            return Ok(String::new());
-        }
-
-        let partition_path = helpers::generate_partition_path(
-            "profiles/samples",
-            &Timestamp::now()
-                .map_err(|e| Error::Storage(format!("Failed to get current time: {}", e)))?,
-        );
-
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
-        let full_path = format!("{}/{}", base_path, partition_path);
-
-        self.write_record_batch(batch.clone(), batch.schema(), &full_path, None)
-            .await?;
-
-        Ok(partition_path)
+        self.write_signal_batch("profiles/samples", batch, None)
+            .await
     }
 
     /// Write a batch of profiles to cold tier storage.

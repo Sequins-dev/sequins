@@ -1,0 +1,21 @@
+[package]
+name = "sequins-series-index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Metric time series identity index for Sequins (no Vortex/Arrow dependency)"
+
+[dependencies]
+thiserror = { workspace = true }
+
+# Serialization
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+# Object storage (for persist/load)
+object_store = { workspace = true }
+
+# Async
+tokio = { workspace = true }

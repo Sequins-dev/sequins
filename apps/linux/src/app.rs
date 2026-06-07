@@ -1652,14 +1652,10 @@ mod tab {
 }
 
 fn show_error_dialog(parent: &adw::ApplicationWindow, title: &str, message: &str) {
-    let dialog = gtk4::MessageDialog::builder()
-        .transient_for(parent)
+    let dialog = gtk4::AlertDialog::builder()
+        .message(title)
+        .detail(message)
         .modal(true)
-        .message_type(gtk4::MessageType::Error)
-        .buttons(gtk4::ButtonsType::Close)
-        .text(title)
-        .secondary_text(message)
         .build();
-    dialog.connect_response(|d, _| d.destroy());
-    dialog.present();
+    dialog.show(Some(parent));
 }

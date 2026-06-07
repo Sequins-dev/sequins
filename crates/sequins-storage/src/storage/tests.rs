@@ -7,7 +7,7 @@ use sequins_types::models::{
     AttributeValue, Duration, LogEntry, LogId, Metric, MetricType, Profile, ProfileId, ProfileType,
     Span, SpanId, SpanKind, SpanStatus, Timestamp, TraceId,
 };
-use sequins_types::{ManagementApi, OtlpIngest};
+use sequins_types::{ManagementApi, OtlpIngest, SignalType};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -196,7 +196,9 @@ impl Storage {
             max_timestamp: i64::MAX,
             row_count: batch.num_rows(),
         };
-        self.hot_tier.spans.push(Arc::new(batch), meta);
+        self.hot_tier
+            .chain(&SignalType::Spans)
+            .push(Arc::new(batch), meta);
         Ok(())
     }
 
@@ -272,7 +274,9 @@ impl Storage {
             max_timestamp: i64::MAX,
             row_count: batch.num_rows(),
         };
-        self.hot_tier.logs.push(Arc::new(batch), meta);
+        self.hot_tier
+            .chain(&SignalType::Logs)
+            .push(Arc::new(batch), meta);
         Ok(())
     }
 
@@ -331,7 +335,9 @@ impl Storage {
             max_timestamp: i64::MAX,
             row_count: batch.num_rows(),
         };
-        self.hot_tier.metrics.push(Arc::new(batch), meta);
+        self.hot_tier
+            .chain(&SignalType::MetricsMetadata)
+            .push(Arc::new(batch), meta);
         Ok(())
     }
 
@@ -395,7 +401,9 @@ impl Storage {
             max_timestamp: i64::MAX,
             row_count: batch.num_rows(),
         };
-        self.hot_tier.profiles.push(Arc::new(batch), meta);
+        self.hot_tier
+            .chain(&SignalType::ProfilesMetadata)
+            .push(Arc::new(batch), meta);
         Ok(())
     }
 }
@@ -792,11 +800,11 @@ async fn test_ingest_traces_end_to_end() {
     assert_eq!(stats.span_count, 10, "Expected 10 spans in hot tier");
 
     // Verify resources were registered (2 resources)
-    let resource_count = storage.hot_tier.resources.row_count();
+    let resource_count = storage.hot_tier.chain(&SignalType::Resources).row_count();
     assert_eq!(resource_count, 2, "Expected 2 resources registered");
 
     // Verify scopes were registered
-    let scope_count = storage.hot_tier.scopes.row_count();
+    let scope_count = storage.hot_tier.chain(&SignalType::Scopes).row_count();
     assert!(scope_count > 0, "Expected at least 1 scope registered");
 }
 
@@ -829,7 +837,7 @@ async fn test_ingest_traces_resource_dedup() {
     );
 
     // Resources are deduplicated via content-addressed hash — only 1 unique resource
-    let resource_count = storage.hot_tier.resources.row_count();
+    let resource_count = storage.hot_tier.chain(&SignalType::Resources).row_count();
     assert_eq!(resource_count, 1, "Expected only 1 deduplicated resource");
 }
 
@@ -851,7 +859,7 @@ async fn test_ingest_logs_end_to_end() {
     assert_eq!(stats.log_count, 20, "Expected 20 logs in hot tier");
 
     // Verify resources were registered
-    let resource_count = storage.hot_tier.resources.row_count();
+    let resource_count = storage.hot_tier.chain(&SignalType::Resources).row_count();
     assert_eq!(resource_count, 2, "Expected 2 resources registered");
 }
 
@@ -873,7 +881,7 @@ async fn test_ingest_metrics_end_to_end() {
     assert_eq!(stats.metric_count, 6, "Expected 6 metrics in hot tier");
 
     // Verify resources were registered
-    let resource_count = storage.hot_tier.resources.row_count();
+    let resource_count = storage.hot_tier.chain(&SignalType::Resources).row_count();
     assert_eq!(resource_count, 2, "Expected 2 resources registered");
 }
 
@@ -905,7 +913,7 @@ async fn test_ingest_metrics_series_dedup() {
     );
 
     // Resources are deduplicated via content-addressed hash — only 1 unique resource
-    let resource_count = storage.hot_tier.resources.row_count();
+    let resource_count = storage.hot_tier.chain(&SignalType::Resources).row_count();
     assert_eq!(resource_count, 1, "Expected only 1 deduplicated resource");
 }
 
@@ -946,7 +954,7 @@ async fn test_ingest_scope_registration() {
     storage.ingest_traces(request).await.unwrap();
 
     // Verify scopes were registered — check the scopes BatchChain has rows
-    let scope_count = storage.hot_tier.scopes.row_count();
+    let scope_count = storage.hot_tier.chain(&SignalType::Scopes).row_count();
     assert!(scope_count > 0, "Expected scopes to be registered");
 }
 
@@ -1068,8 +1076,8 @@ async fn test_maintenance_flushes_resources_and_scopes() {
     storage.ingest_traces(request).await.unwrap();
 
     // Verify resources and scopes exist via BatchChain row counts
-    let resources_before = storage.hot_tier.resources.row_count();
-    let scopes_before = storage.hot_tier.scopes.row_count();
+    let resources_before = storage.hot_tier.chain(&SignalType::Resources).row_count();
+    let scopes_before = storage.hot_tier.chain(&SignalType::Scopes).row_count();
     assert_eq!(resources_before, 2, "Expected 2 resources");
     assert!(scopes_before > 0, "Expected scopes to exist");
 
@@ -1081,8 +1089,8 @@ async fn test_maintenance_flushes_resources_and_scopes() {
     assert!(result.is_ok(), "Maintenance should succeed");
 
     // Resources and scopes remain in hot tier chains (they're not evicted)
-    let resources_after = storage.hot_tier.resources.row_count();
-    let scopes_after = storage.hot_tier.scopes.row_count();
+    let resources_after = storage.hot_tier.chain(&SignalType::Resources).row_count();
+    let scopes_after = storage.hot_tier.chain(&SignalType::Scopes).row_count();
     assert_eq!(resources_after, 2, "Resources should still be in hot tier");
     assert!(scopes_after > 0, "Scopes should still be in hot tier");
 }

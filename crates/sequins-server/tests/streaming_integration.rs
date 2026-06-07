@@ -5,8 +5,9 @@ use arrow_flight::sql::{CommandStatementSubstraitPlan, ProstMessageExt, Substrai
 use arrow_flight::{FlightDescriptor, Ticket};
 use futures::StreamExt;
 use prost::Message as _;
+use sequins_datafusion_backend::DataFusionBackend;
 use sequins_server::flight_service_server;
-use sequins_storage::{DataFusionBackend, Storage};
+use sequins_storage::Storage;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::net::TcpListener;

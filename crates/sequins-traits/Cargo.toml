@@ -1,0 +1,29 @@
+[package]
+name = "sequins-traits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Core traits, error types, and shared utility types for Sequins (no heavy deps)"
+
+[dependencies]
+# UUID for define_uuid_id! macro
+uuid = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+
+# Async trait support
+async-trait = { workspace = true }
+
+# OpenTelemetry (for OtlpIngest trait)
+opentelemetry-proto = { workspace = true }
+
+# Arrow Flight (for QueryApi/QueryExec/SeqlStream)
+arrow-flight = { workspace = true }
+futures      = { workspace = true }
+tokio        = { workspace = true }

@@ -1,6 +1,7 @@
 use super::{MaintenanceStats, Storage};
 use crate::error::Result;
 use crate::hot_tier::batch_chain::BatchMeta;
+use sequins_types::SignalType;
 use std::sync::Arc;
 
 impl Storage {
@@ -183,7 +184,9 @@ impl Storage {
                 max_timestamp: i64::MAX,
                 row_count: batch.num_rows(),
             };
-            self.hot_tier.spans.push(Arc::new(batch), meta);
+            self.hot_tier
+                .chain(&SignalType::Spans)
+                .push(Arc::new(batch), meta);
         }
 
         Ok(span_count)

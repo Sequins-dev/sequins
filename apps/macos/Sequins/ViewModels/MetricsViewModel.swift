@@ -48,6 +48,11 @@ final class MetricsViewModel {
     /// View handle for the histogram query.
     private var histogramViewHandle: ViewHandle?
 
+    /// True once the histogram snapshot (.ready) has been received.
+    /// Live aux batches (table == "histograms") must be pruned after this point;
+    /// before it they are raw historical data accumulated for replaceWithCumulatives.
+    private var histogramSnapshotComplete = false
+
     /// Data source reference
     private weak var dataSource: DataSource?
 
@@ -102,6 +107,7 @@ final class MetricsViewModel {
         self.dataSource = dataSource
         metricLines = [:]
         histogramLines = [:]
+        histogramSnapshotComplete = false
         gaugeBinAccumulators = [:]
         isLoading = false
         error = nil
@@ -139,6 +145,7 @@ final class MetricsViewModel {
         cancel()
         metricLines = [:]
         histogramLines = [:]
+        histogramSnapshotComplete = false
         gaugeBinAccumulators = [:]
         isLoading = true
         error = nil
@@ -151,11 +158,6 @@ final class MetricsViewModel {
             histogramViewHandle = try dataSource.executeView(histQuery, strategy: .table) { [weak self] deltas in
                 self?.processHistogramDeltas(deltas)
             }
-
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            let totalPoints = metricLines.values.reduce(0) { $0 + $1.dataPoints.count }
-            print("📊 [MetricsViewModel] Loaded \(totalPoints) data points across \(metricLines.count) gauge metrics, \(histogramLines.count) histogram metrics")
-            isLoading = false
         } catch {
             print("📊 [MetricsViewModel] Query failed: \(error)")
             isLoading = false
@@ -223,6 +225,7 @@ final class MetricsViewModel {
             }
 
             let histQuery = "metrics \(timeStr)\(resourceFilter) | where metric_type = 'histogram' <- (histograms) as histograms"
+            histogramSnapshotComplete = false
             histogramViewHandle = try dataSource.executeView(histQuery, strategy: .table) { [weak self] deltas in
                 self?.processHistogramDeltas(deltas)
             }
@@ -310,61 +313,43 @@ final class MetricsViewModel {
     // MARK: - Gauge delta processing
 
     private func processGaugeDeltas(_ deltas: [ViewDelta]) {
-        // Pre-compute toRows() in background (avoids stalling the main thread for large batches).
-        let binSecs = max(1.0, computedBinSeconds)
-        let currentAccumulators = gaugeBinAccumulators
-        let existingLineCount = metricLines.count
-
-        Task.detached { [weak self] in
-            var parsed: [(delta: ViewDelta, rows: [[Any?]])] = []
-            for delta in deltas {
-                if let batch = delta.data.first {
-                    parsed.append((delta, batch.toRows()))
-                }
-            }
-            await MainActor.run { [weak self] in
-                self?.applyParsedGaugeDeltas(parsed, binSecs: binSecs,
-                                             accumulators: currentAccumulators,
-                                             existingLineCount: existingLineCount)
-            }
-        }
-    }
-
-    @MainActor
-    private func applyParsedGaugeDeltas(
-        _ parsed: [(delta: ViewDelta, rows: [[Any?]])],
-        binSecs: TimeInterval,
-        accumulators: [String: [TimeInterval: (sum: Double, count: Int)]],
-        existingLineCount: Int
-    ) {
-        var localCount = existingLineCount
-        for (delta, rows) in parsed {
+        for delta in deltas {
             switch delta.type {
             case .tableReplaced:
-                guard delta.table == nil else { continue }
+                // Primary table replaced — full reset of metric descriptors.
+                // Non-nil tables (e.g. "datapoints") are ignored here; historical
+                // and live data arrive via rowsAppended for the aux plan.
+                guard delta.table == nil, let batch = delta.data.first else { continue }
                 metricLines.removeAll()
                 gaugeBinAccumulators.removeAll()
-                localCount = 0
+                let rows = batch.toRows()
                 for (rowIdx, row) in rows.enumerated() {
                     if let line = parseMetricLine(from: row, rowId: UInt64(rowIdx)) {
                         metricLines[line.id] = line
-                        localCount += 1
                     }
                 }
 
             case .rowsAppended:
+                guard let batch = delta.data.first else { continue }
                 let table = delta.table
+                let rows = batch.toRows()
+
                 if table == nil {
+                    // Primary metrics table — new metric descriptor rows
                     for (rowIdx, row) in rows.enumerated() {
-                        let rowId = UInt64(localCount + rowIdx)
+                        let rowId = UInt64(metricLines.count + rowIdx)
                         if let line = parseMetricLine(from: row, rowId: rowId) {
                             metricLines[line.id] = line
                         }
                     }
-                    localCount += rows.count
+                    isLoading = false
                 } else if table == "datapoints" {
+                    // Two cases share this table name:
+                    // (a) Historical binned snapshot: [bucket(Date), metric_id, val] — 3 columns
+                    // (b) Live WAL broadcast: [series_id(UInt64), metric_id, time_unix_nano, value] — 4+ cols
                     let isBinned = rows.first.map { $0.count == 3 } ?? true
                     if isBinned {
+                        // Historical binned data
                         for row in rows {
                             guard row.count >= 3,
                                   let metricId = row[1] as? String,
@@ -382,6 +367,8 @@ final class MetricsViewModel {
                             line.dataPoints.append(dp)
                         }
                     } else {
+                        // Live WAL raw datapoints — bin client-side
+                        let binSecs = max(1.0, computedBinSeconds)
                         for row in rows {
                             guard row.count >= 4,
                                   let metricId = row[1] as? String,
@@ -417,6 +404,18 @@ final class MetricsViewModel {
                             }
                         }
                     }
+                } else {
+                    // Other auxiliary tables — ignore
+                    break
+                }
+
+            case .ready:
+                isLoading = false
+
+            case .error:
+                isLoading = false
+                if let msg = delta.message {
+                    error = "Gauge query error: \(msg)"
                 }
 
             default:
@@ -428,53 +427,34 @@ final class MetricsViewModel {
     // MARK: - Histogram delta processing
 
     private func processHistogramDeltas(_ deltas: [ViewDelta]) {
-        let existingLineCount = histogramLines.count
-
-        Task.detached { [weak self] in
-            var parsed: [(delta: ViewDelta, rows: [[Any?]])] = []
-            for delta in deltas {
-                if let batch = delta.data.first {
-                    parsed.append((delta, batch.toRows()))
-                }
-            }
-            await MainActor.run { [weak self] in
-                self?.applyParsedHistogramDeltas(parsed, existingLineCount: existingLineCount)
-            }
-        }
-    }
-
-    @MainActor
-    private func applyParsedHistogramDeltas(
-        _ parsed: [(delta: ViewDelta, rows: [[Any?]])],
-        existingLineCount: Int
-    ) {
-        var localCount = existingLineCount
-        var hadReady = false
-
-        for (delta, rows) in parsed {
+        for delta in deltas {
             switch delta.type {
             case .tableReplaced:
-                guard delta.table == nil else { continue }
+                guard delta.table == nil, let batch = delta.data.first else { continue }
                 histogramLines.removeAll()
-                localCount = 0
+                let rows = batch.toRows()
                 for (rowIdx, row) in rows.enumerated() {
                     if let line = parseHistogramLine(from: row, rowId: UInt64(rowIdx)) {
                         histogramLines[line.id] = line
-                        localCount += 1
                     }
                 }
 
             case .rowsAppended:
+                guard let batch = delta.data.first else { continue }
                 let table = delta.table
+                let rows = batch.toRows()
+
                 if table == nil {
+                    // Primary histogram metrics descriptor rows
                     for (rowIdx, row) in rows.enumerated() {
-                        let rowId = UInt64(localCount + rowIdx)
+                        let rowId = UInt64(histogramLines.count + rowIdx)
                         if let line = parseHistogramLine(from: row, rowId: rowId) {
                             histogramLines[line.id] = line
                         }
                     }
-                    localCount += rows.count
                 } else if table == "histograms" {
+                    // Aux histogram data points [series_id, metric_id, time_unix_nano,
+                    //                            count, sum, bucket_counts, explicit_bounds]
                     var pending: [String: [HistogramSnapshot]] = [:]
                     for row in rows {
                         guard row.count >= 7,
@@ -483,11 +463,23 @@ final class MetricsViewModel {
                         else { continue }
                         pending[metricId, default: []].append(snap)
                     }
-                    for (metricId, snaps) in pending {
-                        guard let line = histogramLines[metricId] else { continue }
-                        line.snapshots.append(contentsOf: snaps)
+                    if histogramSnapshotComplete {
+                        // Live update: prune old snapshots and update maxActiveBucket
+                        // incrementally so the chart stays bounded and O(1) per update.
+                        let cutoff = Date().addingTimeInterval(-3600)
+                        for (metricId, snaps) in pending {
+                            histogramLines[metricId]?.appendCumulativeAndPrune(snaps, olderThan: cutoff)
+                        }
+                    } else {
+                        // Snapshot phase: accumulate raw cumulative snapshots;
+                        // .ready finalises them via replaceWithCumulatives.
+                        for (metricId, snaps) in pending {
+                            guard let line = histogramLines[metricId] else { continue }
+                            line.snapshots.append(contentsOf: snaps)
+                        }
                     }
                 } else {
+                    // Raw WAL histogram rows — same column layout as histograms table
                     var pending: [String: [HistogramSnapshot]] = [:]
                     for row in rows {
                         guard row.count >= 7,
@@ -503,18 +495,16 @@ final class MetricsViewModel {
                 }
 
             case .ready:
-                hadReady = true
+                // Snapshot complete — finalize maxActiveBucket on all histogram lines.
+                for line in histogramLines.values {
+                    line.replaceWithCumulatives(line.snapshots)
+                }
+                histogramSnapshotComplete = true
+                isLoading = false
 
             default:
                 break
             }
-        }
-
-        if hadReady {
-            for line in histogramLines.values {
-                line.replaceWithCumulatives(line.snapshots)
-            }
-            isLoading = false
         }
     }
 

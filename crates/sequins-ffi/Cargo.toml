@@ -15,14 +15,15 @@ default = ["local"]
 local = []
 
 [dependencies]
-sequins-types   = { workspace = true }
-sequins-query   = { workspace = true }
-sequins-view    = { workspace = true }
-arrow           = { workspace = true }
-arrow-flight    = { workspace = true }
-sequins-storage = { workspace = true }
-sequins-server  = { workspace = true }
-sequins-client  = { workspace = true }
+sequins-types              = { workspace = true }
+sequins-query              = { workspace = true }
+sequins-view               = { workspace = true }
+arrow                      = { workspace = true }
+arrow-flight               = { workspace = true }
+sequins-storage            = { workspace = true }
+sequins-datafusion-backend = { workspace = true }
+sequins-server             = { workspace = true }
+sequins-client             = { workspace = true }
 
 # Async
 tokio     = { workspace = true }

@@ -20,17 +20,15 @@ use crate::types::frames::{
     CWarningFrame,
 };
 use crate::types::frames::{DeltaFrame, DeltaOp};
+use futures::StreamExt;
 use sequins_query::ast::QueryAst;
 use sequins_query::error::QueryError;
 use sequins_query::flight::{decode_metadata, SeqlMetadata};
 use sequins_query::frame::{ipc_to_batch, SchemaFrame};
 use sequins_query::parser::{parse, ParseError};
-use std::ffi::CString;
-// TursoBackend replaced by DataFusionBackend
-use futures::StreamExt;
 use sequins_query::QueryApi;
-use sequins_storage::DataFusionBackend;
 use std::ffi::CStr;
+use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -306,14 +304,13 @@ pub unsafe extern "C" fn sequins_seql_query(
         }
     };
 
-    // Get the DataFusionBackend from the data source
+    // Get the shared DataFusionBackend from the data source
     let ds = &*(data_source as *const DataSourceImpl);
-    let storage = match ds {
-        DataSourceImpl::Local { storage, .. } => storage.clone(),
+    let backend = match ds {
+        DataSourceImpl::Local { backend, .. } => Arc::clone(backend),
         DataSourceImpl::Remote { .. } => return std::ptr::null_mut(),
     };
 
-    let backend = DataFusionBackend::new(Arc::clone(&storage));
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
 
@@ -415,12 +412,11 @@ pub unsafe extern "C" fn sequins_seql_query_live(
     };
 
     let ds = &*(data_source as *const DataSourceImpl);
-    let storage = match ds {
-        DataSourceImpl::Local { storage, .. } => storage.clone(),
+    let backend = match ds {
+        DataSourceImpl::Local { backend, .. } => Arc::clone(backend),
         DataSourceImpl::Remote { .. } => return std::ptr::null_mut(),
     };
 
-    let backend = DataFusionBackend::new(Arc::clone(&storage));
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
 
@@ -710,8 +706,8 @@ pub unsafe extern "C" fn sequins_view_create(
     };
 
     let ds = &*(data_source as *const DataSourceImpl);
-    let storage = match ds {
-        DataSourceImpl::Local { storage, .. } => storage.clone(),
+    let backend = match ds {
+        DataSourceImpl::Local { backend, .. } => Arc::clone(backend),
         DataSourceImpl::Remote { .. } => return std::ptr::null_mut(),
     };
 
@@ -730,8 +726,6 @@ pub unsafe extern "C" fn sequins_view_create(
     };
 
     let task = RUNTIME.spawn(AssertSend(async move {
-        let backend = DataFusionBackend::new(Arc::clone(&storage));
-
         let seql_stream = match backend.query_live(&query_str).await {
             Ok(s) => s,
             Err(e) => {
@@ -908,6 +902,7 @@ mod tests {
 
     /// Helper struct to collect frames from FFI callbacks
     #[derive(Default)]
+    #[allow(dead_code)]
     struct FrameCollector {
         schema_count: usize,
         data_count: usize,
@@ -937,6 +932,7 @@ mod tests {
         unsafe { c_data_frame_free(frame as *mut _) };
     }
 
+    #[allow(dead_code)]
     extern "C" fn on_delta_callback(_frame: *const CDeltaFrame, ctx: *mut c_void) {
         let collector = unsafe { &mut *(ctx as *mut FrameCollector) };
         collector.delta_count += 1;
@@ -944,6 +940,7 @@ mod tests {
         unsafe { c_delta_frame_free(_frame as *mut _) };
     }
 
+    #[allow(dead_code)]
     extern "C" fn on_heartbeat_callback(_frame: *const CHeartbeatFrame, ctx: *mut c_void) {
         let collector = unsafe { &mut *(ctx as *mut FrameCollector) };
         collector.heartbeat_count += 1;
@@ -956,6 +953,7 @@ mod tests {
         // Complete frame is passed by value, no cleanup needed
     }
 
+    #[allow(dead_code)]
     extern "C" fn on_warning_callback(_frame: *const CWarningFrame, ctx: *mut c_void) {
         let collector = unsafe { &mut *(ctx as *mut FrameCollector) };
         collector.warning_count += 1;
@@ -1219,9 +1217,7 @@ mod tests {
         }
 
         // Cleanup
-        unsafe {
-            sequins_data_source_free(data_source);
-        }
+        sequins_data_source_free(data_source);
     }
 
     // ── Frame Sink VTable Tests ───────────────────────────────────────────────────

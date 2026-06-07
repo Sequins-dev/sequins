@@ -1,0 +1,24 @@
+[package]
+name = "sequins-companion-index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Bloom filter, trigram, and Tantivy companion indexes for Sequins cold-tier files"
+
+[dependencies]
+# Arrow (for RecordBatch input to index builders)
+arrow = { workspace = true }
+
+# Companion indexes
+tantivy     = { workspace = true }
+bloomfilter = { workspace = true }
+
+# Serialization
+serde      = { workspace = true }
+serde_json = { workspace = true }
+bincode    = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

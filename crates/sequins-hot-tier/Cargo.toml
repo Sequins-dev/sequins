@@ -8,7 +8,8 @@ authors.workspace = true
 description = "In-memory hot tier storage for Sequins"
 
 [dependencies]
-sequins-types = { workspace = true }
+sequins-batch-chain = { workspace = true }
+sequins-types       = { workspace = true }
 
 # Arrow + DataFusion
 arrow      = { workspace = true }

@@ -1,0 +1,20 @@
+[package]
+name = "sequins-pprof"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "pprof binary format parser for Sequins (isolates pprof/prost dependencies)"
+
+[dependencies]
+sequins-traits = { workspace = true }
+sequins-types  = { workspace = true }
+
+# Profile parsing (CPU profiler features disabled)
+pprof       = { workspace = true }
+prost       = { workspace = true }
+prost-types = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }

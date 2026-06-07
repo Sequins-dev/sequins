@@ -17,7 +17,8 @@
 pub mod helpers;
 pub mod logs;
 pub mod metrics;
-pub mod overflow_map;
+// overflow_map now lives in sequins-attribute-codec; re-exported here for back-compat.
+pub use sequins_attribute_codec as overflow_map;
 pub mod profiles;
 pub mod span_events;
 pub mod span_links;
@@ -26,7 +27,7 @@ pub mod spans;
 // Re-export the primary conversion functions for ergonomic use
 pub use helpers::{
     convert_attributes, convert_otlp_resource, convert_otlp_scope, convert_resource_attributes,
-    extract_service_name,
+    extract_service_name, PromotedAttrBuilder,
 };
 pub use logs::otlp_logs_to_batch;
 pub use metrics::{

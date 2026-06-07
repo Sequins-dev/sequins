@@ -222,9 +222,7 @@ final class HealthViewModel {
 
         do {
             let spanSink = SnapshotSink { [weak currentFeed] batch in
-                DispatchQueue.main.async {
-                    currentFeed?.applyComparisonSpanBatch(batch, timeWindowMinutes: comparisonWindowMinutes)
-                }
+                currentFeed?.applyComparisonSpanBatch(batch, timeWindowMinutes: comparisonWindowMinutes)
             }
             let _ = try dataSource.executeSeQL(spanQuery, sink: spanSink)
         } catch {
@@ -233,9 +231,7 @@ final class HealthViewModel {
 
         do {
             let logSink = SnapshotSink { [weak currentFeed] batch in
-                DispatchQueue.main.async {
-                    currentFeed?.applyComparisonLogBatch(batch, timeWindowMinutes: comparisonWindowMinutes)
-                }
+                currentFeed?.applyComparisonLogBatch(batch, timeWindowMinutes: comparisonWindowMinutes)
             }
             let _ = try dataSource.executeSeQL(logQuery, sink: logSink)
         } catch {

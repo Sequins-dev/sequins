@@ -33,6 +33,9 @@ pub enum Error {
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    #[error("Series index error: {0}")]
+    SeriesIndex(#[from] sequins_series_index::error::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -3,13 +3,12 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use sequins_client::RemoteClient;
+use sequins_datafusion_backend::DataFusionBackend;
 use sequins_query::flight::{decode_metadata, SeqlMetadata};
 use sequins_query::frame::{ipc_to_batch, SchemaFrame, WarningFrame};
 use sequins_query::QueryApi;
-use sequins_storage::config::ColdTierConfig;
-use sequins_storage::{DataFusionBackend, Storage, StorageConfig};
-use std::sync::Arc;
 
+use crate::storage::open_local_storage;
 use crate::OutputFormat;
 
 pub async fn execute(query_str: String, target: String, format: OutputFormat) -> Result<()> {
@@ -23,18 +22,7 @@ pub async fn execute(query_str: String, target: String, format: OutputFormat) ->
             .await
             .context("Failed to execute remote query")?
     } else {
-        let config = StorageConfig {
-            cold_tier: ColdTierConfig {
-                uri: target.clone(),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let storage = Arc::new(
-            Storage::new(config)
-                .await
-                .context("Failed to open database")?,
-        );
+        let storage = open_local_storage(&target).await?;
         let backend = DataFusionBackend::new(storage);
         backend
             .query(&query_str)

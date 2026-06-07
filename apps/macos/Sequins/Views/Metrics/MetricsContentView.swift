@@ -81,21 +81,6 @@ struct MetricsContentOnly: View {
                     )
                 }
             }
-            .onAppear {
-                if appState.isLive {
-                    viewModel.startLiveStream(
-                        dataSource: appState.dataSource,
-                        selectedService: appState.selectedService,
-                        timeRange: appState.timeRangeState.timeRange
-                    )
-                } else {
-                    viewModel.refresh(
-                        dataSource: appState.dataSource,
-                        selectedService: appState.selectedService,
-                        timeRange: appState.timeRangeState.timeRange
-                    )
-                }
-            }
             .onDisappear {
                 viewModel.cancel()
             }

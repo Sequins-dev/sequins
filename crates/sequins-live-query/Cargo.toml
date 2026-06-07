@@ -5,26 +5,19 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Live query infrastructure for Sequins (subscription management, streaming, heartbeats)"
+description = "Live query subscription management and heartbeat streaming for Sequins"
 
 [dependencies]
 sequins-query = { workspace = true }
 sequins-wal   = { workspace = true }
 
-# Arrow + DataFusion
-arrow        = { workspace = true }
+# Arrow + Flight
 arrow-flight = { workspace = true }
-datafusion   = { workspace = true }
 
 # Async
 tokio        = { workspace = true }
-tokio-stream = { workspace = true }
 futures      = { workspace = true }
-async-trait  = { workspace = true }
 async-stream = { workspace = true }
-
-# Serialization
-serde_json = { workspace = true }
 
 # Utilities
 parking_lot = { workspace = true }

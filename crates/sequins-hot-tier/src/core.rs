@@ -1,4 +1,4 @@
-use crate::batch_chain::{compaction_loop, BatchChain, BatchMeta};
+use crate::batch_chain::{compaction_loop, BatchChain, BatchMeta, ColdWriterFn};
 use crate::config::HotTierConfig;
 use crate::error::{HotTierError, Result};
 use arrow::array::{Array, BooleanArray, StringViewArray, UInt32Array, UInt64Array};
@@ -58,27 +58,10 @@ pub(crate) fn fnv1a_32(data: &[u8]) -> u32 {
 /// DataFusion as an `Arc<dyn TableProvider>` without any additional wrapping.
 /// `Arc<BatchChain>` derefs to `BatchChain`, so all `push` / `row_count`
 /// call-sites remain unchanged.
+/// One `BatchChain` per `SignalType` variant, indexed by `SignalType::index()`.
 pub struct HotTier {
-    // -----------------------------------------------------------------------
-    // 16 BatchChains — one per signal table
-    // -----------------------------------------------------------------------
-    pub spans: Arc<BatchChain>,
-    pub span_links: Arc<BatchChain>,
-    pub span_events: Arc<BatchChain>,
-    /// Trace-level rollup (no `SignalType::Traces` variant yet).
-    pub traces: Arc<BatchChain>,
-    pub logs: Arc<BatchChain>,
-    pub metrics: Arc<BatchChain>,
-    pub datapoints: Arc<BatchChain>,
-    pub histogram_datapoints: Arc<BatchChain>,
-    pub exponential_histogram_datapoints: Arc<BatchChain>,
-    pub profiles: Arc<BatchChain>,
-    pub samples: Arc<BatchChain>,
-    pub stacks: Arc<BatchChain>,
-    pub frames: Arc<BatchChain>,
-    pub mappings: Arc<BatchChain>,
-    pub resources: Arc<BatchChain>,
-    pub scopes: Arc<BatchChain>,
+    /// One chain per signal type.  Index via `SignalType::index()` — O(1), no match needed.
+    chains: [Arc<BatchChain>; SignalType::COUNT],
 
     // -----------------------------------------------------------------------
     // Content-addressed dedup sets — hash IS the ID, so just track presence.
@@ -92,50 +75,68 @@ pub struct HotTier {
     known_mappings: DashSet<u64>,
 }
 
+/// A `ColdFlushFn` that additionally captures the `SignalType` so the storage
+/// layer can route completed hot-tier batches to the right cold-tier partition.
+pub type SignalColdFlushFn = Arc<
+    dyn Fn(
+            SignalType,
+            Arc<RecordBatch>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>
+        + Send
+        + Sync,
+>;
+
 impl HotTier {
-    /// Create a new hot tier and spawn background compaction tasks for each chain.
+    /// Create a new hot tier with background compaction but no cold-tier flush.
+    ///
+    /// Completed batches will be evicted from memory without being persisted.
+    /// Use [`HotTier::new_with_cold_writer`] to enable durable flushing.
     pub fn new(config: HotTierConfig) -> Self {
+        Self::new_internal(config, None)
+    }
+
+    /// Create a new hot tier that flushes completed batches to cold storage.
+    ///
+    /// `cold_flush` is called with `(signal, batch)` whenever the compaction
+    /// loop evicts a completed node.  The closure must not block — it receives
+    /// an `Arc<RecordBatch>` so it can cheaply clone the reference across the
+    /// await boundary.
+    pub fn new_with_cold_writer(config: HotTierConfig, cold_flush: SignalColdFlushFn) -> Self {
+        Self::new_internal(config, Some(cold_flush))
+    }
+
+    fn new_internal(config: HotTierConfig, cold_flush: Option<SignalColdFlushFn>) -> Self {
         let target_rows = config.max_entries;
 
-        let make_chain =
-            |schema: arrow::datatypes::SchemaRef, name: &'static str| -> Arc<BatchChain> {
-                let (chain, rx) = BatchChain::new(schema.clone());
-                let head = chain.head_arc();
-                tokio::spawn(compaction_loop::<
-                    fn(Arc<RecordBatch>, BatchMeta) -> std::future::Ready<()>,
-                    std::future::Ready<()>,
-                >(
-                    head, schema, rx, target_rows, name.to_string(), None
-                ));
-                Arc::new(chain)
-            };
+        let make_chain = |signal: SignalType| -> Arc<BatchChain> {
+            let schema = signal.schema();
+            let name = signal.name();
+            let (chain, rx) = BatchChain::new(schema.clone());
+            let head = chain.head_arc();
+            let writer: Option<ColdWriterFn> = cold_flush.as_ref().map(|f| {
+                let f = Arc::clone(f);
+                let w: ColdWriterFn = Arc::new(move |batch| {
+                    let f = Arc::clone(&f);
+                    Box::pin(async move { f(signal, batch).await })
+                });
+                w
+            });
+            tokio::spawn(compaction_loop(
+                head,
+                schema,
+                rx,
+                target_rows,
+                name.to_string(),
+                writer,
+            ));
+            Arc::new(chain)
+        };
 
-        // Use span_schema for traces until a dedicated trace_schema exists.
-        let trace_schema = arrow_schema::span_schema();
+        // Build one chain per SignalType variant in index order.
+        let chains = std::array::from_fn(|i| make_chain(SignalType::all()[i]));
 
         Self {
-            spans: make_chain(arrow_schema::span_schema(), "spans"),
-            span_links: make_chain(arrow_schema::span_links_schema(), "span_links"),
-            span_events: make_chain(arrow_schema::span_events_schema(), "span_events"),
-            traces: make_chain(trace_schema, "traces"),
-            logs: make_chain(arrow_schema::log_schema(), "logs"),
-            metrics: make_chain(arrow_schema::metric_schema(), "metrics"),
-            datapoints: make_chain(arrow_schema::series_data_point_schema(), "datapoints"),
-            histogram_datapoints: make_chain(
-                arrow_schema::histogram_series_data_point_schema(),
-                "histogram_datapoints",
-            ),
-            exponential_histogram_datapoints: make_chain(
-                arrow_schema::exp_histogram_data_point_schema(),
-                "exp_histogram_datapoints",
-            ),
-            profiles: make_chain(arrow_schema::profile_schema(), "profiles"),
-            samples: make_chain(arrow_schema::profile_samples_schema(), "samples"),
-            stacks: make_chain(arrow_schema::profile_stacks_schema(), "stacks"),
-            frames: make_chain(arrow_schema::profile_frames_schema(), "frames"),
-            mappings: make_chain(arrow_schema::profile_mappings_schema(), "mappings"),
-            resources: make_chain(arrow_schema::resource_schema(), "resources"),
-            scopes: make_chain(arrow_schema::scope_schema(), "scopes"),
+            chains,
             known_resources: DashSet::new(),
             known_scopes: DashSet::new(),
             known_metrics: DashSet::new(),
@@ -243,54 +244,17 @@ impl HotTier {
     // BatchChain access by SignalType
     // -----------------------------------------------------------------------
 
-    /// Return a reference to the `BatchChain` for the given signal type.
-    ///
-    /// Because the chains are stored as `Arc<BatchChain>`, this derefs
-    /// transparently — callers that need the raw chain for `push` / `row_count`
-    /// are unchanged.
+    /// Return a reference to the `BatchChain` for the given signal type — O(1) array lookup.
     pub fn chain(&self, signal: &SignalType) -> &BatchChain {
-        match signal {
-            SignalType::Spans => &self.spans,
-            SignalType::SpanLinks => &self.span_links,
-            SignalType::SpanEvents => &self.span_events,
-            SignalType::Logs => &self.logs,
-            SignalType::Metrics => &self.datapoints,
-            SignalType::MetricsMetadata => &self.metrics,
-            SignalType::Histograms => &self.histogram_datapoints,
-            SignalType::ExpHistograms => &self.exponential_histogram_datapoints,
-            SignalType::ProfilesMetadata => &self.profiles,
-            SignalType::ProfileSamples => &self.samples,
-            SignalType::ProfileStacks => &self.stacks,
-            SignalType::ProfileFrames => &self.frames,
-            SignalType::ProfileMappings => &self.mappings,
-            SignalType::Resources => &self.resources,
-            SignalType::Scopes => &self.scopes,
-        }
+        &self.chains[signal.index()]
     }
 
-    /// Return a cloned `Arc<BatchChain>` for the given signal type.
+    /// Return a cloned `Arc<BatchChain>` for the given signal type — O(1) array lookup.
     ///
-    /// This is used by the DataFusion registration layer to hand the chain
-    /// directly to a `SessionContext` as an `Arc<dyn TableProvider>` without
-    /// any wrapping struct.
+    /// Used by the DataFusion registration layer to hand the chain directly to a
+    /// `SessionContext` as an `Arc<dyn TableProvider>` without additional wrapping.
     pub fn chain_arc(&self, signal: &SignalType) -> Arc<BatchChain> {
-        match signal {
-            SignalType::Spans => Arc::clone(&self.spans),
-            SignalType::SpanLinks => Arc::clone(&self.span_links),
-            SignalType::SpanEvents => Arc::clone(&self.span_events),
-            SignalType::Logs => Arc::clone(&self.logs),
-            SignalType::Metrics => Arc::clone(&self.datapoints),
-            SignalType::MetricsMetadata => Arc::clone(&self.metrics),
-            SignalType::Histograms => Arc::clone(&self.histogram_datapoints),
-            SignalType::ExpHistograms => Arc::clone(&self.exponential_histogram_datapoints),
-            SignalType::ProfilesMetadata => Arc::clone(&self.profiles),
-            SignalType::ProfileSamples => Arc::clone(&self.samples),
-            SignalType::ProfileStacks => Arc::clone(&self.stacks),
-            SignalType::ProfileFrames => Arc::clone(&self.frames),
-            SignalType::ProfileMappings => Arc::clone(&self.mappings),
-            SignalType::Resources => Arc::clone(&self.resources),
-            SignalType::Scopes => Arc::clone(&self.scopes),
-        }
+        Arc::clone(&self.chains[signal.index()])
     }
 
     // -----------------------------------------------------------------------
@@ -331,7 +295,7 @@ impl HotTier {
         let batch = build_resource_batch(id, service_name, &attrs_json, &schema)
             .map_err(HotTierError::Storage)?;
         let batch = Arc::new(batch);
-        self.resources.push(
+        self.chain(&SignalType::Resources).push(
             Arc::clone(&batch),
             BatchMeta {
                 min_timestamp: 0,
@@ -361,7 +325,7 @@ impl HotTier {
         let schema = arrow_schema::scope_schema();
         let batch = build_scope_batch(id, &scope.name, &scope.version, &attrs_json, &schema)
             .map_err(HotTierError::Storage)?;
-        self.scopes.push(
+        self.chain(&SignalType::Scopes).push(
             Arc::new(batch),
             BatchMeta {
                 min_timestamp: 0,
@@ -379,10 +343,10 @@ impl HotTier {
     /// profiles metadata). This is O(n) in chain length but chains are short.
     pub fn stats(&self) -> StorageStats {
         StorageStats {
-            span_count: self.spans.row_count(),
-            log_count: self.logs.row_count(),
-            metric_count: self.metrics.row_count(),
-            profile_count: self.profiles.row_count(),
+            span_count: self.chain(&SignalType::Spans).row_count(),
+            log_count: self.chain(&SignalType::Logs).row_count(),
+            metric_count: self.chain(&SignalType::MetricsMetadata).row_count(),
+            profile_count: self.chain(&SignalType::ProfilesMetadata).row_count(),
         }
     }
 

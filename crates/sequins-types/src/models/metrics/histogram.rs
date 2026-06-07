@@ -96,23 +96,39 @@ impl HistogramDataPoint {
         }
     }
 
-    /// Get percentile from histogram buckets (approximate)
+    /// Get percentile from histogram buckets (approximate).
+    ///
+    /// Returns the upper bound of the bucket that contains the Nth observation
+    /// (where N = `count * p / 100`, rounded up to at least 1).  When the
+    /// percentile falls in the implicit overflow bucket (`> last_bound`), the
+    /// last explicit bound is returned as a conservative lower-bound estimate.
+    ///
+    /// Returns `None` for out-of-range `p` (< 0 or > 100) or empty histogram.
     pub fn percentile(&self, p: f64) -> Option<f64> {
         if !(0.0..=100.0).contains(&p) || self.count == 0 {
             return None;
         }
 
-        let target_count = (self.count as f64 * p / 100.0) as u64;
+        // Round up so that p=0 targets the 1st observation rather than 0,
+        // which would immediately match even an empty bucket.
+        let target_count = ((self.count as f64 * p / 100.0).ceil() as u64).max(1);
         let mut cumulative = 0u64;
 
         for (i, &bucket_count) in self.bucket_counts.iter().enumerate() {
             cumulative += bucket_count;
             if cumulative >= target_count {
-                return self.explicit_bounds.get(i).copied();
+                // `explicit_bounds` has one fewer entry than `bucket_counts`
+                // (the final "overflow" bucket has no upper bound).  Fall
+                // through to `last()` instead of returning None.
+                if let Some(&bound) = self.explicit_bounds.get(i) {
+                    return Some(bound);
+                }
+                break;
             }
         }
 
-        // If we've exhausted all buckets, return the last bound
+        // Percentile falls in (or past) the overflow bucket — best estimate is
+        // the last explicit bound.
         self.explicit_bounds.last().copied()
     }
 }
@@ -163,53 +179,61 @@ mod tests {
         assert_eq!(histogram.average(), 0.0);
     }
 
-    #[test]
-    fn test_histogram_percentile() {
-        let metric_id = MetricId::new();
-        let histogram = HistogramDataPoint {
-            metric_id,
+    fn make_histogram(bucket_counts: Vec<u64>, explicit_bounds: Vec<f64>) -> HistogramDataPoint {
+        let count = bucket_counts.iter().sum();
+        HistogramDataPoint {
+            metric_id: MetricId::new(),
             timestamp: Timestamp::now().unwrap(),
             start_time: None,
-            count: 100,
-            sum: 500.0,
+            count,
+            sum: 0.0,
             min: None,
             max: None,
-            bucket_counts: vec![10, 20, 30, 40],
-            explicit_bounds: vec![1.0, 5.0, 10.0, 50.0],
+            bucket_counts,
+            explicit_bounds,
             exemplars: vec![],
             attributes: HashMap::new(),
             resource_id: 0,
-        };
+        }
+    }
 
-        // P50 should be in the third bucket (cumulative: 10+20+30=60, which is >= 50)
-        assert_eq!(histogram.percentile(50.0), Some(10.0));
+    #[test]
+    fn test_histogram_percentile_no_overflow() {
+        // Proper OTLP histogram: 4 bounds, 5 buckets (last is overflow with 0 items).
+        // counts = [10, 20, 30, 40, 0], bounds = [1.0, 5.0, 10.0, 50.0]
+        // total = 100; no overflow observations.
+        let h = make_histogram(vec![10, 20, 30, 40, 0], vec![1.0, 5.0, 10.0, 50.0]);
 
-        // P90 should be in the fourth bucket (cumulative: 10+20+30+40=100, which is >= 90)
-        assert_eq!(histogram.percentile(90.0), Some(50.0));
+        // P10 → ceil(100 * 10/100) = 10th obs → bucket 0 (cumulative=10) → 1.0
+        assert_eq!(h.percentile(10.0), Some(1.0));
+        // P50 → ceil(50) = 50th obs → bucket 2 (cumulative=60 >= 50) → 10.0
+        assert_eq!(h.percentile(50.0), Some(10.0));
+        // P90 → ceil(90) = 90th obs → bucket 3 (cumulative=100 >= 90) → 50.0
+        assert_eq!(h.percentile(90.0), Some(50.0));
+        // P100 → ceil(100) = 100th obs → bucket 3 (cumulative=100 >= 100) → 50.0
+        assert_eq!(h.percentile(100.0), Some(50.0));
+        // P0 → target=max(ceil(0),1)=1 → bucket 0 (cumulative=10 >= 1) → 1.0
+        assert_eq!(h.percentile(0.0), Some(1.0));
+    }
 
-        // P10 should be in the first bucket
-        assert_eq!(histogram.percentile(10.0), Some(1.0));
+    #[test]
+    fn test_histogram_percentile_with_overflow() {
+        // 4 bounds, 5 buckets — the 5th bucket has 10 observations above 50.0.
+        // total = 110: 10+20+30+40+10
+        let h = make_histogram(vec![10, 20, 30, 40, 10], vec![1.0, 5.0, 10.0, 50.0]);
+
+        // P90 → ceil(110 * 90/100) = ceil(99) = 99th obs → bucket 3 (cumulative=100 >= 99) → 50.0
+        assert_eq!(h.percentile(90.0), Some(50.0));
+        // P99 → ceil(110 * 99/100) = ceil(108.9) = 109th obs → overflow bucket → last bound = 50.0
+        assert_eq!(h.percentile(99.0), Some(50.0));
+        // P100 → ceil(110) = 110th obs → overflow bucket → last bound = 50.0
+        assert_eq!(h.percentile(100.0), Some(50.0));
     }
 
     #[test]
     fn test_histogram_percentile_invalid() {
-        let metric_id = MetricId::new();
-        let histogram = HistogramDataPoint {
-            metric_id,
-            timestamp: Timestamp::now().unwrap(),
-            start_time: None,
-            count: 100,
-            sum: 500.0,
-            min: None,
-            max: None,
-            bucket_counts: vec![10, 20, 30, 40],
-            explicit_bounds: vec![1.0, 5.0, 10.0, 50.0],
-            exemplars: vec![],
-            attributes: HashMap::new(),
-            resource_id: 0,
-        };
-
-        assert_eq!(histogram.percentile(-1.0), None); // Negative
-        assert_eq!(histogram.percentile(101.0), None); // > 100
+        let h = make_histogram(vec![10, 20, 30, 40], vec![1.0, 5.0, 10.0, 50.0]);
+        assert_eq!(h.percentile(-1.0), None); // Negative
+        assert_eq!(h.percentile(101.0), None); // > 100
     }
 }

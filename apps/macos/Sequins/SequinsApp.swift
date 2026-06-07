@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import AppKit
 import SequinsData
 
 @main
@@ -69,9 +70,11 @@ struct SequinsApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("Sequins", image: "MenuBarIcon") {
+        MenuBarExtra {
             MenuBarView()
                 .environment(appState)
+        } label: {
+            MenuBarIconLabel()
         }
         .menuBarExtraStyle(.window)
 
@@ -81,5 +84,18 @@ struct SequinsApp: App {
                 .environment(appState)
         }
         #endif
+    }
+}
+
+private struct MenuBarIconLabel: View {
+    private static let icon: NSImage? = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "tiff")
+        .flatMap { NSImage(contentsOf: $0) }
+
+    var body: some View {
+        if let icon = Self.icon {
+            Image(nsImage: icon)
+        } else {
+            Image(systemName: "chart.xyaxis.line")
+        }
     }
 }

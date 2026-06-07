@@ -1,16 +1,14 @@
 //! Direct OTLP span → Arrow RecordBatch conversion
 
+use crate::helpers::PromotedAttrBuilder;
 use crate::overflow_map::build_overflow_column;
 use arrow::array::{
-    ArrayRef, BooleanArray, Float64Array, Int64Array, StringViewArray, TimestampNanosecondArray,
-    UInt32Array, UInt8Array,
+    ArrayRef, Int64Array, StringViewArray, TimestampNanosecondArray, UInt32Array, UInt8Array,
 };
 use arrow::record_batch::RecordBatch;
-use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 use opentelemetry_proto::tonic::trace::v1::Span as OtlpSpan;
 use sequins_types::arrow_schema::span_schema_with_catalog;
 use sequins_types::models::{SpanId, TraceId};
-use sequins_types::schema_catalog::AttributeValueType;
 use std::sync::Arc;
 
 /// Convert a batch of OTLP spans directly to an Arrow `RecordBatch`.
@@ -42,17 +40,13 @@ pub fn otlp_spans_to_batch(
     let mut resource_ids_col: Vec<u32> = Vec::with_capacity(n);
     let mut scope_ids_col: Vec<u32> = Vec::with_capacity(n);
 
-    // Promoted attribute column buffers (indexed by catalog column index)
     let num_promoted = catalog.len();
-    let mut col_strings: Vec<Vec<Option<String>>> = vec![Vec::new(); num_promoted];
-    let mut col_i64: Vec<Vec<Option<i64>>> = vec![Vec::new(); num_promoted];
-    let mut col_f64: Vec<Vec<Option<f64>>> = vec![Vec::new(); num_promoted];
-    let mut col_bool: Vec<Vec<Option<bool>>> = vec![Vec::new(); num_promoted];
+    let mut attr_builder = PromotedAttrBuilder::new(catalog);
 
     let mut overflow_rows: Vec<Vec<&opentelemetry_proto::tonic::common::v1::KeyValue>> =
         Vec::with_capacity(n);
 
-    for (row_idx, (otlp_span, resource_id, scope_id)) in items.iter().enumerate() {
+    for (otlp_span, resource_id, scope_id) in items.iter() {
         let trace_id_hex = TraceId::from_bytes(
             otlp_span
                 .trace_id
@@ -114,53 +108,7 @@ pub fn otlp_spans_to_batch(
         resource_ids_col.push(*resource_id);
         scope_ids_col.push(*scope_id);
 
-        for (col_idx, attr) in catalog.promoted_columns().enumerate() {
-            match attr.value_type {
-                AttributeValueType::String => col_strings[col_idx].push(None),
-                AttributeValueType::Int64 => col_i64[col_idx].push(None),
-                AttributeValueType::Float64 => col_f64[col_idx].push(None),
-                AttributeValueType::Boolean => col_bool[col_idx].push(None),
-            }
-        }
-
-        let mut row_overflow: Vec<&opentelemetry_proto::tonic::common::v1::KeyValue> = Vec::new();
-        for kv in &otlp_span.attributes {
-            let routed = if let Some(col_idx) = catalog.column_index(&kv.key) {
-                let attr = &catalog.promoted[col_idx];
-                if let Some(av) = &kv.value {
-                    if let Some(val) = &av.value {
-                        match (&attr.value_type, val) {
-                            (AttributeValueType::String, OtlpValue::StringValue(s)) => {
-                                col_strings[col_idx][row_idx] = Some(s.clone());
-                                true
-                            }
-                            (AttributeValueType::Int64, OtlpValue::IntValue(i)) => {
-                                col_i64[col_idx][row_idx] = Some(*i);
-                                true
-                            }
-                            (AttributeValueType::Float64, OtlpValue::DoubleValue(f)) => {
-                                col_f64[col_idx][row_idx] = Some(*f);
-                                true
-                            }
-                            (AttributeValueType::Boolean, OtlpValue::BoolValue(b)) => {
-                                col_bool[col_idx][row_idx] = Some(*b);
-                                true
-                            }
-                            _ => false,
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            if !routed {
-                row_overflow.push(kv);
-            }
-        }
+        let row_overflow = attr_builder.push_row(&otlp_span.attributes);
         overflow_rows.push(row_overflow);
     }
 
@@ -179,25 +127,7 @@ pub fn otlp_spans_to_batch(
     arrays.push(Arc::new(UInt32Array::from(resource_ids_col)) as ArrayRef);
     arrays.push(Arc::new(UInt32Array::from(scope_ids_col)) as ArrayRef);
 
-    for (col_idx, attr) in catalog.promoted_columns().enumerate() {
-        let arr: ArrayRef = match attr.value_type {
-            AttributeValueType::String => {
-                let vals: Vec<Option<&str>> =
-                    col_strings[col_idx].iter().map(|s| s.as_deref()).collect();
-                Arc::new(StringViewArray::from(vals)) as ArrayRef
-            }
-            AttributeValueType::Int64 => {
-                Arc::new(Int64Array::from(col_i64[col_idx].clone())) as ArrayRef
-            }
-            AttributeValueType::Float64 => {
-                Arc::new(Float64Array::from(col_f64[col_idx].clone())) as ArrayRef
-            }
-            AttributeValueType::Boolean => {
-                Arc::new(BooleanArray::from(col_bool[col_idx].clone())) as ArrayRef
-            }
-        };
-        arrays.push(arr);
-    }
+    arrays.extend(attr_builder.finish());
     arrays.push(build_overflow_column(&overflow_rows));
 
     debug_assert!(
@@ -214,7 +144,9 @@ pub fn otlp_spans_to_batch(
 mod tests {
     use super::*;
     use arrow::array::Array;
-    use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+    use opentelemetry_proto::tonic::common::v1::{
+        any_value::Value as OtlpValue, AnyValue, KeyValue,
+    };
     use opentelemetry_proto::tonic::trace::v1::{span::SpanKind, Status};
     use sequins_types::schema_catalog::{
         AttributeValueType, EncodingHint, PromotedAttribute, SchemaCatalog,

@@ -2,6 +2,7 @@ use super::Storage;
 use crate::hot_tier::batch_chain::BatchMeta;
 use crate::wal::WalPayload;
 use sequins_query::ast::Signal;
+use sequins_types::SignalType;
 use std::sync::Arc;
 
 /// Build a simple `BatchMeta` from a batch — uses row count only for now.
@@ -17,7 +18,8 @@ fn simple_meta(row_count: usize) -> BatchMeta {
 }
 
 impl Storage {
-    /// Register a resource from an OTLP proto Resource, returning its content-addressed ID.
+    /// Register a resource from an OTLP proto Resource, returning its content-addressed ID
+    /// and the new RecordBatch when the resource is first seen.
     fn register_resource(
         &self,
         resource: Option<&opentelemetry_proto::tonic::resource::v1::Resource>,
@@ -113,7 +115,9 @@ impl sequins_types::OtlpIngest for Storage {
                 Ok(batch) => {
                     let batch = Arc::new(batch);
                     let meta = simple_meta(batch.num_rows());
-                    self.hot_tier.spans.push(Arc::clone(&batch), meta);
+                    self.hot_tier
+                        .chain(&SignalType::Spans)
+                        .push(Arc::clone(&batch), meta);
                     let _ = self.live_broadcast.send((Signal::Spans, batch));
                 }
                 Err(e) => tracing::warn!(error = %e, "Failed to convert spans to batch"),
@@ -124,7 +128,9 @@ impl sequins_types::OtlpIngest for Storage {
             match sequins_otlp::otlp_span_events_to_batch(span_events) {
                 Ok(batch) => {
                     let meta = simple_meta(batch.num_rows());
-                    self.hot_tier.span_events.push(Arc::new(batch), meta);
+                    self.hot_tier
+                        .chain(&SignalType::SpanEvents)
+                        .push(Arc::new(batch), meta);
                 }
                 Err(e) => tracing::warn!(error = %e, "Failed to convert span events to batch"),
             }
@@ -134,7 +140,9 @@ impl sequins_types::OtlpIngest for Storage {
             match sequins_otlp::otlp_span_links_to_batch(span_links) {
                 Ok(batch) => {
                     let meta = simple_meta(batch.num_rows());
-                    self.hot_tier.span_links.push(Arc::new(batch), meta);
+                    self.hot_tier
+                        .chain(&SignalType::SpanLinks)
+                        .push(Arc::new(batch), meta);
                 }
                 Err(e) => tracing::warn!(error = %e, "Failed to convert span links to batch"),
             }
@@ -192,7 +200,9 @@ impl sequins_types::OtlpIngest for Storage {
                 Ok(batch) => {
                     let batch = Arc::new(batch);
                     let meta = simple_meta(batch.num_rows());
-                    self.hot_tier.logs.push(Arc::clone(&batch), meta);
+                    self.hot_tier
+                        .chain(&SignalType::Logs)
+                        .push(Arc::clone(&batch), meta);
                     let _ = self.live_broadcast.send((Signal::Logs, batch));
                 }
                 Err(e) => tracing::warn!(error = %e, "Failed to convert logs to batch"),
@@ -256,7 +266,9 @@ impl sequins_types::OtlpIngest for Storage {
             Ok(batch) if batch.num_rows() > 0 => {
                 let batch = Arc::new(batch);
                 let meta = simple_meta(batch.num_rows());
-                self.hot_tier.datapoints.push(Arc::clone(&batch), meta);
+                self.hot_tier
+                    .chain(&SignalType::Metrics)
+                    .push(Arc::clone(&batch), meta);
                 let _ = self.live_broadcast.send((Signal::Datapoints, batch));
             }
             Ok(_) => {}
@@ -269,7 +281,7 @@ impl sequins_types::OtlpIngest for Storage {
                 let batch = Arc::new(batch);
                 let meta = simple_meta(batch.num_rows());
                 self.hot_tier
-                    .histogram_datapoints
+                    .chain(&SignalType::Histograms)
                     .push(Arc::clone(&batch), meta);
                 let _ = self.live_broadcast.send((Signal::Histograms, batch));
             }
@@ -282,7 +294,7 @@ impl sequins_types::OtlpIngest for Storage {
             Ok(batch) if batch.num_rows() > 0 => {
                 let meta = simple_meta(batch.num_rows());
                 self.hot_tier
-                    .exponential_histogram_datapoints
+                    .chain(&SignalType::ExpHistograms)
                     .push(Arc::new(batch), meta);
             }
             Ok(_) => {}
@@ -316,7 +328,9 @@ impl sequins_types::OtlpIngest for Storage {
                 Ok(batch) if batch.num_rows() > 0 => {
                     let batch = Arc::new(batch);
                     let meta = simple_meta(batch.num_rows());
-                    self.hot_tier.metrics.push(Arc::clone(&batch), meta);
+                    self.hot_tier
+                        .chain(&SignalType::MetricsMetadata)
+                        .push(Arc::clone(&batch), meta);
                     let _ = self.live_broadcast.send((Signal::Metrics, batch));
                 }
                 Ok(_) => {}
@@ -383,14 +397,18 @@ impl sequins_types::OtlpIngest for Storage {
                 if batches.profiles.num_rows() > 0 {
                     let batch = Arc::new(batches.profiles);
                     let meta = simple_meta(batch.num_rows());
-                    self.hot_tier.profiles.push(Arc::clone(&batch), meta);
+                    self.hot_tier
+                        .chain(&SignalType::ProfilesMetadata)
+                        .push(Arc::clone(&batch), meta);
                     let _ = self.live_broadcast.send((Signal::Profiles, batch));
                 }
                 if batches.frames.num_rows() > 0 {
                     if let Some(new_frames) = self.hot_tier.filter_new_frames(&batches.frames) {
                         let batch = Arc::new(new_frames);
                         let meta = simple_meta(batch.num_rows());
-                        self.hot_tier.frames.push(Arc::clone(&batch), meta);
+                        self.hot_tier
+                            .chain(&SignalType::ProfileFrames)
+                            .push(Arc::clone(&batch), meta);
                         let _ = self.live_broadcast.send((Signal::Frames, batch));
                     }
                 }
@@ -398,14 +416,18 @@ impl sequins_types::OtlpIngest for Storage {
                     if let Some(new_stacks) = self.hot_tier.filter_new_stacks(&batches.stacks) {
                         let batch = Arc::new(new_stacks);
                         let meta = simple_meta(batch.num_rows());
-                        self.hot_tier.stacks.push(Arc::clone(&batch), meta);
+                        self.hot_tier
+                            .chain(&SignalType::ProfileStacks)
+                            .push(Arc::clone(&batch), meta);
                         let _ = self.live_broadcast.send((Signal::Stacks, batch));
                     }
                 }
                 if batches.samples.num_rows() > 0 {
                     let batch = Arc::new(batches.samples);
                     let meta = simple_meta(batch.num_rows());
-                    self.hot_tier.samples.push(Arc::clone(&batch), meta);
+                    self.hot_tier
+                        .chain(&SignalType::ProfileSamples)
+                        .push(Arc::clone(&batch), meta);
                     let _ = self.live_broadcast.send((Signal::Samples, batch));
                 }
                 if batches.mappings.num_rows() > 0 {
@@ -413,7 +435,9 @@ impl sequins_types::OtlpIngest for Storage {
                     {
                         let batch = Arc::new(new_mappings);
                         let meta = simple_meta(batch.num_rows());
-                        self.hot_tier.mappings.push(Arc::clone(&batch), meta);
+                        self.hot_tier
+                            .chain(&SignalType::ProfileMappings)
+                            .push(Arc::clone(&batch), meta);
                         let _ = self.live_broadcast.send((Signal::Mappings, batch));
                     }
                 }

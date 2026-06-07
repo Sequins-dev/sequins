@@ -11,6 +11,7 @@
 //! 3. Client calls `DoGet(Ticket{...})`.
 //! 4. Server executes the plan via `QueryExec::execute()` and streams `FlightData`.
 
+use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::sql::server::FlightSqlService;
 use arrow_flight::sql::{
     ActionBeginSavepointRequest, ActionBeginSavepointResult, ActionBeginTransactionRequest,
@@ -21,17 +22,60 @@ use arrow_flight::sql::{
     CommandGetImportedKeys, CommandGetPrimaryKeys, CommandGetSqlInfo, CommandGetTableTypes,
     CommandGetTables, CommandGetXdbcTypeInfo, CommandPreparedStatementQuery,
     CommandPreparedStatementUpdate, CommandStatementIngest, CommandStatementQuery,
-    CommandStatementSubstraitPlan, CommandStatementUpdate, DoPutPreparedStatementResult, SqlInfo,
-    TicketStatementQuery,
+    CommandStatementSubstraitPlan, CommandStatementUpdate, DoPutPreparedStatementResult,
+    ProstMessageExt, SqlInfo, TicketStatementQuery,
 };
 use arrow_flight::{
     FlightData, FlightDescriptor, FlightEndpoint, FlightInfo, HandshakeRequest, HandshakeResponse,
     Ticket,
 };
-use futures::StreamExt;
+use bytes::Bytes;
+use futures::{StreamExt, TryStreamExt};
+use prost::Message as _;
 use sequins_query::QueryExec;
 use std::sync::Arc;
 use tonic::{Request, Response, Status, Streaming};
+
+// ── Catalog / schema constants ─────────────────────────────────────────────────
+const CATALOG: &str = "sequins";
+const DB_SCHEMA: &str = "main";
+
+/// All signal table names exposed through Flight SQL catalog discovery.
+const TABLE_NAMES: &[&str] = &[
+    "spans",
+    "logs",
+    "metrics",
+    "datapoints",
+    "histogram_data_points",
+    "exp_histogram_data_points",
+    "profiles",
+    "samples",
+    "profile_stacks",
+    "profile_frames",
+    "profile_mappings",
+    "resources",
+    "scopes",
+    "span_links",
+    "span_events",
+];
+
+type DoGetStream =
+    Response<std::pin::Pin<Box<dyn futures::Stream<Item = Result<FlightData, Status>> + Send>>>;
+
+/// Build a `FlightInfo` whose ticket encodes the given command.
+fn flight_info_for_command(cmd_bytes: Vec<u8>) -> Response<FlightInfo> {
+    let ticket = Ticket {
+        ticket: Bytes::from(cmd_bytes),
+    };
+    let endpoint = FlightEndpoint {
+        ticket: Some(ticket),
+        ..Default::default()
+    };
+    Response::new(FlightInfo {
+        endpoint: vec![endpoint],
+        ..Default::default()
+    })
+}
 
 /// Shared state for the Flight SQL server
 #[derive(Clone)]
@@ -152,52 +196,42 @@ impl FlightSqlService for SequinsFlightSqlService {
 
     async fn get_flight_info_catalogs(
         &self,
-        _query: CommandGetCatalogs,
+        query: CommandGetCatalogs,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_catalogs not supported",
-        ))
+        Ok(flight_info_for_command(query.as_any().encode_to_vec()))
     }
 
     async fn get_flight_info_schemas(
         &self,
-        _query: CommandGetDbSchemas,
+        query: CommandGetDbSchemas,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_schemas not supported",
-        ))
+        Ok(flight_info_for_command(query.as_any().encode_to_vec()))
     }
 
     async fn get_flight_info_tables(
         &self,
-        _query: CommandGetTables,
+        query: CommandGetTables,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_tables not supported",
-        ))
+        Ok(flight_info_for_command(query.as_any().encode_to_vec()))
     }
 
     async fn get_flight_info_table_types(
         &self,
-        _query: CommandGetTableTypes,
+        query: CommandGetTableTypes,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_table_types not supported",
-        ))
+        Ok(flight_info_for_command(query.as_any().encode_to_vec()))
     }
 
     async fn get_flight_info_sql_info(
         &self,
-        _query: CommandGetSqlInfo,
+        query: CommandGetSqlInfo,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_sql_info not supported",
-        ))
+        Ok(flight_info_for_command(query.as_any().encode_to_vec()))
     }
 
     async fn get_flight_info_primary_keys(
@@ -276,57 +310,101 @@ impl FlightSqlService for SequinsFlightSqlService {
 
     async fn do_get_catalogs(
         &self,
-        _query: CommandGetCatalogs,
+        query: CommandGetCatalogs,
         _request: Request<Ticket>,
-    ) -> Result<
-        Response<std::pin::Pin<Box<dyn futures::Stream<Item = Result<FlightData, Status>> + Send>>>,
-        Status,
-    > {
-        Err(Status::unimplemented("do_get_catalogs not supported"))
+    ) -> Result<DoGetStream, Status> {
+        let mut builder = query.into_builder();
+        builder.append(CATALOG);
+        let schema = builder.schema();
+        let batch = builder.build();
+        let stream = FlightDataEncoderBuilder::new()
+            .with_schema(schema)
+            .build(futures::stream::once(async { batch }))
+            .map_err(Status::from);
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn do_get_schemas(
         &self,
-        _query: CommandGetDbSchemas,
+        query: CommandGetDbSchemas,
         _request: Request<Ticket>,
-    ) -> Result<
-        Response<std::pin::Pin<Box<dyn futures::Stream<Item = Result<FlightData, Status>> + Send>>>,
-        Status,
-    > {
-        Err(Status::unimplemented("do_get_schemas not supported"))
+    ) -> Result<DoGetStream, Status> {
+        let mut builder = query.into_builder();
+        builder.append(CATALOG, DB_SCHEMA);
+        let schema = builder.schema();
+        let batch = builder.build();
+        let stream = FlightDataEncoderBuilder::new()
+            .with_schema(schema)
+            .build(futures::stream::once(async { batch }))
+            .map_err(Status::from);
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn do_get_tables(
         &self,
-        _query: CommandGetTables,
+        query: CommandGetTables,
         _request: Request<Ticket>,
-    ) -> Result<
-        Response<std::pin::Pin<Box<dyn futures::Stream<Item = Result<FlightData, Status>> + Send>>>,
-        Status,
-    > {
-        Err(Status::unimplemented("do_get_tables not supported"))
+    ) -> Result<DoGetStream, Status> {
+        let mut builder = query.into_builder();
+        for &table_name in TABLE_NAMES {
+            builder
+                .append(
+                    CATALOG,
+                    DB_SCHEMA,
+                    table_name,
+                    "TABLE",
+                    &arrow::datatypes::Schema::empty(),
+                )
+                .map_err(|e| Status::internal(e.to_string()))?;
+        }
+        let schema = builder.schema();
+        let batch = builder.build();
+        let stream = FlightDataEncoderBuilder::new()
+            .with_schema(schema)
+            .build(futures::stream::once(async { batch }))
+            .map_err(Status::from);
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn do_get_table_types(
         &self,
-        _query: CommandGetTableTypes,
+        query: CommandGetTableTypes,
         _request: Request<Ticket>,
-    ) -> Result<
-        Response<std::pin::Pin<Box<dyn futures::Stream<Item = Result<FlightData, Status>> + Send>>>,
-        Status,
-    > {
-        Err(Status::unimplemented("do_get_table_types not supported"))
+    ) -> Result<DoGetStream, Status> {
+        let mut builder = query.into_builder();
+        builder.append("TABLE");
+        let schema = builder.schema();
+        let batch = builder.build();
+        let stream = FlightDataEncoderBuilder::new()
+            .with_schema(schema)
+            .build(futures::stream::once(async { batch }))
+            .map_err(Status::from);
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn do_get_sql_info(
         &self,
-        _query: CommandGetSqlInfo,
+        query: CommandGetSqlInfo,
         _request: Request<Ticket>,
-    ) -> Result<
-        Response<std::pin::Pin<Box<dyn futures::Stream<Item = Result<FlightData, Status>> + Send>>>,
-        Status,
-    > {
-        Err(Status::unimplemented("do_get_sql_info not supported"))
+    ) -> Result<DoGetStream, Status> {
+        use arrow_flight::sql::metadata::SqlInfoDataBuilder;
+        let mut info_builder = SqlInfoDataBuilder::new();
+        info_builder.append(SqlInfo::FlightSqlServerName, "sequins");
+        info_builder.append(SqlInfo::FlightSqlServerVersion, env!("CARGO_PKG_VERSION"));
+        info_builder.append(SqlInfo::FlightSqlServerArrowVersion, "1.3");
+        let info_data = info_builder
+            .build()
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let batch = query
+            .into_builder(&info_data)
+            .build()
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let schema = batch.schema();
+        let stream = FlightDataEncoderBuilder::new()
+            .with_schema(schema)
+            .build(futures::stream::once(async { Ok(batch) }))
+            .map_err(Status::from);
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn do_get_primary_keys(

@@ -160,9 +160,7 @@ final class LogsViewModel {
     var searchText: String = ""
 
     /// Sort direction: true = newest first (default), false = oldest first
-    var sortNewestFirst: Bool = true {
-        didSet { scheduleReprocess() }
-    }
+    var sortNewestFirst: Bool = true
 
     // MARK: - Private State
 
@@ -172,20 +170,11 @@ final class LogsViewModel {
     /// Data source reference
     private weak var dataSource: DataSource?
 
-    // MARK: - Derived State
+    // MARK: - Computed State
 
     /// The active log entries decoded from all accumulated batches, sorted by `sortNewestFirst`.
-    /// Updated in the background whenever `tableView.batchVersion` increments or sort direction changes.
-    private(set) var effectiveLogs: [SequinsData.LogEntry] = []
-
-    private var reprocessTask: Task<Void, Never>?
-    private var observeTask: Task<Void, Never>?
-
-    /// Decode all batches into sorted log entries on a background thread.
-    private nonisolated static func decodeLogs(
-        batches: [RecordBatch],
-        newestFirst: Bool
-    ) -> [SequinsData.LogEntry] {
+    var effectiveLogs: [SequinsData.LogEntry] {
+        let batches = tableView?.batches ?? []
         let unsorted = batches.flatMap { batch -> [SequinsData.LogEntry] in
             let decoder = ArrowDecoder(batch)
             let records = (try? decoder.decode(LogRecord.self)) ?? []
@@ -194,40 +183,9 @@ final class LogsViewModel {
                 record.toLogEntry(attributes: idx < attrs.count ? attrs[idx] : [:])
             }
         }
-        return newestFirst
+        return sortNewestFirst
             ? unsorted.sorted { $0.timestamp > $1.timestamp }
             : unsorted.sorted { $0.timestamp < $1.timestamp }
-    }
-
-    private func scheduleReprocess() {
-        let batches = tableView?.batches ?? []
-        let newestFirst = sortNewestFirst
-        reprocessTask?.cancel()
-        reprocessTask = Task.detached { [weak self] in
-            guard !Task.isCancelled else { return }
-            let result = Self.decodeLogs(batches: batches, newestFirst: newestFirst)
-            guard !Task.isCancelled else { return }
-            await MainActor.run { [weak self] in
-                self?.effectiveLogs = result
-            }
-        }
-    }
-
-    private func startObserving() {
-        observeTask?.cancel()
-        observeTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    withObservationTracking {
-                        _ = self?.tableView?.batchVersion
-                    } onChange: {
-                        continuation.resume()
-                    }
-                }
-                guard !Task.isCancelled else { return }
-                self?.scheduleReprocess()
-            }
-        }
     }
 
     // MARK: - Public Methods
@@ -300,8 +258,6 @@ final class LogsViewModel {
             isLoading = false
             self.error = "Query failed: \(error.localizedDescription)"
         }
-
-        startObserving()
     }
 
     /// Start live mode — the view API handles historical + streaming phases.
@@ -340,8 +296,6 @@ final class LogsViewModel {
             NSLog("📋 [LogsViewModel] Live stream failed to start: \(error)")
             self.error = "Query failed: \(error.localizedDescription)"
         }
-
-        startObserving()
     }
 
     func stopLiveStream() {
@@ -350,13 +304,8 @@ final class LogsViewModel {
     }
 
     func cancel() {
-        observeTask?.cancel()
-        observeTask = nil
-        reprocessTask?.cancel()
-        reprocessTask = nil
         tableView?.cancel()
         tableView = nil
-        effectiveLogs = []
         isLoading = false
     }
 

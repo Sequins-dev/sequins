@@ -1,59 +1,59 @@
-import SwiftUI
+@preconcurrency import SwiftUI
 import Charts
 import SequinsData
 
-// MARK: - Heat Map Cell
+// MARK: - Column data model
 
-private struct HeatMapCell: Identifiable {
-    let id: String
+/// One pre-computed time column. Created once per export interval and never modified.
+/// The `ratios` and `bucketCounts` arrays are stable — only the x-position derived
+/// from the timestamp changes when the visible window slides.
+private struct HeatMapColumn: Sendable {
+    let timestamp: Date
+    /// Time boundaries for this column (used by Canvas to compute pixel width).
     let timeStart: Date
     let timeEnd: Date
-    let bucketLower: Double
-    let bucketUpper: Double
-    let count: UInt64
-    /// Opacity ratio pre-normalised against the max bucket count in this segment.
-    /// Computed once at layout build time so adding new segments never rescales
-    /// existing columns.
-    let ratio: Double
+    /// Per-bucket normalized opacity (0...1), indexed by bucket.
+    let ratios: [Double]
+    /// Raw per-bucket delta counts for tooltip display.
+    let bucketCounts: [UInt64]
 }
 
-// MARK: - Precomputed layout
-
-private struct HeatMapLayout {
-    let cells: [HeatMapCell]
-    let yDomain: ClosedRange<Double>   // yMin...numBuckets (index space)
-    let yMin: Double                   // 0 normally; 1 when underflow bucket is hidden
-    let numBuckets: Int
+/// Metadata computed once per layout rebuild and shared between the Canvas draw
+/// call and the axis configuration. Columns inside are independently stable.
+private struct HeatMapMeta: Sendable {
+    let columns: [HeatMapColumn]        // oldest-first, non-overlapping time bins
+    let numBuckets: Int                 // highest rendered bucket index + 1
+    let firstVisibleBucket: Int         // 0 normally; 1 when underflow bucket is hidden
+    let boundsRef: [Double]             // explicit bucket upper bounds for labels
+    let axisMarkLabels: [Double: String]
+    let yDomain: ClosedRange<Double>
+    /// Representative snapshot for tooltip (delta, newest snapshot per column).
     let sortedSnapshots: [HistogramSnapshot]
-    let boundsRef: [Double]            // explicit bounds for tooltip labels
-    let axisMarkLabels: [Double: String]  // bucket-index position → label string
 }
 
 // MARK: - HeatMapChart
 
-/// Grafana-style histogram heat map using SwiftUI Charts RectangleMark.
+/// Grafana-style histogram heat map.
 ///
-/// X-axis: time (one column per snapshot)
-/// Y-axis: bucket index space (equal-height bands)
-/// Color:  delta bucket count → blue opacity (power curve)
-///
-/// Layout is cached and rebuilt only when snapshots change, not on every
-/// animation tick — so the per-second smooth-scroll timer does not trigger
-/// expensive sorting/merging/delta work.
+/// Architecture:
+///  - Column data is computed ONCE per export in a background task. Each column
+///    stores per-bucket ratios; existing columns are never touched when new data
+///    arrives or when the visible window slides.
+///  - Rendering uses `chartBackground` + `Canvas` (CoreGraphics). On each `now`
+///    tick the Canvas redraws from the stable column array using fresh x-positions
+///    from the `ChartProxy` — no SwiftUI mark re-layout, no animation overhead.
+///  - The `Chart` shell contains only two invisible `PointMark`s whose sole job is
+///    to drive the x/y scale machinery for axis labels and hover hit-testing.
 struct HeatMapChart: View {
     let snapshots: [HistogramSnapshot]
-    /// Pre-maintained by HistogramLine — the highest bucket index that has
-    /// any non-zero delta count across current snapshots. Avoids rescanning
-    /// on every render; updated incrementally in the model as data arrives.
     let maxActiveBucket: Int
     let unit: String
     let timeRange: SequinsData.TimeRange?
 
+    @State private var meta: HeatMapMeta?
+    @State private var now = Date()
     @State private var hoveredSnapshot: HistogramSnapshot?
     @State private var hoveredBucketIndex: Int?
-    @State private var hoverLocation: CGPoint = .zero
-    @State private var now = Date()
-    @State private var cachedLayout: HeatMapLayout?
 
     // MARK: - Static formatters
 
@@ -69,213 +69,188 @@ struct HeatMapChart: View {
         return f
     }()
 
-    // MARK: - Fingerprint for cache invalidation
+    // MARK: - Layout key (cache invalidation)
 
-    /// Changes when snapshots are added, pruned, or replaced, or when the model's
-    /// maxActiveBucket changes — but NOT on every `now` tick.
     private struct LayoutKey: Equatable {
         let count: Int
         let lastTimestamp: Double
+        let maxActiveBucket: Int
     }
     private var layoutKey: LayoutKey {
         LayoutKey(
             count: snapshots.count,
-            lastTimestamp: snapshots.last?.timestamp.timeIntervalSince1970 ?? 0
+            lastTimestamp: snapshots.last?.timestamp.timeIntervalSince1970 ?? 0,
+            maxActiveBucket: maxActiveBucket
         )
     }
 
-    private var xAxisDomain: ClosedRange<Date>? {
-        guard let timeRange = timeRange else { return nil }
-        if timeRange.isLive { _ = now }
-        let bounds = timeRange.bounds
-        return bounds.start...bounds.end
-    }
+    // MARK: - Computed x-axis domain
 
-    // MARK: - Layout
-
-    /// Sum bucket_counts across a group of snapshots sharing the same timestamp.
-    private func mergeSnapshots(_ group: [HistogramSnapshot]) -> HistogramSnapshot {
-        guard group.count > 1 else { return group[0] }
-        let ref = group.max(by: { $0.explicitBounds.count < $1.explicitBounds.count })!
-        let nBuckets = ref.bucketCounts.count
-        var counts = [UInt64](repeating: 0, count: nBuckets)
-        var totalCount: UInt64 = 0
-        var totalSum: Double = 0
-        for snap in group {
-            totalCount += snap.count
-            totalSum += snap.sum
-            for (i, c) in snap.bucketCounts.enumerated() where i < nBuckets {
-                counts[i] += c
-            }
+    private func xAxisDomain(meta: HeatMapMeta) -> ClosedRange<Date> {
+        if let tr = timeRange {
+            if tr.isLive { _ = now }
+            return tr.bounds.start...tr.bounds.end
         }
-        return HistogramSnapshot(
-            timestamp: ref.timestamp,
-            count: totalCount,
-            sum: totalSum,
-            bucketCounts: counts,
-            explicitBounds: ref.explicitBounds
-        )
+        guard let first = meta.columns.first, let last = meta.columns.last else {
+            return Date()...Date()
+        }
+        return first.timeStart...last.timeEnd
     }
 
-    /// Build the full render layout from current snapshots.
-    ///
-    /// Called only when snapshots change (via `.task(id: layoutKey)`), not on
-    /// every animation tick, so all O(n×b) sorting/merging/delta work is amortised
-    /// across the export interval rather than repeated 60 times per second.
-    private func buildLayout() -> HeatMapLayout? {
+    // MARK: - Background layout build
+
+    /// Maximum number of time columns to render. Caps mark count at ~maxColumns × numBuckets.
+    private static let maxColumns = 80
+
+    nonisolated private static func buildMeta(
+        snapshots: [HistogramSnapshot],
+        maxActiveBucket: Int,
+        unit: String
+    ) -> HeatMapMeta? {
         guard !snapshots.isEmpty else { return nil }
 
         let rawSorted = snapshots.sorted { $0.timestamp < $1.timestamp }
 
-        // Group same-timestamp snapshots (one per attribute-labelled series per export)
-        // by summing bucket_counts so each export interval produces one column.
+        // Bin width: target ≤ maxColumns time columns.
+        let span = rawSorted.count > 1
+            ? rawSorted.last!.timestamp.timeIntervalSince(rawSorted.first!.timestamp)
+            : 1.0
+        let binSecs = max(5.0, ceil(span / Double(maxColumns)))
+
+        // Merge snapshots within each bin (same-series, same export interval).
         let merged: [HistogramSnapshot] = {
             var result: [HistogramSnapshot] = []
             var group: [HistogramSnapshot] = [rawSorted[0]]
             for i in 1..<rawSorted.count {
                 let cur = rawSorted[i]
-                if abs(cur.timestamp.timeIntervalSince(group[0].timestamp)) < 5.0 {
+                if abs(cur.timestamp.timeIntervalSince(group[0].timestamp)) < binSecs {
                     group.append(cur)
                 } else {
-                    result.append(mergeSnapshots(group))
+                    result.append(mergeGroup(group))
                     group = [cur]
                 }
             }
-            result.append(mergeSnapshots(group))
+            result.append(mergeGroup(group))
             return result
         }()
 
-        // Convert cumulative bucket_counts to per-interval deltas.
-        let sorted: [HistogramSnapshot] = {
+        // Convert cumulative snapshots to per-bin delta counts.
+        let deltas: [HistogramSnapshot] = {
             guard merged.count > 1 else { return merged }
-            var result: [HistogramSnapshot] = [merged[0]]
+            var out: [HistogramSnapshot] = [merged[0]]
             for i in 1..<merged.count {
-                let cur = merged[i]
-                let prev = merged[i - 1]
-                let nBuckets = max(cur.bucketCounts.count, prev.bucketCounts.count)
-                var deltaCounts = [UInt64](repeating: 0, count: nBuckets)
-                for j in 0..<nBuckets {
+                let cur = merged[i], prev = merged[i - 1]
+                let n = max(cur.bucketCounts.count, prev.bucketCounts.count)
+                var dc = [UInt64](repeating: 0, count: n)
+                for j in 0..<n {
                     let c = j < cur.bucketCounts.count ? cur.bucketCounts[j] : 0
                     let p = j < prev.bucketCounts.count ? prev.bucketCounts[j] : 0
-                    deltaCounts[j] = c >= p ? c - p : c
+                    dc[j] = c >= p ? c - p : c
                 }
-                let deltaCount = cur.count >= prev.count ? cur.count - prev.count : cur.count
-                let deltaSum   = cur.sum   >= prev.sum   ? cur.sum   - prev.sum   : cur.sum
-                result.append(HistogramSnapshot(
+                out.append(HistogramSnapshot(
                     timestamp: cur.timestamp,
-                    count: deltaCount,
-                    sum: deltaSum,
-                    bucketCounts: deltaCounts,
+                    count: cur.count >= prev.count ? cur.count - prev.count : cur.count,
+                    sum: cur.sum >= prev.sum ? cur.sum - prev.sum : cur.sum,
+                    bucketCounts: dc,
                     explicitBounds: cur.explicitBounds
                 ))
             }
-            return result
+            return out
         }()
 
-        let boundsRef = sorted
-            .max(by: { $0.explicitBounds.count < $1.explicitBounds.count })?
-            .explicitBounds ?? []
+        // Bucket geometry
+        let boundsRef = deltas.max(by: { $0.explicitBounds.count < $1.explicitBounds.count })?.explicitBounds ?? []
         let allFinite = boundsRef.filter { $0.isFinite }
         guard allFinite.count >= 2 else { return nil }
 
-        let totalBuckets = allFinite.count + 1  // underflow + explicit + overflow
+        let totalBuckets = allFinite.count + 1
+        let numBuckets = max(2, min(maxActiveBucket + 1, totalBuckets))
+        let firstVisibleBucket = (allFinite.first.map { $0 <= 0 } ?? false) ? 1 : 0
 
-        // Derive the max active bucket directly from the already-processed delta
-        // snapshots (sorted[1...], after same-timestamp merging and delta conversion).
-        // This is more reliable than the model's maxActiveBucket, which is computed
-        // from raw cumulative snapshots that may mix multiple series.
-        let effectiveMaxBucket: Int = sorted.dropFirst().reduce(0) { current, snap in
-            let highest = snap.bucketCounts.indices.reversed().first { snap.bucketCounts[$0] > 0 }
-            return max(current, highest ?? 0)
-        }
-        let numBuckets = max(2, min(effectiveMaxBucket + 1, totalBuckets))
-
-        let n = sorted.count
-        var timeStarts = [Date](repeating: sorted[0].timestamp, count: n)
-        var timeEnds   = [Date](repeating: sorted[0].timestamp, count: n)
+        // Column time boundaries (midpoint between adjacent column timestamps).
+        let n = deltas.count
+        var starts = [Date](repeating: deltas[0].timestamp, count: n)
+        var ends   = [Date](repeating: deltas[0].timestamp, count: n)
         if n == 1 {
-            timeStarts[0] = sorted[0].timestamp.addingTimeInterval(-30)
-            timeEnds[0]   = sorted[0].timestamp.addingTimeInterval(30)
+            starts[0] = deltas[0].timestamp.addingTimeInterval(-binSecs / 2)
+            ends[0]   = deltas[0].timestamp.addingTimeInterval( binSecs / 2)
         } else {
             for i in 0..<n {
-                let prev = i == 0
-                    ? sorted[0].timestamp.addingTimeInterval(sorted[0].timestamp.timeIntervalSince(sorted[1].timestamp))
-                    : sorted[i - 1].timestamp
-                let next = i == n - 1
-                    ? sorted[n-1].timestamp.addingTimeInterval(sorted[n-1].timestamp.timeIntervalSince(sorted[n-2].timestamp))
-                    : sorted[i + 1].timestamp
-                timeStarts[i] = Date(timeIntervalSince1970: (prev.timeIntervalSince1970 + sorted[i].timestamp.timeIntervalSince1970) / 2)
-                timeEnds[i]   = Date(timeIntervalSince1970: (sorted[i].timestamp.timeIntervalSince1970 + next.timeIntervalSince1970) / 2)
+                let prevT = i == 0
+                    ? deltas[0].timestamp.addingTimeInterval(-binSecs)
+                    : deltas[i - 1].timestamp
+                let nextT = i == n - 1
+                    ? deltas[n-1].timestamp.addingTimeInterval(binSecs)
+                    : deltas[i + 1].timestamp
+                starts[i] = Date(timeIntervalSince1970: (prevT.timeIntervalSince1970 + deltas[i].timestamp.timeIntervalSince1970) / 2)
+                ends[i]   = Date(timeIntervalSince1970: (deltas[i].timestamp.timeIntervalSince1970 + nextT.timeIntervalSince1970) / 2)
             }
         }
 
-        // Hide bucket 0 (underflow: values ≤ first explicit bound) when the first
-        // bound is 0 or negative — nothing can be in "≤0 ms" for duration metrics.
-        let yMin: Double = (allFinite.first.map { $0 <= 0 } ?? false) ? 1.0 : 0.0
-        let firstVisibleBucket = Int(yMin)
-
-        // sorted[0] is the cumulative baseline — it must NOT produce cells.
-        // Only sorted[1...] are per-interval delta counts.
-        //
-        // Opacity is normalised per-segment (per time column) against that
-        // column's own peak bucket count, so adding a new segment never rescales
-        // existing columns' appearance.
-        var cells: [HeatMapCell] = []
-        cells.reserveCapacity((n - 1) * numBuckets)
-        for snapIdx in 1..<n {
-            let snapshot = sorted[snapIdx]
-            // Find the max count within this segment for per-column normalisation.
-            let segMax: UInt64 = snapshot.bucketCounts
-                .prefix(numBuckets)
-                .dropFirst(firstVisibleBucket)
-                .max() ?? 1
-            for (i, count) in snapshot.bucketCounts.enumerated() {
-                guard i >= firstVisibleBucket && i < numBuckets else { continue }
-                let ratio = segMax > 0 ? Double(count) / Double(segMax) : 0
-                cells.append(HeatMapCell(
-                    id: "\(snapshot.timestamp.timeIntervalSince1970)-\(i)",
-                    timeStart: timeStarts[snapIdx],
-                    timeEnd: timeEnds[snapIdx],
-                    bucketLower: Double(i),
-                    bucketUpper: Double(i + 1),
-                    count: count,
-                    ratio: ratio
-                ))
+        // Build one column per delta snapshot (index 0 is baseline — skip it).
+        var columns: [HeatMapColumn] = []
+        columns.reserveCapacity(n - 1)
+        for i in 1..<n {
+            let snap = deltas[i]
+            let segMax = snap.bucketCounts.prefix(numBuckets).dropFirst(firstVisibleBucket).max() ?? 1
+            var ratios = [Double](repeating: 0, count: numBuckets)
+            for b in firstVisibleBucket..<numBuckets {
+                let cnt = b < snap.bucketCounts.count ? snap.bucketCounts[b] : 0
+                ratios[b] = segMax > 0 ? Double(cnt) / Double(segMax) : 0
             }
+            columns.append(HeatMapColumn(
+                timestamp: snap.timestamp,
+                timeStart: starts[i],
+                timeEnd: ends[i],
+                ratios: ratios,
+                bucketCounts: snap.bucketCounts
+            ))
         }
-        guard !cells.isEmpty else { return nil }
+        guard !columns.isEmpty else { return nil }
 
-        let yDomain = yMin...Double(numBuckets)
-
+        // Y-axis labels
         let visibleBoundCount = min(allFinite.count, numBuckets - 1)
         let step = max(1, visibleBoundCount / 5)
-        let (axisMultiplier, axisSymbol) = timeScale(for: allFinite)
-        let axisMarkLabels: [Double: String] = Dictionary(
-            uniqueKeysWithValues: stride(from: max(1, firstVisibleBucket + 1), through: visibleBoundCount, by: step).map { i in
-                let v = allFinite[i - 1] * axisMultiplier
-                let num = formatLinear(v)
-                let label = axisSymbol.isEmpty ? num : "\(num) \(axisSymbol)"
-                return (Double(i), label)
+        let (mult, sym) = timeScaleStatic(unit: unit, bounds: allFinite)
+        let labels: [Double: String] = Dictionary(uniqueKeysWithValues:
+            stride(from: max(1, firstVisibleBucket + 1), through: visibleBoundCount, by: step).map { i in
+                let v = allFinite[i - 1] * mult
+                let num = formatStatic(v)
+                return (Double(i), sym.isEmpty ? num : "\(num) \(sym)")
             }
         )
 
-        return HeatMapLayout(
-            cells: cells,
-            yDomain: yDomain,
-            yMin: yMin,
+        return HeatMapMeta(
+            columns: columns,
             numBuckets: numBuckets,
-            sortedSnapshots: sorted,
+            firstVisibleBucket: firstVisibleBucket,
             boundsRef: allFinite,
-            axisMarkLabels: axisMarkLabels
+            axisMarkLabels: labels,
+            yDomain: Double(firstVisibleBucket)...Double(numBuckets),
+            sortedSnapshots: deltas
         )
+    }
+
+    nonisolated private static func mergeGroup(_ group: [HistogramSnapshot]) -> HistogramSnapshot {
+        guard group.count > 1 else { return group[0] }
+        let ref = group.max(by: { $0.explicitBounds.count < $1.explicitBounds.count })!
+        let n = ref.bucketCounts.count
+        var counts = [UInt64](repeating: 0, count: n)
+        var total: UInt64 = 0; var sum: Double = 0
+        for s in group {
+            total += s.count; sum += s.sum
+            for (i, c) in s.bucketCounts.enumerated() where i < n { counts[i] += c }
+        }
+        return HistogramSnapshot(timestamp: ref.timestamp, count: total, sum: sum,
+                                 bucketCounts: counts, explicitBounds: ref.explicitBounds)
     }
 
     // MARK: - Body
 
     var body: some View {
         Group {
-            if let layout = cachedLayout {
-                chartView(layout: layout)
+            if let m = meta {
+                chartView(meta: m)
             } else {
                 Rectangle()
                     .fill(Color.gray.opacity(0.1))
@@ -283,50 +258,53 @@ struct HeatMapChart: View {
             }
         }
         .task(id: layoutKey) {
-            // Rebuild only when data changes — not on every `now` tick.
-            cachedLayout = buildLayout()
+            let snaps = snapshots, maxB = maxActiveBucket, u = unit
+            let result = await Task.detached(priority: .userInitiated) {
+                HeatMapChart.buildMeta(snapshots: snaps, maxActiveBucket: maxB, unit: u)
+            }.value
+            meta = result
         }
         .task(id: timeRange?.isLive) {
             guard timeRange?.isLive == true else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
-                withAnimation(.linear(duration: 1.0)) {
-                    now = Date()
-                }
+                // Updating `now` triggers a Canvas redraw — the columns slide left
+                // purely via updated ChartProxy x-positions; no column recomputation.
+                now = Date()
             }
         }
     }
 
-    // MARK: - Chart view
+    // MARK: - Chart shell + Canvas renderer
 
     @ViewBuilder
-    private func chartView(layout: HeatMapLayout) -> some View {
+    private func chartView(meta: HeatMapMeta) -> some View {
+        let domain = xAxisDomain(meta: meta)
+
         Chart {
-            ForEach(layout.cells) { cell in
-                RectangleMark(
-                    xStart: .value("Start", cell.timeStart),
-                    xEnd: .value("End", cell.timeEnd),
-                    yStart: .value("Lower", cell.bucketLower),
-                    yEnd: .value("Upper", cell.bucketUpper)
-                )
-                .foregroundStyle(colorForRatio(cell.ratio))
+            // Two invisible anchors drive x/y scale — zero rendering cost.
+            if let first = meta.columns.first, let last = meta.columns.last {
+                PointMark(x: .value("T", first.timeStart), y: .value("B", Double(meta.firstVisibleBucket)))
+                    .opacity(0)
+                PointMark(x: .value("T", last.timeEnd), y: .value("B", Double(meta.numBuckets)))
+                    .opacity(0)
             }
+            // Hover crosshair
             if let snap = hoveredSnapshot {
                 RuleMark(x: .value("Hover", snap.timestamp))
                     .foregroundStyle(Color.white.opacity(0.6))
                     .lineStyle(StrokeStyle(lineWidth: 1))
             }
         }
+        .chartXScale(domain: domain)
+        .chartYScale(domain: meta.yDomain)
         .chartXAxis {
-            let domain = xAxisDomain ?? (layout.sortedSnapshots.first?.timestamp ?? Date())...(layout.sortedSnapshots.last?.timestamp ?? Date())
             let interval = ChartDataUtils.axisTickInterval(for: domain.upperBound.timeIntervalSince(domain.lowerBound))
             let labelSafeStart = domain.lowerBound.addingTimeInterval(interval * 0.3)
             AxisMarks(values: ChartDataUtils.axisTicks(for: domain)) { value in
-                AxisGridLine()
-                    .foregroundStyle(Color.secondary.opacity(0.2))
+                AxisGridLine().foregroundStyle(Color.secondary.opacity(0.2))
                 let date = value.as(Date.self)
-                let showLabel = date.map { $0 >= labelSafeStart } ?? false
-                if showLabel, let d = date {
+                if date.map({ $0 >= labelSafeStart }) ?? false, let d = date {
                     AxisValueLabel {
                         Text(Self.axisFormatter.string(from: d))
                             .font(.caption2)
@@ -336,64 +314,37 @@ struct HeatMapChart: View {
             }
         }
         .chartYAxis {
-            AxisMarks(position: .leading, values: (Int(layout.yMin)...layout.numBuckets).map { Double($0) }) { value in
+            AxisMarks(position: .leading, values: (meta.firstVisibleBucket...meta.numBuckets).map { Double($0) }) { value in
                 AxisGridLine()
                 AxisValueLabel {
-                    if let idx = value.as(Double.self),
-                       let label = layout.axisMarkLabels[idx] {
-                        Text(label)
-                            .font(.caption2)
+                    if let idx = value.as(Double.self), let label = meta.axisMarkLabels[idx] {
+                        Text(label).font(.caption2)
                     }
                 }
             }
         }
-        .animation(.linear(duration: 1.0), value: now)
-        .chartYScale(domain: layout.yDomain)
-        .chartPlotStyle { plotArea in
-            plotArea
-                .padding(.trailing, 8)
-                .clipped()
-        }
-        .if(xAxisDomain != nil) { chart in
-            chart.chartXScale(domain: xAxisDomain!)
-        }
+        .chartPlotStyle { $0.padding(.trailing, 8).clipped() }
+        // chartOverlay gives us a ChartProxy with a valid plotFrame anchor that resolves
+        // correctly in a GeometryReader. The Canvas draws heat-map cells clipped to the
+        // plot frame so they never paint over axis labels. allowsHitTesting(false) lets
+        // hover events fall through to the Color.clear hit target below.
         .chartOverlay { proxy in
             GeometryReader { geo in
                 let frame = proxy.plotFrame.map { geo[$0] } ?? .zero
+                // Heat-map canvas — non-interactive, clipped to plot area
+                let _ = now  // register `now` as a dependency so canvas redraws each second
+                Canvas { ctx, _ in
+                    // Clip to the plot area so cells never overflow into axis label gutters
+                    ctx.clip(to: Path(CGRect(origin: frame.origin, size: frame.size)))
+                    drawColumns(ctx: ctx, meta: meta, proxy: proxy, plotOrigin: frame.origin)
+                }
+                .allowsHitTesting(false)
+                // Hover hit target
                 Color.clear
                     .contentShape(Rectangle())
                     .onContinuousHover { phase in
-                        switch phase {
-                        case .active(let location):
-                            hoverLocation = location
-                            let plotX = location.x - frame.origin.x
-                            let plotY = location.y - frame.origin.y
-                            guard plotX >= 0, plotX <= frame.width,
-                                  plotY >= 0, plotY <= frame.height else {
-                                hoveredSnapshot = nil
-                                hoveredBucketIndex = nil
-                                return
-                            }
-                            if let date: Date = proxy.value(atX: plotX) {
-                                hoveredSnapshot = layout.sortedSnapshots.min(by: {
-                                    abs($0.timestamp.timeIntervalSince(date)) <
-                                    abs($1.timestamp.timeIntervalSince(date))
-                                })
-                            } else {
-                                hoveredSnapshot = nil
-                            }
-                            if let yVal: Double = proxy.value(atY: plotY) {
-                                let idx = Int(yVal.rounded(.down))
-                                hoveredBucketIndex = (idx >= 0 && idx < layout.numBuckets) ? idx : nil
-                            } else {
-                                hoveredBucketIndex = nil
-                            }
-                        case .ended:
-                            hoveredSnapshot = nil
-                            hoveredBucketIndex = nil
-                        }
+                        handleHover(phase: phase, proxy: proxy, frame: frame, meta: meta)
                     }
-
                 if let snap = hoveredSnapshot,
                    let xPos = proxy.position(forX: snap.timestamp) {
                     let tipHalfWidth: CGFloat = 90
@@ -401,7 +352,7 @@ struct HeatMapChart: View {
                         max(frame.origin.x + xPos, frame.origin.x + tipHalfWidth),
                         frame.origin.x + frame.width - tipHalfWidth
                     )
-                    tooltipView(snap: snap, bucketIndex: hoveredBucketIndex, bounds: layout.boundsRef)
+                    tooltipView(snap: snap, bucketIndex: hoveredBucketIndex, meta: meta)
                         .position(x: centerX, y: frame.origin.y + 60)
                         .allowsHitTesting(false)
                 }
@@ -409,30 +360,78 @@ struct HeatMapChart: View {
         }
     }
 
+    // MARK: - Canvas draw
+
+    private func drawColumns(ctx: GraphicsContext, meta: HeatMapMeta, proxy: ChartProxy, plotOrigin: CGPoint) {
+        let visibleBuckets = meta.numBuckets - meta.firstVisibleBucket
+        guard visibleBuckets > 0 else { return }
+
+        // proxy.position(forX/Y:) returns coordinates relative to the plot area origin.
+        // chartBackground draws in the full chart frame (including axis gutters), so we
+        // must add the plot area's offset to avoid painting over the y-axis labels.
+        let ox = plotOrigin.x
+        let oy = plotOrigin.y
+
+        for col in meta.columns {
+            guard let xStart = proxy.position(forX: col.timeStart),
+                  let xEnd   = proxy.position(forX: col.timeEnd) else { continue }
+            let colW = max(1, xEnd - xStart)
+
+            for b in meta.firstVisibleBucket..<meta.numBuckets {
+                let ratio = b < col.ratios.count ? col.ratios[b] : 0
+                guard ratio > 0.005 else { continue }
+
+                guard let yTop    = proxy.position(forY: Double(b + 1)),
+                      let yBottom = proxy.position(forY: Double(b)) else { continue }
+                let cellH = max(1, yBottom - yTop)
+
+                let opacity = pow(ratio, 0.4)
+                let color = Color(hue: 0.6, saturation: 0.85, brightness: 0.9, opacity: opacity)
+                ctx.fill(Path(CGRect(x: ox + xStart, y: oy + yTop, width: colW, height: cellH)),
+                         with: .color(color))
+            }
+        }
+    }
+
+    // MARK: - Hover
+
+    private func handleHover(phase: HoverPhase, proxy: ChartProxy, frame: CGRect, meta: HeatMapMeta) {
+        switch phase {
+        case .active(let loc):
+            let plotX = loc.x - frame.origin.x
+            let plotY = loc.y - frame.origin.y
+            guard plotX >= 0, plotX <= frame.width, plotY >= 0, plotY <= frame.height else {
+                hoveredSnapshot = nil; hoveredBucketIndex = nil; return
+            }
+            if let date: Date = proxy.value(atX: plotX) {
+                hoveredSnapshot = meta.sortedSnapshots.min(by: {
+                    abs($0.timestamp.timeIntervalSince(date)) < abs($1.timestamp.timeIntervalSince(date))
+                })
+            }
+            if let yVal: Double = proxy.value(atY: plotY) {
+                let idx = Int(yVal.rounded(.down))
+                hoveredBucketIndex = (idx >= 0 && idx < meta.numBuckets) ? idx : nil
+            }
+        case .ended:
+            hoveredSnapshot = nil; hoveredBucketIndex = nil
+        }
+    }
+
     // MARK: - Tooltip
 
-    private func tooltipView(snap: HistogramSnapshot, bucketIndex: Int?, bounds: [Double]) -> some View {
+    private func tooltipView(snap: HistogramSnapshot, bucketIndex: Int?, meta: HeatMapMeta) -> some View {
         let total = snap.bucketCounts.count
         let i = bucketIndex ?? 0
         let count = i < total ? snap.bucketCounts[i] : 0
-        let label = bucketLabel(index: i, bounds: bounds, total: total)
-
+        let label = bucketLabel(index: i, bounds: meta.boundsRef, total: total)
         return VStack(alignment: .leading, spacing: 3) {
             Text(Self.tooltipFormatter.string(from: snap.timestamp))
-                .font(.caption2)
-                .foregroundColor(.secondary)
-
+                .font(.caption2).foregroundColor(.secondary)
             Divider()
-
             HStack(spacing: 6) {
-                Text(label)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .fixedSize()
+                Text(label).font(.caption2).foregroundColor(.secondary).lineLimit(1).fixedSize()
                 Spacer()
-                Text("\(count)")
-                    .font(.caption2)
+                Text("\(count)").font(.caption2)
                     .fontWeight(count > 0 ? .medium : .regular)
                     .foregroundColor(count > 0 ? .primary : .secondary)
             }
@@ -444,50 +443,37 @@ struct HeatMapChart: View {
         .fixedSize()
     }
 
-    private func timeScale(for bounds: [Double]) -> (multiplier: Double, symbol: String) {
+    // MARK: - Helpers (static so buildMeta can call them off main actor)
+
+    nonisolated private static func timeScaleStatic(unit: String, bounds: [Double]) -> (multiplier: Double, symbol: String) {
         guard unit.lowercased() == "ms" else { return (1, unit) }
         let minBound = bounds.filter { $0.isFinite && $0 > 0 }.min() ?? 1
-        if minBound >= 1      { return (1,         "ms") }
-        if minBound >= 0.001  { return (1_000,     "µs") }
-        return                         (1_000_000, "ns")
+        if minBound >= 1     { return (1,         "ms") }
+        if minBound >= 0.001 { return (1_000,     "µs") }
+        return                        (1_000_000, "ns")
     }
 
-    private func bucketLabel(index i: Int, bounds: [Double], total: Int) -> String {
-        let (multiplier, symbol) = timeScale(for: bounds)
-        let u = symbol.isEmpty ? "" : " \(symbol)"
-
-        func fmt(_ v: Double) -> String {
-            if v == 0 { return "0" }
-            let c = v * multiplier
-            let absC = abs(c)
-            if absC >= 1000 { return String(format: "%.0fk", c / 1000) }
-            if absC >= 1    { return String(format: "%.0f", c) }
-            if absC >= 0.1  { return String(format: "%.1f", c) }
-            return String(format: "%.2f", c)
-        }
-
-        if i == 0 {
-            return "≤\(fmt(bounds.first ?? 0))\(u)"
-        } else if i == total - 1 {
-            return ">\(fmt(bounds.last ?? 0))\(u)"
-        } else if i - 1 < bounds.count && i < bounds.count {
-            return "\(fmt(bounds[i - 1]))–\(fmt(bounds[i]))\(u)"
-        }
-        return "bucket \(i)"
-    }
-
-    // MARK: - Color mapping
-
-    private func colorForRatio(_ ratio: Double) -> Color {
-        let opacity = pow(ratio, 0.4)
-        return Color(hue: 0.6, saturation: 0.85, brightness: 0.9, opacity: opacity)
-    }
-
-    private func formatLinear(_ v: Double) -> String {
+    nonisolated private static func formatStatic(_ v: Double) -> String {
         if abs(v) >= 1_000_000 { return String(format: "%.1fM", v / 1_000_000) }
         if abs(v) >= 1_000     { return String(format: "%.1fk", v / 1_000) }
         if abs(v) < 0.01 && v != 0 { return String(format: "%.3f", v) }
         return String(format: "%.2f", v)
+    }
+
+    private func bucketLabel(index i: Int, bounds: [Double], total: Int) -> String {
+        let (mult, sym) = Self.timeScaleStatic(unit: unit, bounds: bounds)
+        let u = sym.isEmpty ? "" : " \(sym)"
+        func fmt(_ v: Double) -> String {
+            let c = v * mult; let a = abs(c)
+            if a >= 1000 { return String(format: "%.0fk", c / 1000) }
+            if a >= 1    { return String(format: "%.0f", c) }
+            if a >= 0.1  { return String(format: "%.1f", c) }
+            return String(format: "%.2f", c)
+        }
+        if i == 0                              { return "≤\(fmt(bounds.first ?? 0))\(u)" }
+        if i == total - 1                      { return ">\(fmt(bounds.last ?? 0))\(u)" }
+        if i - 1 < bounds.count && i < bounds.count { return "\(fmt(bounds[i-1]))–\(fmt(bounds[i]))\(u)" }
+        return "bucket \(i)"
     }
 }
 

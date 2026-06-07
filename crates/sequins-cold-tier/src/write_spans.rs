@@ -35,6 +35,7 @@ impl ColdTier {
             let companion_index = SpanCompanionIndex::build_for_batch(
                 &batch,
                 self.config.companion_index.cardinality_threshold,
+                0.01,
             )
             .map_err(|e| Error::Storage(format!("Failed to build companion index: {}", e)))?;
             let bytes = companion_index.into_companion_bytes().map_err(|e| {

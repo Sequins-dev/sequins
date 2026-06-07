@@ -38,12 +38,26 @@ impl ManagementApi for Storage {
                 sequins_types::error::Error::Other(format!("Failed to cleanup metrics: {}", e))
             })?;
 
-        // Cleanup profiles
+        // Cleanup profiles (metadata + samples + stacks + frames + mappings)
         total_deleted += cold_tier
             .cleanup_old_files("profiles", policy.profiles_retention)
             .await
             .map_err(|e| {
                 sequins_types::error::Error::Other(format!("Failed to cleanup profiles: {}", e))
+            })?;
+
+        // Cleanup resources and scopes (use spans_retention as a proxy for all metadata)
+        total_deleted += cold_tier
+            .cleanup_old_files("resources", policy.spans_retention)
+            .await
+            .map_err(|e| {
+                sequins_types::error::Error::Other(format!("Failed to cleanup resources: {}", e))
+            })?;
+        total_deleted += cold_tier
+            .cleanup_old_files("scopes", policy.spans_retention)
+            .await
+            .map_err(|e| {
+                sequins_types::error::Error::Other(format!("Failed to cleanup scopes: {}", e))
             })?;
 
         Ok(total_deleted)

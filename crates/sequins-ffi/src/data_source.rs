@@ -12,6 +12,8 @@ use std::os::raw::c_char;
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "local")]
+use sequins_datafusion_backend::DataFusionBackend;
+#[cfg(feature = "local")]
 use sequins_server::OtlpServer;
 #[cfg(feature = "local")]
 use sequins_storage::Storage;
@@ -49,6 +51,9 @@ pub(crate) enum DataSourceImpl {
     #[cfg(feature = "local")]
     Local {
         storage: Arc<Storage>,
+        /// Shared DataFusion backend — session context is initialised once and reused
+        /// across all queries, avoiding the per-query `infer_schema` overhead.
+        backend: Arc<DataFusionBackend>,
         otlp_server: Mutex<Option<OtlpServerHandle>>,
     },
     Remote {
@@ -122,9 +127,16 @@ pub extern "C" fn sequins_data_source_new_local(
         }
     };
 
+    // Create the shared DataFusion backend once. The SessionContext inside it is
+    // initialised lazily on the first query and then reused for all subsequent
+    // queries, so the expensive infer_schema call over all cold-tier Vortex files
+    // only happens once per data source lifetime.
+    let backend = Arc::new(DataFusionBackend::new(Arc::clone(&storage)));
+
     // Create DataSourceImpl (OTLP server will be started separately via start_otlp_server)
     let impl_box = Box::new(DataSourceImpl::Local {
         storage,
+        backend,
         otlp_server: Mutex::new(None),
     });
 
@@ -248,6 +260,7 @@ pub extern "C" fn sequins_data_source_start_otlp_server(
         DataSourceImpl::Local {
             storage,
             otlp_server,
+            ..
         } => {
             let mut server_guard = match otlp_server.lock() {
                 Ok(guard) => guard,

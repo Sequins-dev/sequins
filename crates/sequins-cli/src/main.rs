@@ -2,8 +2,9 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use sequins_datafusion_backend::DataFusionBackend;
 use sequins_server::{flight_service_server, ManagementServer, OtlpServer};
-use sequins_storage::{DataFusionBackend, Storage, StorageConfig};
+use sequins_storage::{Storage, StorageConfig};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use tracing::{error, info};
 
 mod ingest;
 mod query;
+mod storage;
 
 #[derive(Parser, Debug)]
 #[command(name = "sequins")]

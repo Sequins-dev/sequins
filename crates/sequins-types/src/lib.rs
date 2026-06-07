@@ -3,34 +3,30 @@
 //! Provides:
 //! - Data models: Span, LogEntry, Metric, Profile, etc.
 //! - Core traits: OtlpIngest, ManagementApi
-//! - Arrow schema definitions
+//! - Arrow schema definitions (re-exported from sequins-arrow-schema)
 //! - Time types: Timestamp, Duration, TimeRange, TimeWindow
-//! - Profile parsing utilities
 
-/// Apache Arrow schema definitions for telemetry data
-pub mod arrow_schema;
-/// Helpers for mapping OTLP attribute keys to promoted Arrow column names
-pub mod column_names;
-/// Error types and result aliases
-pub mod error;
-/// Vortex extension data types for semantic enum typing
-pub mod ext_dtypes;
+// Arrow schema modules — owned by sequins-arrow-schema, re-exported here for back-compat.
+pub use sequins_arrow_schema::arrow_schema;
+pub use sequins_arrow_schema::column_names;
+pub use sequins_arrow_schema::ext_dtypes;
+pub use sequins_arrow_schema::schema_catalog;
+pub use sequins_arrow_schema::signal_type;
+
+// error is now canonical in sequins-traits; re-exported here for back-compat.
+pub use sequins_traits::error;
 /// Health metric generation
 pub mod health;
-/// OTLP ingestion trait
+/// OTLP ingestion trait (thin shim re-exporting from sequins-traits)
 pub mod ingest;
+/// Internal macros for generating boilerplate (e.g. `define_uuid_id!`)
+pub(crate) mod macros;
 /// Management API trait
 pub mod management;
 /// Metric aggregation and grouping utilities
 pub mod metric_grouping;
 /// Data models for traces, logs, metrics, and profiles
 pub mod models;
-/// pprof binary format parser
-pub mod pprof_parser;
-/// Central registry of promoted attribute columns (semconv + user config)
-pub mod schema_catalog;
-/// Signal type enum mapping signal names to Arrow schemas
-pub mod signal_type;
 /// Wall-clock time provider (injectable for deterministic testing)
 pub mod time_provider;
 

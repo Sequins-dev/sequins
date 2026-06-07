@@ -271,7 +271,6 @@ mod tests {
     use sequins_types::models::{ProfileId, ProfileType, Timestamp, TraceId};
 
     fn create_test_sample() -> ProfileSample {
-        use sequins_types::models::AttributeValue;
         use std::collections::HashMap;
 
         ProfileSample {
