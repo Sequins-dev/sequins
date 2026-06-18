@@ -77,7 +77,7 @@ public struct FlamegraphNode: Identifiable, Equatable {
 public final class FlamegraphFeed {
     private static let logger = Logger(label: "sequins.flamegraph-feed")
 
-    // MARK: - Public state
+    // ── Public state ──────────────────────────────────────────────────────────
 
     /// Flat node array, ordered by a BFS traversal of the tree.
     public private(set) var nodes: [FlamegraphNode] = []
@@ -97,9 +97,9 @@ public final class FlamegraphFeed {
     /// Distinct value types — populated from entity descriptors.
     public private(set) var availableValueTypes: [String] = []
 
-    // MARK: - Private entity state
+    // ── Private entity state ──────────────────────────────────────────────────
 
-    private struct EntityData {
+    private final class EntityData {
         let id: String         // path_key
         let frameId: UInt64
         let functionName: String
@@ -110,18 +110,27 @@ public final class FlamegraphFeed {
         let parentId: String?  // parent path_key, or nil for root-level nodes
         var totalValue: Int64
         var selfValue: Int64
-    }
 
-    private enum EntityMutation {
-        case upsert(EntityData)
-        case update(key: String, totalValue: Int64, selfValue: Int64)
-        case remove(key: String)
-        case ready
-        case failed
+        init(
+            id: String, frameId: UInt64, functionName: String,
+            systemName: String?, filename: String?, line: Int64?,
+            depth: Int, parentId: String?,
+            totalValue: Int64, selfValue: Int64
+        ) {
+            self.id = id
+            self.frameId = frameId
+            self.functionName = functionName
+            self.systemName = systemName
+            self.filename = filename
+            self.line = line
+            self.depth = depth
+            self.parentId = parentId
+            self.totalValue = totalValue
+            self.selfValue = selfValue
+        }
     }
 
     private var entities: [String: EntityData] = [:]
-    private var rebuildTask: Task<Void, Never>?
 
     public init() {}
 
@@ -133,22 +142,9 @@ public final class FlamegraphFeed {
     // MARK: - Entity delta application
 
     /// Apply a batch of view deltas from the FlamegraphStrategy.
-    /// Parsing (toRows + field extraction) runs in background; mutations and rebuild are staged.
     public func applyViewDeltas(_ deltas: [ViewDelta]) {
         withSpan("FlamegraphFeed.applyViewDeltas") { _ in }
-
-        Task.detached { [weak self] in
-            let mutations = Self.parseDeltaMutations(deltas)
-            await MainActor.run { [weak self] in
-                self?.applyEntityMutations(mutations)
-            }
-        }
-    }
-
-    // MARK: - Background parse
-
-    private static func parseDeltaMutations(_ deltas: [ViewDelta]) -> [EntityMutation] {
-        var mutations: [EntityMutation] = []
+        var didChange = false
 
         for delta in deltas {
             switch delta.type {
@@ -162,7 +158,8 @@ public final class FlamegraphFeed {
                 //                    system_name(3), filename(4), line(5),
                 //                    depth(6), parent_path_key(7)
                 let descRows = descBatch.toRows()
-                guard let row = descRows.first, row.count >= 8 else { continue }
+                guard let row = descRows.first else { continue }
+                guard row.count >= 8 else { continue }
 
                 let frameId: UInt64
                 if let n = row[1] as? UInt64 { frameId = n }
@@ -181,6 +178,7 @@ public final class FlamegraphFeed {
 
                 let parentId = row[7] as? String
 
+                // Data schema: total_value(0), self_value(1)
                 let (totalValue, selfValue) = extractDataValues(dataBatch)
 
                 let entity = EntityData(
@@ -195,105 +193,67 @@ public final class FlamegraphFeed {
                     totalValue: totalValue,
                     selfValue: selfValue
                 )
-                mutations.append(.upsert(entity))
+                entities[key] = entity
+                didChange = true
 
             case .entityDataReplaced:
                 guard let key = delta.key,
+                      let entity = entities[key],
                       let dataBatch = delta.data.first
                 else { continue }
 
                 let (totalValue, selfValue) = extractDataValues(dataBatch)
-                mutations.append(.update(key: key, totalValue: totalValue, selfValue: selfValue))
+                entity.totalValue = totalValue
+                entity.selfValue = selfValue
+                didChange = true
 
             case .entityRemoved:
                 guard let key = delta.key else { continue }
-                mutations.append(.remove(key: key))
+                entities.removeValue(forKey: key)
+                didChange = true
 
             case .ready:
-                mutations.append(.ready)
+                markReady()
+
+            case .heartbeat:
+                // No state change needed; rebuild happens below if didChange.
+                break
 
             case .error:
-                mutations.append(.failed)
+                markFailed()
 
             default:
                 break
             }
         }
 
-        return mutations
-    }
-
-    // MARK: - Main-thread mutation application
-
-    @MainActor
-    private func applyEntityMutations(_ mutations: [EntityMutation]) {
-        var didChange = false
-
-        for mutation in mutations {
-            switch mutation {
-            case .upsert(let entity):
-                entities[entity.id] = entity
-                didChange = true
-
-            case .update(let key, let totalValue, let selfValue):
-                if entities[key] != nil {
-                    entities[key]!.totalValue = totalValue
-                    entities[key]!.selfValue = selfValue
-                    didChange = true
-                }
-
-            case .remove(let key):
-                entities.removeValue(forKey: key)
-                didChange = true
-
-            case .ready:
-                isLoading = false
-
-            case .failed:
-                isLoading = false
-            }
-        }
-
         if didChange {
-            scheduleRebuild()
+            rebuildFromEntities()
         }
     }
 
-    // MARK: - Background tree reconstruction
-
-    private func scheduleRebuild() {
-        let entitySnapshot = entities
-        rebuildTask?.cancel()
-        rebuildTask = Task.detached { [weak self] in
-            guard !Task.isCancelled else { return }
-            let (resultNodes, resultIndex, resultRootId, resultTotal) =
-                Self.buildNodeTree(entities: entitySnapshot)
-            guard !Task.isCancelled else { return }
-            await MainActor.run { [weak self] in
-                self?.nodes = resultNodes
-                self?.nodeIndex = resultIndex
-                self?.rootNodeId = resultRootId
-                self?.totalValue = resultTotal
-            }
-        }
-    }
+    // MARK: - Tree reconstruction
 
     /// Build `nodes` from the current `entities` dictionary.
-    private static func buildNodeTree(
-        entities: [String: EntityData]
-    ) -> (nodes: [FlamegraphNode], index: [String: Int], rootNodeId: String?, totalValue: Int64) {
+    /// Produces the same `[FlamegraphNode]` output as before but from entity state.
+    private func rebuildFromEntities() {
+        withSpan("FlamegraphFeed.rebuild") { _ in }
         guard !entities.isEmpty else {
-            return ([], [:], nil, 0)
+            nodes = []
+            nodeIndex = [:]
+            rootNodeId = nil
+            totalValue = 0
+            return
         }
 
         // Compute grand total: sum of total_value for root-level nodes (depth == 0)
         let grandTotal: Int64 = entities.values.reduce(0) { acc, e in
             e.depth == 0 ? acc + e.totalValue : acc
         }
-        guard grandTotal > 0 else { return ([], [:], nil, 0) }
+        guard grandTotal > 0 else { return }
 
         // Build child lists
-        var childIds: [String: [String]] = [:]
+        var childIds: [String: [String]] = [:]  // parentId → [childId]
         var rootIds: [String] = []
 
         for entity in entities.values {
@@ -348,12 +308,15 @@ public final class FlamegraphFeed {
             visit(rootId)
         }
 
-        return (result, index, rootIds.first, grandTotal)
+        nodes = result
+        nodeIndex = index
+        rootNodeId = rootIds.first
+        totalValue = grandTotal
     }
 
     // MARK: - Helpers
 
-    private static func extractDataValues(_ batch: RecordBatch) -> (totalValue: Int64, selfValue: Int64) {
+    private func extractDataValues(_ batch: RecordBatch) -> (totalValue: Int64, selfValue: Int64) {
         let rows = batch.toRows()
         guard let row = rows.first, row.count >= 2 else { return (0, 0) }
         let total = (row[0] as? NSNumber)?.int64Value ?? 0

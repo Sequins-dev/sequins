@@ -2,12 +2,13 @@ use super::Storage;
 use crate::config::{
     ColdTierConfig, CompanionIndexConfig, HotTierConfig, LifecycleConfig, StorageConfig,
 };
-use crate::wal::WalPayload;
+use sequins_arrow_schema::SignalType;
+use sequins_traits::{ManagementApi, OtlpIngest};
 use sequins_types::models::{
     AttributeValue, Duration, LogEntry, LogId, Metric, MetricType, Profile, ProfileId, ProfileType,
     Span, SpanId, SpanKind, SpanStatus, Timestamp, TraceId,
 };
-use sequins_types::{ManagementApi, OtlpIngest};
+use sequins_wal::WalPayload;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -135,11 +136,11 @@ fn create_test_profile() -> Profile {
 impl Storage {
     #[cfg(test)]
     async fn ingest_spans_test(&self, spans: Vec<Span>) -> crate::error::Result<()> {
-        use crate::hot_tier::batch_chain::BatchMeta;
         use arrow::array::new_null_array;
         use arrow::array::{
             Int64Array, StringViewArray, TimestampNanosecondArray, UInt32Array, UInt8Array,
         };
+        use sequins_hot_tier::BatchMeta;
         use std::sync::Arc;
 
         if spans.is_empty() {
@@ -148,7 +149,7 @@ impl Storage {
 
         // Use the full span schema (includes promoted attribute columns + overflow map)
         // so the batch is compatible with the hot-tier BatchChain schema invariant.
-        let schema = sequins_types::arrow_schema::span_schema();
+        let schema = sequins_arrow_schema::arrow_schema::span_schema();
         let n = spans.len();
 
         let trace_ids: Vec<String> = spans.iter().map(|s| s.trace_id.to_hex()).collect();
@@ -196,15 +197,17 @@ impl Storage {
             max_timestamp: i64::MAX,
             row_count: batch.num_rows(),
         };
-        self.hot_tier.spans.push(Arc::new(batch), meta);
+        self.hot_tier
+            .chain(&SignalType::Spans)
+            .push(Arc::new(batch), meta);
         Ok(())
     }
 
     #[cfg(test)]
     async fn ingest_logs_test(&self, logs: Vec<LogEntry>) -> crate::error::Result<()> {
-        use crate::hot_tier::batch_chain::BatchMeta;
         use arrow::array::new_null_array;
         use arrow::array::{StringViewArray, TimestampNanosecondArray, UInt32Array, UInt8Array};
+        use sequins_hot_tier::BatchMeta;
         use std::sync::Arc;
 
         if logs.is_empty() {
@@ -213,7 +216,7 @@ impl Storage {
 
         // Use the full log schema (includes promoted attribute columns + overflow map)
         // so the batch is compatible with the hot-tier BatchChain schema invariant.
-        let schema = sequins_types::arrow_schema::log_schema();
+        let schema = sequins_arrow_schema::arrow_schema::log_schema();
         let n = logs.len();
 
         let log_ids: Vec<String> = logs.iter().map(|l| l.id.to_hex()).collect();
@@ -272,14 +275,16 @@ impl Storage {
             max_timestamp: i64::MAX,
             row_count: batch.num_rows(),
         };
-        self.hot_tier.logs.push(Arc::new(batch), meta);
+        self.hot_tier
+            .chain(&SignalType::Logs)
+            .push(Arc::new(batch), meta);
         Ok(())
     }
 
     #[cfg(test)]
     async fn ingest_metrics_test(&self, metrics: Vec<Metric>) -> crate::error::Result<()> {
-        use crate::hot_tier::batch_chain::BatchMeta;
         use arrow::array::{StringViewArray, UInt32Array};
+        use sequins_hot_tier::BatchMeta;
         use sequins_types::models::MetricType;
         use std::sync::Arc;
 
@@ -288,7 +293,7 @@ impl Storage {
         }
 
         // Use metric_schema() so the batch matches the chain's schema invariant.
-        let schema = sequins_types::arrow_schema::metric_schema();
+        let schema = sequins_arrow_schema::arrow_schema::metric_schema();
 
         let metric_ids: Vec<String> = metrics.iter().map(|m| m.id.to_hex()).collect();
         let names: Vec<&str> = metrics.iter().map(|m| m.name.as_str()).collect();
@@ -331,14 +336,16 @@ impl Storage {
             max_timestamp: i64::MAX,
             row_count: batch.num_rows(),
         };
-        self.hot_tier.metrics.push(Arc::new(batch), meta);
+        self.hot_tier
+            .chain(&SignalType::MetricsMetadata)
+            .push(Arc::new(batch), meta);
         Ok(())
     }
 
     #[cfg(test)]
     async fn ingest_profiles_test(&self, profiles: Vec<Profile>) -> crate::error::Result<()> {
-        use crate::hot_tier::batch_chain::BatchMeta;
         use arrow::array::{BinaryArray, StringViewArray, TimestampNanosecondArray, UInt32Array};
+        use sequins_hot_tier::BatchMeta;
         use sequins_types::models::ProfileType;
         use std::sync::Arc;
 
@@ -347,7 +354,7 @@ impl Storage {
         }
 
         // Use profile_schema() so the batch matches the chain's schema invariant.
-        let schema = sequins_types::arrow_schema::profile_schema();
+        let schema = sequins_arrow_schema::arrow_schema::profile_schema();
         let n = profiles.len();
 
         let profile_ids: Vec<String> = profiles.iter().map(|p| p.id.to_hex()).collect();
@@ -395,7 +402,9 @@ impl Storage {
             max_timestamp: i64::MAX,
             row_count: batch.num_rows(),
         };
-        self.hot_tier.profiles.push(Arc::new(batch), meta);
+        self.hot_tier
+            .chain(&SignalType::ProfilesMetadata)
+            .push(Arc::new(batch), meta);
         Ok(())
     }
 }
@@ -792,11 +801,11 @@ async fn test_ingest_traces_end_to_end() {
     assert_eq!(stats.span_count, 10, "Expected 10 spans in hot tier");
 
     // Verify resources were registered (2 resources)
-    let resource_count = storage.hot_tier.resources.row_count();
+    let resource_count = storage.hot_tier.chain(&SignalType::Resources).row_count();
     assert_eq!(resource_count, 2, "Expected 2 resources registered");
 
     // Verify scopes were registered
-    let scope_count = storage.hot_tier.scopes.row_count();
+    let scope_count = storage.hot_tier.chain(&SignalType::Scopes).row_count();
     assert!(scope_count > 0, "Expected at least 1 scope registered");
 }
 
@@ -829,7 +838,7 @@ async fn test_ingest_traces_resource_dedup() {
     );
 
     // Resources are deduplicated via content-addressed hash — only 1 unique resource
-    let resource_count = storage.hot_tier.resources.row_count();
+    let resource_count = storage.hot_tier.chain(&SignalType::Resources).row_count();
     assert_eq!(resource_count, 1, "Expected only 1 deduplicated resource");
 }
 
@@ -851,7 +860,7 @@ async fn test_ingest_logs_end_to_end() {
     assert_eq!(stats.log_count, 20, "Expected 20 logs in hot tier");
 
     // Verify resources were registered
-    let resource_count = storage.hot_tier.resources.row_count();
+    let resource_count = storage.hot_tier.chain(&SignalType::Resources).row_count();
     assert_eq!(resource_count, 2, "Expected 2 resources registered");
 }
 
@@ -873,7 +882,7 @@ async fn test_ingest_metrics_end_to_end() {
     assert_eq!(stats.metric_count, 6, "Expected 6 metrics in hot tier");
 
     // Verify resources were registered
-    let resource_count = storage.hot_tier.resources.row_count();
+    let resource_count = storage.hot_tier.chain(&SignalType::Resources).row_count();
     assert_eq!(resource_count, 2, "Expected 2 resources registered");
 }
 
@@ -905,7 +914,7 @@ async fn test_ingest_metrics_series_dedup() {
     );
 
     // Resources are deduplicated via content-addressed hash — only 1 unique resource
-    let resource_count = storage.hot_tier.resources.row_count();
+    let resource_count = storage.hot_tier.chain(&SignalType::Resources).row_count();
     assert_eq!(resource_count, 1, "Expected only 1 deduplicated resource");
 }
 
@@ -946,7 +955,7 @@ async fn test_ingest_scope_registration() {
     storage.ingest_traces(request).await.unwrap();
 
     // Verify scopes were registered — check the scopes BatchChain has rows
-    let scope_count = storage.hot_tier.scopes.row_count();
+    let scope_count = storage.hot_tier.chain(&SignalType::Scopes).row_count();
     assert!(scope_count > 0, "Expected scopes to be registered");
 }
 
@@ -1068,8 +1077,8 @@ async fn test_maintenance_flushes_resources_and_scopes() {
     storage.ingest_traces(request).await.unwrap();
 
     // Verify resources and scopes exist via BatchChain row counts
-    let resources_before = storage.hot_tier.resources.row_count();
-    let scopes_before = storage.hot_tier.scopes.row_count();
+    let resources_before = storage.hot_tier.chain(&SignalType::Resources).row_count();
+    let scopes_before = storage.hot_tier.chain(&SignalType::Scopes).row_count();
     assert_eq!(resources_before, 2, "Expected 2 resources");
     assert!(scopes_before > 0, "Expected scopes to exist");
 
@@ -1081,8 +1090,8 @@ async fn test_maintenance_flushes_resources_and_scopes() {
     assert!(result.is_ok(), "Maintenance should succeed");
 
     // Resources and scopes remain in hot tier chains (they're not evicted)
-    let resources_after = storage.hot_tier.resources.row_count();
-    let scopes_after = storage.hot_tier.scopes.row_count();
+    let resources_after = storage.hot_tier.chain(&SignalType::Resources).row_count();
+    let scopes_after = storage.hot_tier.chain(&SignalType::Scopes).row_count();
     assert_eq!(resources_after, 2, "Resources should still be in hot tier");
     assert!(scopes_after > 0, "Scopes should still be in hot tier");
 }

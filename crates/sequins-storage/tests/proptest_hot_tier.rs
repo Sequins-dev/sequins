@@ -8,10 +8,10 @@ use arrow::array::{
 };
 use arrow::record_batch::RecordBatch;
 use proptest::prelude::*;
-use sequins_storage::cold_tier::series_index::SeriesIndex;
+use sequins_arrow_schema::SignalType;
+use sequins_cold_tier::SeriesIndex;
+use sequins_hot_tier::{BatchMeta, HotTier};
 use sequins_storage::config::HotTierConfig;
-use sequins_storage::hot_tier::batch_chain::BatchMeta;
-use sequins_storage::hot_tier::core::HotTier;
 use sequins_types::models::{
     AttributeValue, Duration, LogEntry, LogId, LogSeverity, MetricDataPoint, MetricId, Span,
     SpanId, Timestamp, TraceId,
@@ -83,7 +83,7 @@ fn spans_to_batch(spans: &[Span]) -> RecordBatch {
     use arrow::array::new_null_array;
 
     // Use the full span schema so the batch matches the chain's schema invariant.
-    let schema = sequins_types::arrow_schema::span_schema();
+    let schema = sequins_arrow_schema::arrow_schema::span_schema();
     let n = spans.len();
 
     let trace_ids: Vec<String> = spans.iter().map(|s| s.trace_id.to_hex()).collect();
@@ -130,7 +130,7 @@ fn logs_to_batch(logs: &[LogEntry]) -> RecordBatch {
     use arrow::array::new_null_array;
 
     // Use the full log schema so the batch matches the chain's schema invariant.
-    let schema = sequins_types::arrow_schema::log_schema();
+    let schema = sequins_arrow_schema::arrow_schema::log_schema();
     let n = logs.len();
 
     let log_ids: Vec<String> = logs.iter().map(|l| l.id.to_hex()).collect();
@@ -184,7 +184,7 @@ fn logs_to_batch(logs: &[LogEntry]) -> RecordBatch {
 
 // Helper: Convert metric data points to a RecordBatch directly (without ColdTier)
 fn data_points_to_batch(data_points: &[MetricDataPoint]) -> RecordBatch {
-    let schema = sequins_types::arrow_schema::series_data_point_schema();
+    let schema = sequins_arrow_schema::arrow_schema::series_data_point_schema();
 
     let series_ids: Vec<u64> = data_points.iter().map(|_| 0u64).collect();
     let metric_ids: Vec<String> = data_points.iter().map(|dp| dp.metric_id.to_hex()).collect();
@@ -293,9 +293,9 @@ proptest! {
         let expected_count = spans.len();
 
         let batch = spans_to_batch(&spans);
-        hot_tier.spans.push(Arc::new(batch), simple_meta(expected_count));
+        hot_tier.chain(&SignalType::Spans).push(Arc::new(batch), simple_meta(expected_count));
 
-        prop_assert_eq!(hot_tier.spans.row_count(), expected_count, "Should retrieve all inserted spans");
+        prop_assert_eq!(hot_tier.chain(&SignalType::Spans).row_count(), expected_count, "Should retrieve all inserted spans");
     }
 }
 
@@ -323,9 +323,9 @@ proptest! {
         let expected_count = logs.len();
 
         let batch = logs_to_batch(&logs);
-        hot_tier.logs.push(Arc::new(batch), simple_meta(expected_count));
+        hot_tier.chain(&SignalType::Logs).push(Arc::new(batch), simple_meta(expected_count));
 
-        prop_assert_eq!(hot_tier.logs.row_count(), expected_count, "Should retrieve all inserted logs");
+        prop_assert_eq!(hot_tier.chain(&SignalType::Logs).row_count(), expected_count, "Should retrieve all inserted logs");
     }
 }
 
@@ -350,9 +350,9 @@ proptest! {
         let expected_count = data_points.len();
 
         let batch = data_points_to_batch(&data_points);
-        hot_tier.datapoints.push(Arc::new(batch), simple_meta(expected_count));
+        hot_tier.chain(&SignalType::Metrics).push(Arc::new(batch), simple_meta(expected_count));
 
-        prop_assert_eq!(hot_tier.datapoints.row_count(), expected_count, "Should retrieve all inserted data points");
+        prop_assert_eq!(hot_tier.chain(&SignalType::Metrics).row_count(), expected_count, "Should retrieve all inserted data points");
     }
 }
 
@@ -382,7 +382,7 @@ proptest! {
         let expected_count = spans.len();
 
         let batch = spans_to_batch(&spans);
-        hot_tier.spans.push(Arc::new(batch), simple_meta(expected_count));
+        hot_tier.chain(&SignalType::Spans).push(Arc::new(batch), simple_meta(expected_count));
 
         let stats = hot_tier.stats();
         prop_assert_eq!(stats.span_count, expected_count, "Span count should match inserted count");
@@ -413,7 +413,7 @@ proptest! {
         let expected_count = logs.len();
 
         let batch = logs_to_batch(&logs);
-        hot_tier.logs.push(Arc::new(batch), simple_meta(expected_count));
+        hot_tier.chain(&SignalType::Logs).push(Arc::new(batch), simple_meta(expected_count));
 
         let stats = hot_tier.stats();
         prop_assert_eq!(stats.log_count, expected_count, "Log count should match inserted count");

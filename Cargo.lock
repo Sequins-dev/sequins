@@ -1267,6 +1267,16 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "core-foundation"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
+name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
@@ -2172,6 +2182,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "enum-iterator"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2382,6 +2401,21 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "foreign-types"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
+dependencies = [
+ "foreign-types-shared",
+]
+
+[[package]]
+name = "foreign-types-shared"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "form_urlencoded"
@@ -3069,6 +3103,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyper-tls"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "native-tls",
+ "tokio",
+ "tokio-native-tls",
+ "tower-service",
+]
+
+[[package]]
 name = "hyper-util"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3086,9 +3136,11 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "socket2",
+ "system-configuration",
  "tokio",
  "tower-service",
  "tracing",
+ "windows-registry",
 ]
 
 [[package]]
@@ -3796,6 +3848,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "native-tls"
+version = "0.2.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "465500e14ea162429d264d44189adc38b199b62b1c21eea9f69e4b73cb03bbf2"
+dependencies = [
+ "libc",
+ "log",
+ "openssl",
+ "openssl-probe",
+ "openssl-sys",
+ "schannel",
+ "security-framework",
+ "security-framework-sys",
+ "tempfile",
+]
+
+[[package]]
 name = "never-say-never"
 version = "6.6.666"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3986,10 +4055,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "269bca4c2591a28585d6bf10d9ed0332b7d76900a1b02bec41bdc3a2cdcda107"
 
 [[package]]
+name = "openssl"
+version = "0.10.78"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f38c4372413cdaaf3cc79dd92d29d7d9f5ab09b51b10dded508fb90bb70b9222"
+dependencies = [
+ "bitflags 2.11.0",
+ "cfg-if",
+ "foreign-types",
+ "libc",
+ "once_cell",
+ "openssl-macros",
+ "openssl-sys",
+]
+
+[[package]]
+name = "openssl-macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.115",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.114"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13ce1245cd07fcc4cfdb438f7507b0c7e4f3849a69fd84d52374c66d83741bb6"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "opentelemetry"
@@ -4949,6 +5056,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
+ "encoding_rs",
  "futures-core",
  "futures-util",
  "h2",
@@ -4957,9 +5065,12 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-rustls",
+ "hyper-tls",
  "hyper-util",
  "js-sys",
  "log",
+ "mime",
+ "native-tls",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -4971,6 +5082,7 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
+ "tokio-native-tls",
  "tokio-rustls",
  "tokio-util",
  "tower",
@@ -5211,7 +5323,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d17b898a6d6948c3a8ee4372c17cb384f90d2e6e912ef00895b14fd7ab54ec38"
 dependencies = [
  "bitflags 2.11.0",
- "core-foundation",
+ "core-foundation 0.10.1",
  "core-foundation-sys",
  "libc",
  "security-framework-sys",
@@ -5244,204 +5356,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
 
 [[package]]
-name = "sequins-cli"
-version = "0.1.1"
+name = "seql-ast"
+version = "0.2.0"
 dependencies = [
- "anyhow",
- "arrow",
- "arrow-flight",
- "clap 4.5.59",
- "futures",
- "opentelemetry-proto",
- "prost 0.14.3",
- "rand 0.8.5",
- "sequins-client",
- "sequins-query",
- "sequins-server",
- "sequins-storage",
- "sequins-types",
  "serde",
  "serde_json",
- "serde_yaml",
- "tokio",
- "tokio-stream",
- "tonic",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
-name = "sequins-client"
-version = "0.1.1"
+name = "seql-parser"
+version = "0.2.0"
 dependencies = [
- "arrow",
- "arrow-flight",
- "async-trait",
- "bytes",
- "datafusion",
- "futures",
- "prost 0.14.3",
- "sequins-query",
+ "seql-ast",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tonic",
+ "winnow 0.6.26",
 ]
 
 [[package]]
-name = "sequins-cold-tier"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "arrow",
- "async-stream",
- "async-trait",
- "base64",
- "bincode",
- "bloomfilter",
- "bytes",
- "chrono",
- "datafusion",
- "datafusion-substrait",
- "futures",
- "hex",
- "object_store",
- "once_cell",
- "parking_lot",
- "sequins-types",
- "serde",
- "serde_json",
- "tantivy",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tracing",
- "url",
- "uuid",
- "vortex",
- "vortex-datafusion",
-]
-
-[[package]]
-name = "sequins-ffi"
-version = "0.1.1"
-dependencies = [
- "arrow",
- "arrow-flight",
- "base64",
- "cbindgen",
- "futures",
- "once_cell",
- "parking_lot",
- "sequins-client",
- "sequins-query",
- "sequins-server",
- "sequins-storage",
- "sequins-types",
- "sequins-view",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "sequins-hot-tier"
-version = "0.1.1"
-dependencies = [
- "arrow",
- "async-trait",
- "crossbeam-epoch",
- "dashmap",
- "datafusion",
- "futures",
- "sequins-types",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "sequins-linux"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "arrow",
- "cairo-rs",
- "chrono",
- "ciborium",
- "futures",
- "gtk4",
- "libadwaita",
- "relm4",
- "sequins-client",
- "sequins-query",
- "sequins-server",
- "sequins-storage",
- "sequins-types",
- "sequins-view",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "sequins-live-query"
-version = "0.1.1"
-dependencies = [
- "arrow",
- "arrow-flight",
- "async-stream",
- "async-trait",
- "datafusion",
- "futures",
- "object_store",
- "opentelemetry-proto",
- "parking_lot",
- "sequins-query",
- "sequins-wal",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "uuid",
-]
-
-[[package]]
-name = "sequins-otlp"
-version = "0.1.1"
-dependencies = [
- "arrow",
- "ciborium",
- "datafusion",
- "hex",
- "once_cell",
- "opentelemetry-proto",
- "prost 0.14.3",
- "sequins-types",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "uuid",
-]
-
-[[package]]
-name = "sequins-query"
-version = "0.1.1"
+name = "seql-substrait"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5457,21 +5391,353 @@ dependencies = [
  "futures",
  "indexmap 2.13.0",
  "pbjson-types",
- "proptest",
  "prost 0.14.3",
  "prost-build 0.13.5",
+ "seql-ast",
+ "seql-parser",
+ "sequins-arrow-schema",
+ "sequins-flight",
+ "sequins-traits",
  "sequins-types",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "sequins-arrow-schema"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "once_cell",
+ "serde",
+ "vortex",
+]
+
+[[package]]
+name = "sequins-attribute-codec"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "ciborium",
+ "datafusion",
+ "once_cell",
+ "opentelemetry-proto",
+ "sequins-types",
+]
+
+[[package]]
+name = "sequins-batch-chain"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "crossbeam-epoch",
+ "datafusion",
+ "futures",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sequins-cli"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "arrow-flight",
+ "clap 4.5.59",
+ "futures",
+ "opentelemetry-proto",
+ "prost 0.14.3",
+ "rand 0.8.5",
+ "reqwest",
+ "seql-ast",
+ "seql-substrait",
+ "sequins-client",
+ "sequins-datafusion-backend",
+ "sequins-flight",
+ "sequins-server",
+ "sequins-storage",
+ "sequins-traits",
+ "sequins-types",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "sequins-client"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "arrow-flight",
+ "async-trait",
+ "bytes",
+ "datafusion",
+ "futures",
+ "prost 0.14.3",
+ "seql-ast",
+ "seql-parser",
+ "seql-substrait",
+ "sequins-traits",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+]
+
+[[package]]
+name = "sequins-cold-tier"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-stream",
+ "async-trait",
+ "base64",
+ "bytes",
+ "chrono",
+ "datafusion",
+ "datafusion-substrait",
+ "futures",
+ "hex",
+ "object_store",
+ "once_cell",
+ "parking_lot",
+ "sequins-arrow-schema",
+ "sequins-companion-index",
+ "sequins-series-index",
+ "sequins-types",
+ "sequins-vortex-indexed-layout",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
- "winnow 0.6.26",
+ "tokio-stream",
+ "tracing",
+ "url",
+ "uuid",
+ "vortex",
+ "vortex-datafusion",
+]
+
+[[package]]
+name = "sequins-companion-index"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "bincode",
+ "bloomfilter",
+ "serde",
+ "serde_json",
+ "tantivy",
+ "tempfile",
+]
+
+[[package]]
+name = "sequins-datafusion-backend"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "arrow-flight",
+ "async-stream",
+ "async-trait",
+ "datafusion",
+ "datafusion-substrait",
+ "futures",
+ "opentelemetry-proto",
+ "prost 0.14.3",
+ "seql-ast",
+ "seql-parser",
+ "seql-substrait",
+ "sequins-arrow-schema",
+ "sequins-attribute-codec",
+ "sequins-cold-tier",
+ "sequins-flight",
+ "sequins-hot-tier",
+ "sequins-live-query",
+ "sequins-storage",
+ "sequins-traits",
+ "sequins-types",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sequins-ffi"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "arrow-flight",
+ "base64",
+ "cbindgen",
+ "futures",
+ "once_cell",
+ "parking_lot",
+ "seql-ast",
+ "seql-parser",
+ "sequins-client",
+ "sequins-datafusion-backend",
+ "sequins-flight",
+ "sequins-server",
+ "sequins-storage",
+ "sequins-traits",
+ "sequins-types",
+ "sequins-view",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "sequins-flight"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "arrow-flight",
+ "bincode",
+ "bytes",
+ "seql-ast",
+ "sequins-traits",
+ "serde",
+]
+
+[[package]]
+name = "sequins-hot-tier"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "crossbeam-epoch",
+ "dashmap",
+ "datafusion",
+ "futures",
+ "sequins-arrow-schema",
+ "sequins-batch-chain",
+ "sequins-types",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sequins-linux"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "cairo-rs",
+ "chrono",
+ "ciborium",
+ "futures",
+ "gtk4",
+ "libadwaita",
+ "relm4",
+ "sequins-client",
+ "sequins-datafusion-backend",
+ "sequins-server",
+ "sequins-storage",
+ "sequins-traits",
+ "sequins-types",
+ "sequins-view",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "sequins-live-query"
+version = "0.2.0"
+dependencies = [
+ "arrow-flight",
+ "async-stream",
+ "futures",
+ "object_store",
+ "opentelemetry-proto",
+ "parking_lot",
+ "sequins-flight",
+ "sequins-wal",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "sequins-otlp"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "hex",
+ "opentelemetry-proto",
+ "prost 0.14.3",
+ "sequins-arrow-schema",
+ "sequins-attribute-codec",
+ "sequins-types",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "sequins-pprof"
+version = "0.2.0"
+dependencies = [
+ "pprof",
+ "prost 0.14.3",
+ "prost-types 0.14.3",
+ "sequins-traits",
+ "sequins-types",
+ "uuid",
+]
+
+[[package]]
+name = "sequins-query"
+version = "0.2.0"
+dependencies = [
+ "proptest",
+ "seql-parser",
+ "seql-substrait",
+]
+
+[[package]]
+name = "sequins-series-index"
+version = "0.2.0"
+dependencies = [
+ "object_store",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
 name = "sequins-server"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5485,8 +5751,11 @@ dependencies = [
  "object_store",
  "opentelemetry-proto",
  "prost 0.14.3",
- "sequins-query",
+ "seql-substrait",
+ "sequins-datafusion-backend",
+ "sequins-flight",
  "sequins-storage",
+ "sequins-traits",
  "sequins-types",
  "serde",
  "serde_json",
@@ -5503,7 +5772,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-storage"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5516,11 +5785,13 @@ dependencies = [
  "opentelemetry-proto",
  "proptest",
  "prost 0.14.3",
+ "seql-ast",
+ "sequins-arrow-schema",
  "sequins-cold-tier",
  "sequins-hot-tier",
  "sequins-live-query",
  "sequins-otlp",
- "sequins-query",
+ "sequins-traits",
  "sequins-types",
  "sequins-wal",
  "serde",
@@ -5534,24 +5805,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "sequins-traits"
+version = "0.2.0"
+dependencies = [
+ "arrow-flight",
+ "async-trait",
+ "futures",
+ "opentelemetry-proto",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "sequins-types"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
- "arrow",
  "async-trait",
  "base64",
  "chrono",
  "futures",
  "hex",
- "once_cell",
  "opentelemetry",
  "opentelemetry-proto",
  "parking_lot",
- "pprof",
  "proptest",
- "prost 0.14.3",
- "prost-types 0.14.3",
+ "sequins-traits",
  "serde",
  "serde_json",
  "tempfile",
@@ -5559,26 +5840,42 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "vortex",
 ]
 
 [[package]]
 name = "sequins-view"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "async-stream",
  "async-trait",
  "futures",
- "sequins-query",
+ "sequins-flight",
+ "sequins-traits",
  "sequins-types",
  "tokio",
  "tracing",
 ]
 
 [[package]]
+name = "sequins-vortex-indexed-layout"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "bincode",
+ "datafusion",
+ "futures",
+ "sequins-companion-index",
+ "serde",
+ "tantivy",
+ "tempfile",
+ "vortex",
+]
+
+[[package]]
 name = "sequins-wal"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "bytes",
@@ -5993,6 +6290,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "system-configuration"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
+dependencies = [
+ "bitflags 2.11.0",
+ "core-foundation 0.9.4",
+ "system-configuration-sys",
+]
+
+[[package]]
+name = "system-configuration-sys"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
 name = "system-deps"
 version = "7.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6360,6 +6678,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.115",
+]
+
+[[package]]
+name = "tokio-native-tls"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
+dependencies = [
+ "native-tls",
+ "tokio",
 ]
 
 [[package]]
@@ -6805,6 +7133,12 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version-compare"
@@ -7771,6 +8105,17 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-registry"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02752bf7fbdcce7f2a27a742f798510f3e5ad88dbe84871e5168e2120c3d5720"
+dependencies = [
+ "windows-link",
+ "windows-result",
+ "windows-strings",
+]
 
 [[package]]
 name = "windows-result"

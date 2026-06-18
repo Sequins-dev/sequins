@@ -5,7 +5,7 @@
 
 use arrow_flight::FlightData;
 use futures::stream::Stream;
-use sequins_query::flight::heartbeat_flight_data;
+use sequins_flight::heartbeat_flight_data;
 use sequins_wal::Wal;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,7 +54,7 @@ impl HeartbeatEmitter {
 mod tests {
     use super::*;
     use futures::StreamExt;
-    use sequins_query::flight::{decode_metadata, SeqlMetadata};
+    use sequins_flight::{decode_metadata, SeqlMetadata};
     use sequins_wal::WalConfig;
     use tempfile::TempDir;
 

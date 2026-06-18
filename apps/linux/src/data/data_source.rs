@@ -18,9 +18,10 @@
 
 use anyhow::{Context, Result};
 use sequins_client::RemoteClient;
-use sequins_query::{QueryApi, SeqlStream};
+use sequins_datafusion_backend::DataFusionBackend;
 use sequins_server::OtlpServer;
-use sequins_storage::{DataFusionBackend, Storage, StorageConfig};
+use sequins_storage::{Storage, StorageConfig};
+use sequins_traits::{QueryApi, SeqlStream};
 use sequins_view::{ViewDeltaStream, ViewStrategy};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;

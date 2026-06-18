@@ -29,14 +29,14 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl From<sequins_types::Error> for Error {
-    fn from(e: sequins_types::Error) -> Self {
+impl From<sequins_traits::Error> for Error {
+    fn from(e: sequins_traits::Error) -> Self {
         Self::Storage(e.to_string())
     }
 }
 
-impl From<sequins_query::QueryError> for Error {
-    fn from(e: sequins_query::QueryError) -> Self {
+impl From<sequins_traits::QueryError> for Error {
+    fn from(e: sequins_traits::QueryError) -> Self {
         Self::Query(e.to_string())
     }
 }
@@ -103,8 +103,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_storage_error_propagation() {
-        // Test that sequins_types::Error converts to server Error
-        let storage_error = sequins_types::Error::Other("Storage internal error".to_string());
+        // Test that sequins_traits::Error converts to server Error
+        let storage_error = sequins_traits::Error::Other("Storage internal error".to_string());
         let server_error: Error = storage_error.into();
 
         match server_error {
@@ -117,8 +117,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_error_propagation() {
-        // Test that sequins_query::QueryError converts to server Error
-        let query_error = sequins_query::QueryError::InvalidAst {
+        // Test that sequins_traits::QueryError converts to server Error
+        let query_error = sequins_traits::QueryError::InvalidAst {
             message: "Parse error".to_string(),
         };
         let server_error: Error = query_error.into();

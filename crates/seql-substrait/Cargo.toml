@@ -1,0 +1,59 @@
+[package]
+name = "seql-substrait"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SeQL to Substrait compiler and plan reducer"
+
+[dependencies]
+# Internal crates
+seql-ast        = { workspace = true }
+seql-parser     = { workspace = true }
+sequins-arrow-schema = { workspace = true }
+sequins-flight  = { workspace = true }
+sequins-traits  = { workspace = true }
+sequins-types   = { workspace = true }
+
+# Arrow / Flight
+arrow        = { workspace = true }
+arrow-flight = { workspace = true }
+
+# DataFusion
+datafusion                     = { workspace = true }
+datafusion-substrait           = { workspace = true }
+datafusion-expr                = "51"
+datafusion-functions-aggregate = "51"
+
+# Serialization
+serde      = { workspace = true }
+serde_json = { workspace = true }
+bincode    = { workspace = true }
+prost      = { workspace = true }
+bytes      = { workspace = true }
+
+# Metadata
+pbjson-types = "0.8"
+
+# CBOR decoding (for _overflow_attrs Map<Utf8, LargeBinary> values)
+ciborium = { workspace = true }
+
+# JSON row representation
+indexmap = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+futures     = { workspace = true }
+tokio       = { workspace = true }
+
+# Base64 encoding
+base64 = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+[build-dependencies]
+prost-build = "0.13"
+
+[dev-dependencies]

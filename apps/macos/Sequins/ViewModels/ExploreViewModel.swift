@@ -22,11 +22,14 @@ final class ExploreViewModel: SeQLSink {
     private(set) var schema: SeQLSchema?
     private(set) var rows: [[Any?]] = []
     private(set) var batches: [RecordBatch] = []
-    private(set) var recordTrees: [RecordNode] = []
     private(set) var isExecuting: Bool = false
     private(set) var executionError: String?
     private(set) var stats: SeQLStats?
     private(set) var warnings: [(code: UInt32, message: String)] = []
+
+    var recordTrees: [RecordNode] {
+        batches.flatMap { $0.toRecordTrees() }
+    }
 
     // MARK: - Display Options
 
@@ -77,7 +80,6 @@ final class ExploreViewModel: SeQLSink {
         schema = nil
         rows = []
         batches = []
-        recordTrees = []
         stats = nil
         warnings = []
         executionError = nil
@@ -113,14 +115,12 @@ final class ExploreViewModel: SeQLSink {
     nonisolated func onBatch(_ batch: RecordBatch, table: String?) {
         guard table == nil else { return }
         let rows = batch.toRows()
-        let trees = batch.toRecordTrees()
         Task { @MainActor in
             if self.rows.isEmpty {
                 self.currentPage = 0
             }
             self.rows.append(contentsOf: rows)
             self.batches.append(batch)
-            self.recordTrees.append(contentsOf: trees)
         }
     }
 

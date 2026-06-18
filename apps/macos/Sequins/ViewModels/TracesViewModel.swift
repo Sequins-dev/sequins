@@ -199,116 +199,51 @@ final class TracesViewModel {
 
     // MARK: - Selection State
 
-    var selectedSpanId: String? {
-        didSet { scheduleFilter() }
-    }
-    var selectedDetailSpanId: String? {
-        didSet { scheduleFilter() }
-    }
+    var selectedSpanId: String?
+    var selectedDetailSpanId: String?
 
     // MARK: - Filtering
 
-    var searchText = "" {
-        didSet { scheduleFilter() }
-    }
-    var statusFilter: SpanStatus? = nil {
-        didSet { scheduleFilter() }
-    }
-    var showErrorsOnly = false {
-        didSet { scheduleFilter() }
-    }
-    var sortBy: TraceSortBy = .startTime {
-        didSet { scheduleFilter() }
-    }
-    var sortOrder: SortOrder = .descending {
-        didSet { scheduleFilter() }
-    }
-    var minDurationMs = "" {
-        didSet { scheduleFilter() }
-    }
-    var maxDurationMs = "" {
-        didSet { scheduleFilter() }
-    }
-    var statusCodeRanges: Set<HTTPStatusCodeRange> = [] {
-        didSet { scheduleFilter() }
-    }
+    var searchText = ""
+    var statusFilter: SpanStatus? = nil
+    var showErrorsOnly = false
+    var sortBy: TraceSortBy = .startTime
+    var sortOrder: SortOrder = .descending
+    var minDurationMs = ""
+    var maxDurationMs = ""
+    var statusCodeRanges: Set<HTTPStatusCodeRange> = []
 
-    // MARK: - Derived State (background-computed)
+    // MARK: - Computed Properties
 
-    /// All decoded spans — updated in background when new batches arrive.
-    private(set) var allSpans: [Span] = []
-    private(set) var filteredSpans: [Span] = []
-    private(set) var rootSpans: [Span] = []
-    private(set) var selectedSpan: Span?
-    private(set) var selectedDetailSpan: Span?
-    private(set) var traceSpans: [Span] = []
-
-    private var decodeTask: Task<Void, Never>?
-    private var filterTask: Task<Void, Never>?
-    private var observeTask: Task<Void, Never>?
-
-    // MARK: - Background Decode
-
-    private nonisolated static func decodeAllSpans(batches: [RecordBatch], serviceName: String) -> [Span] {
-        batches.flatMap { decodeSpanBatch($0, serviceName: serviceName) }
-    }
-
-    private func scheduleDecodeSpans() {
+    /// All decoded spans from accumulated batches.
+    private var spans: [Span] {
         let batches = tableView?.batches ?? []
         let serviceName = currentServiceName ?? "unknown"
-        decodeTask?.cancel()
-        decodeTask = Task.detached { [weak self] in
-            guard !Task.isCancelled else { return }
-            let spans = Self.decodeAllSpans(batches: batches, serviceName: serviceName)
-            guard !Task.isCancelled else { return }
-            await MainActor.run { [weak self] in
-                self?.allSpans = spans
-                self?.scheduleFilter()
-            }
-        }
+        return batches.flatMap { decodeSpanBatch($0, serviceName: serviceName) }
     }
 
-    private func startObserving() {
-        observeTask?.cancel()
-        observeTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    withObservationTracking {
-                        _ = self?.tableView?.batchVersion
-                    } onChange: {
-                        continuation.resume()
-                    }
-                }
-                guard !Task.isCancelled else { return }
-                self?.scheduleDecodeSpans()
-            }
-        }
+    /// Selected span based on selectedSpanId
+    var selectedSpan: Span? {
+        guard let id = selectedSpanId else { return nil }
+        return spans.first { $0.spanId == id }
     }
 
-    // MARK: - Background Filter
-
-    private struct FilterResult {
-        let filteredSpans: [Span]
-        let rootSpans: [Span]
-        let selectedSpan: Span?
-        let selectedDetailSpan: Span?
-        let traceSpans: [Span]
+    /// Selected detail span based on selectedDetailSpanId
+    var selectedDetailSpan: Span? {
+        guard let id = selectedDetailSpanId else { return nil }
+        return spans.first { $0.spanId == id }
     }
 
-    private nonisolated static func filterAndDeriveSpans(
-        allSpans: [Span],
-        searchText: String,
-        showErrorsOnly: Bool,
-        statusFilter: SpanStatus?,
-        minDurationMs: String,
-        maxDurationMs: String,
-        statusCodeRanges: Set<HTTPStatusCodeRange>,
-        sortBy: TraceSortBy,
-        sortOrder: SortOrder,
-        selectedSpanId: String?,
-        selectedDetailSpanId: String?
-    ) -> FilterResult {
-        var result = allSpans
+    /// All spans for the selected trace
+    var traceSpans: [Span] {
+        guard let span = selectedSpan else { return [] }
+        return spans.filter { $0.traceId == span.traceId }
+            .sorted { $0.startTime.nanoseconds < $1.startTime.nanoseconds }
+    }
+
+    /// Filtered and sorted spans
+    var filteredSpans: [Span] {
+        var result = spans
 
         if !searchText.isEmpty {
             let search = searchText.lowercased()
@@ -326,7 +261,7 @@ final class TracesViewModel {
 
         if showErrorsOnly {
             result = result.filter { $0.status == .error }
-        } else if let statusFilter {
+        } else if let statusFilter = statusFilter {
             result = result.filter { $0.status == statusFilter }
         }
 
@@ -345,11 +280,16 @@ final class TracesViewModel {
                 if let attrValue = span.attributes["http.status_code"] {
                     let code: Int64?
                     switch attrValue {
-                    case .int(let value): code = value
-                    case .string(let str): code = Int64(str)
-                    default: code = nil
+                    case .int(let value):
+                        code = value
+                    case .string(let str):
+                        code = Int64(str)
+                    default:
+                        code = nil
                     }
-                    if let code { return statusCodeRanges.contains { $0.contains(code) } }
+                    if let code = code {
+                        return statusCodeRanges.contains { $0.contains(code) }
+                    }
                 }
                 return false
             }
@@ -360,79 +300,26 @@ final class TracesViewModel {
             switch sortBy {
             case .startTime:
                 return ascending ? lhs.startTime.nanoseconds < rhs.startTime.nanoseconds :
-                                   lhs.startTime.nanoseconds > rhs.startTime.nanoseconds
+                                 lhs.startTime.nanoseconds > rhs.startTime.nanoseconds
             case .duration:
                 return ascending ? lhs.duration.nanoseconds < rhs.duration.nanoseconds :
-                                   lhs.duration.nanoseconds > rhs.duration.nanoseconds
+                                 lhs.duration.nanoseconds > rhs.duration.nanoseconds
             case .service:
                 return ascending ? lhs.serviceName < rhs.serviceName :
-                                   lhs.serviceName > rhs.serviceName
+                                 lhs.serviceName > rhs.serviceName
             }
         }
 
-        let filtered = result
-        let rootSpans = Dictionary(grouping: filtered) { $0.traceId }
+        return result
+    }
+
+    /// Root spans (one per trace)
+    var rootSpans: [Span] {
+        Dictionary(grouping: filteredSpans) { $0.traceId }
             .compactMap { _, spansInTrace in
                 spansInTrace.min { $0.startTime.nanoseconds < $1.startTime.nanoseconds }
             }
             .sorted { $0.startTime.nanoseconds > $1.startTime.nanoseconds }
-
-        let selectedSpan = selectedSpanId.flatMap { id in allSpans.first { $0.spanId == id } }
-        let selectedDetailSpan = selectedDetailSpanId.flatMap { id in allSpans.first { $0.spanId == id } }
-        let traceSpans: [Span]
-        if let span = selectedSpan {
-            traceSpans = allSpans.filter { $0.traceId == span.traceId }
-                .sorted { $0.startTime.nanoseconds < $1.startTime.nanoseconds }
-        } else {
-            traceSpans = []
-        }
-
-        return FilterResult(
-            filteredSpans: filtered,
-            rootSpans: rootSpans,
-            selectedSpan: selectedSpan,
-            selectedDetailSpan: selectedDetailSpan,
-            traceSpans: traceSpans
-        )
-    }
-
-    private func scheduleFilter() {
-        let allSpans = allSpans
-        let searchText = searchText
-        let showErrorsOnly = showErrorsOnly
-        let statusFilter = statusFilter
-        let minDurationMs = minDurationMs
-        let maxDurationMs = maxDurationMs
-        let statusCodeRanges = statusCodeRanges
-        let sortBy = sortBy
-        let sortOrder = sortOrder
-        let selectedSpanId = selectedSpanId
-        let selectedDetailSpanId = selectedDetailSpanId
-        filterTask?.cancel()
-        filterTask = Task.detached { [weak self] in
-            guard !Task.isCancelled else { return }
-            let r = Self.filterAndDeriveSpans(
-                allSpans: allSpans,
-                searchText: searchText,
-                showErrorsOnly: showErrorsOnly,
-                statusFilter: statusFilter,
-                minDurationMs: minDurationMs,
-                maxDurationMs: maxDurationMs,
-                statusCodeRanges: statusCodeRanges,
-                sortBy: sortBy,
-                sortOrder: sortOrder,
-                selectedSpanId: selectedSpanId,
-                selectedDetailSpanId: selectedDetailSpanId
-            )
-            guard !Task.isCancelled else { return }
-            await MainActor.run { [weak self] in
-                self?.filteredSpans = r.filteredSpans
-                self?.rootSpans = r.rootSpans
-                self?.selectedSpan = r.selectedSpan
-                self?.selectedDetailSpan = r.selectedDetailSpan
-                self?.traceSpans = r.traceSpans
-            }
-        }
     }
 
     // MARK: - Public Methods
@@ -480,8 +367,6 @@ final class TracesViewModel {
         let tv = ReactiveTableView()
         tableView = tv
 
-        startObserving()
-
         do {
             try tv.startSnapshot(dataSource: dataSource, query: fullQuery)
             isLoading = false
@@ -491,7 +376,7 @@ final class TracesViewModel {
                 selectedSpanId = firstSpan.spanId
             }
 
-            print("TracesViewModel: 📊 Loaded \(allSpans.count) spans")
+            print("TracesViewModel: 📊 Loaded \(spans.count) spans")
         } catch {
             print("TracesViewModel: ❌ Query failed: \(error)")
             isLoading = false
@@ -534,8 +419,6 @@ final class TracesViewModel {
         let tv = ReactiveTableView()
         tableView = tv
 
-        startObserving()
-
         do {
             try tv.start(dataSource: dataSource, query: query)
         } catch {
@@ -558,20 +441,8 @@ final class TracesViewModel {
     }
 
     func cancel() {
-        observeTask?.cancel()
-        observeTask = nil
-        decodeTask?.cancel()
-        decodeTask = nil
-        filterTask?.cancel()
-        filterTask = nil
         tableView?.cancel()
         tableView = nil
-        allSpans = []
-        filteredSpans = []
-        rootSpans = []
-        selectedSpan = nil
-        selectedDetailSpan = nil
-        traceSpans = []
         isLoading = false
     }
 

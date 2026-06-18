@@ -131,10 +131,6 @@ public final class HistogramLine: Identifiable {
     /// on every render.
     private func recomputeMaxActiveBucket() {
         let sorted = snapshots.sorted { $0.timestamp < $1.timestamp }
-        guard sorted.count >= 2 else {
-            maxActiveBucket = 0
-            return
-        }
         var maxB = 0
         for i in 1..<sorted.count {
             maxB = max(maxB, deltaMaxBucket(from: sorted[i - 1], to: sorted[i]))

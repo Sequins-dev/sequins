@@ -29,7 +29,6 @@ pub mod strategies;
 pub mod strategy;
 
 pub use delta::ViewDelta;
-pub use strategies::aggregate::AggregateStrategy;
 pub use strategies::flamegraph::FlamegraphStrategy;
-pub use strategies::table::TableStrategy;
+pub use strategies::table::{AggregateStrategy, TableStrategy};
 pub use strategy::{ViewDeltaStream, ViewStrategy};

@@ -11,9 +11,10 @@ use async_trait::async_trait;
 use datafusion::execution::context::SessionContext;
 use futures::StreamExt;
 use prost::Message as _;
-use sequins_query::ast::QueryMode;
-use sequins_query::error::QueryError;
-use sequins_query::{compile, compile_ast, schema_context, QueryApi, QueryExec, SeqlStream};
+use seql_ast::ast::QueryMode;
+use seql_substrait::{compile, compile_ast, schema_context};
+use sequins_traits::QueryError;
+use sequins_traits::{QueryApi, QueryExec, SeqlStream};
 use std::sync::Arc;
 use tonic::transport::{Channel, Endpoint};
 
@@ -50,7 +51,7 @@ impl RemoteClient {
     /// Forces `QueryMode::Live` before compiling — the server will push
     /// incremental Append/Update/Expire/Replace/Heartbeat frames.
     pub async fn query_live(&self, seql: &str) -> Result<SeqlStream, QueryError> {
-        let mut ast = sequins_query::parser::parse(seql).map_err(|e| QueryError::InvalidAst {
+        let mut ast = seql_parser::parse(seql).map_err(|e| QueryError::InvalidAst {
             message: format!("Parse error at offset {}: {}", e.offset, e.message),
         })?;
         ast.mode = QueryMode::Live;

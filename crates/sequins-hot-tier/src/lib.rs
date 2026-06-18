@@ -9,10 +9,7 @@ pub mod core;
 pub mod error;
 
 // Re-export main types
-pub use batch_chain::{BatchChain, BatchMeta};
+pub use batch_chain::{BatchChain, BatchMeta, ColdWriterFn};
 pub use config::HotTierConfig;
-pub use core::{EvictionStats, HotTier, ResourceId, ScopeId, StorageStats};
+pub use core::{EvictionStats, HotTier, ResourceId, ScopeId, SignalColdFlushFn, StorageStats};
 pub use error::{HotTierError, Result};
-
-// Re-export SignalType from sequins-types for convenience
-pub use sequins_types::SignalType;

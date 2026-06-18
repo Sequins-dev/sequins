@@ -1,6 +1,7 @@
 use super::{MaintenanceStats, Storage};
 use crate::error::Result;
-use crate::hot_tier::batch_chain::BatchMeta;
+use sequins_arrow_schema::SignalType;
+use sequins_hot_tier::BatchMeta;
 use std::sync::Arc;
 
 impl Storage {
@@ -143,7 +144,7 @@ impl Storage {
         if span_count > 0 {
             // Use the full span schema (includes promoted attribute columns + overflow map)
             // so the batch is compatible with the DataFusion table provider.
-            let schema = sequins_types::arrow_schema::span_schema();
+            let schema = sequins_arrow_schema::arrow_schema::span_schema();
 
             // Build the 11 core column arrays.
             let mut columns: Vec<Arc<dyn arrow::array::Array>> = vec![
@@ -183,7 +184,9 @@ impl Storage {
                 max_timestamp: i64::MAX,
                 row_count: batch.num_rows(),
             };
-            self.hot_tier.spans.push(Arc::new(batch), meta);
+            self.hot_tier
+                .chain(&SignalType::Spans)
+                .push(Arc::new(batch), meta);
         }
 
         Ok(span_count)

@@ -86,8 +86,8 @@ impl From<MaintenanceStats> for CMaintenanceStats {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct COtlpServerConfig {
-    /// gRPC port (0 = disabled, default 4317)
+    /// gRPC port. Use 0 to request an OS-assigned ephemeral port.
     pub grpc_port: u16,
-    /// HTTP port (0 = disabled, default 4318)
+    /// HTTP port. Use 0 to request an OS-assigned ephemeral port.
     pub http_port: u16,
 }

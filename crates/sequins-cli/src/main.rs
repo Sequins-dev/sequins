@@ -2,8 +2,9 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use sequins_datafusion_backend::DataFusionBackend;
 use sequins_server::{flight_service_server, ManagementServer, OtlpServer};
-use sequins_storage::{DataFusionBackend, Storage, StorageConfig};
+use sequins_storage::{Storage, StorageConfig};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use tracing::{error, info};
 
 mod ingest;
 mod query;
+mod storage;
 
 #[derive(Parser, Debug)]
 #[command(name = "sequins")]
@@ -162,7 +164,7 @@ async fn main() -> Result<()> {
             let flush_handle = Storage::start_background_flush(Arc::clone(&storage));
 
             // Wrap storage in DataFusion backend for query execution
-            let backend: Arc<dyn sequins_query::QueryExec> =
+            let backend: Arc<dyn sequins_traits::QueryExec> =
                 Arc::new(DataFusionBackend::new(Arc::clone(&storage)));
 
             let flight_svc = flight_service_server(backend);

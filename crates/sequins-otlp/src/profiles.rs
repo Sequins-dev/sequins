@@ -16,7 +16,7 @@ use opentelemetry_proto::tonic::profiles::v1development::{
     Profile as OtlpProfile, ProfilesDictionary,
 };
 use prost::Message;
-use sequins_types::arrow_schema::{
+use sequins_arrow_schema::arrow_schema::{
     profile_frames_schema, profile_mappings_schema, profile_samples_schema, profile_schema,
     profile_stacks_schema,
 };
@@ -419,7 +419,7 @@ struct MappingData {
 mod tests {
     use super::*;
     use opentelemetry_proto::tonic::profiles::v1development::Profile as OtlpProfile;
-    use sequins_types::arrow_schema::{
+    use sequins_arrow_schema::arrow_schema::{
         profile_frames_schema, profile_mappings_schema, profile_samples_schema, profile_schema,
         profile_stacks_schema,
     };

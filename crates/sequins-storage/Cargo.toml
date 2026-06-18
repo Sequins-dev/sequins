@@ -8,9 +8,11 @@ authors.workspace = true
 description = "Unified hot+cold storage engine for Sequins"
 
 [dependencies]
+seql-ast             = { workspace = true }
+sequins-arrow-schema = { workspace = true }
+sequins-traits     = { workspace = true }
 sequins-types      = { workspace = true }
-sequins-otlp       = { workspace = true, features = ["datafusion"] }
-sequins-query      = { workspace = true }
+sequins-otlp       = { workspace = true }
 sequins-wal        = { workspace = true }
 sequins-live-query = { workspace = true }
 sequins-hot-tier   = { workspace = true }
@@ -48,11 +50,15 @@ thiserror = { workspace = true }
 # Logging
 tracing = { workspace = true }
 
+# Test utilities — only included when test-utils feature is enabled
+tempfile = { workspace = true, optional = true }
+
 [features]
 default = []
-s3    = []
-gcs   = []
-azure = []
+s3         = []
+gcs        = []
+azure      = []
+test-utils = ["dep:tempfile"]
 
 [dev-dependencies]
 tempfile    = { workspace = true }

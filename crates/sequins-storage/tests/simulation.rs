@@ -12,14 +12,13 @@ use arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans};
-use sequins_storage::{
-    config::HotTierConfig,
-    hot_tier::{batch_chain::BatchMeta, core::HotTier},
-    wal::{Wal, WalConfig, WalPayload},
-};
+use sequins_arrow_schema::SignalType;
+use sequins_hot_tier::{BatchMeta, HotTier};
+use sequins_storage::config::HotTierConfig;
 use sequins_types::models::{
     AttributeValue, Duration, LogEntry, LogId, LogSeverity, Span, SpanId, Timestamp, TraceId,
 };
+use sequins_wal::{Wal, WalConfig, WalPayload};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -432,7 +431,9 @@ fn sim_hot_tier_concurrent_push_spans() {
                         max_timestamp: i64::MAX,
                         row_count: batch.num_rows(),
                     };
-                    hot_tier.spans.push(std::sync::Arc::new(batch), meta);
+                    hot_tier
+                        .chain(&SignalType::Spans)
+                        .push(std::sync::Arc::new(batch), meta);
                 })
             })
             .collect();
@@ -443,7 +444,7 @@ fn sim_hot_tier_concurrent_push_spans() {
         }
 
         // Verify all spans are in the chain.
-        let row_count = hot_tier.spans.row_count();
+        let row_count = hot_tier.chain(&SignalType::Spans).row_count();
         assert_eq!(row_count, 10, "All 10 spans should be in the chain");
 
         Ok(())
@@ -472,7 +473,9 @@ fn sim_hot_tier_concurrent_push_and_count() {
                         max_timestamp: i64::MAX,
                         row_count: batch.num_rows(),
                     };
-                    hot_tier.spans.push(std::sync::Arc::new(batch), meta);
+                    hot_tier
+                        .chain(&SignalType::Spans)
+                        .push(std::sync::Arc::new(batch), meta);
                 })
             })
             .collect();
@@ -483,7 +486,7 @@ fn sim_hot_tier_concurrent_push_and_count() {
                 let hot_tier = hot_tier.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                    hot_tier.spans.row_count()
+                    hot_tier.chain(&SignalType::Spans).row_count()
                 })
             })
             .collect();
@@ -500,7 +503,7 @@ fn sim_hot_tier_concurrent_push_and_count() {
 
         // Final check: all 5 spans present.
         assert_eq!(
-            hot_tier.spans.row_count(),
+            hot_tier.chain(&SignalType::Spans).row_count(),
             5,
             "All 5 spans should be in the chain after concurrent pushes"
         );
@@ -534,7 +537,9 @@ fn sim_concurrent_push_and_stats() {
                     max_timestamp: i64::MAX,
                     row_count: batch.num_rows(),
                 };
-                hot_tier_ingest.logs.push(std::sync::Arc::new(batch), meta);
+                hot_tier_ingest
+                    .chain(&SignalType::Logs)
+                    .push(std::sync::Arc::new(batch), meta);
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
         });

@@ -5,51 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "SeQL query language — AST, parser, frames, reducer"
+description = "Compatibility facade for SeQL-to-Substrait compilation"
 
 [dependencies]
-# Internal crates
-sequins-types = { workspace = true }
-
-# Serialization
-serde      = { workspace = true }
-serde_json = { workspace = true }
-bincode    = { workspace = true }
-prost      = { workspace = true }
-
-# Parsing
-winnow   = { workspace = true }
-indexmap = { workspace = true }
-
-# Async
-async-trait = { workspace = true }
-futures     = { workspace = true }
-tokio       = { workspace = true }
-
-# DataFusion (for query compilation)
-datafusion           = { workspace = true }
-datafusion-substrait = { workspace = true }
-datafusion-expr      = "51"
-datafusion-functions-aggregate = "51"
-arrow                = { workspace = true }
-arrow-flight         = { workspace = true }
-
-# Binary encoding (for Binary Arrow column type)
-base64 = { workspace = true }
-
-# CBOR decoding (for _overflow_attrs Map<Utf8, LargeBinary> values)
-ciborium = { workspace = true }
-
-# Metadata serialization
-bytes      = { workspace = true }
-pbjson-types = "0.8"
-
-# Error handling
-thiserror = { workspace = true }
-
-[build-dependencies]
-prost-build = "0.13"
+seql-substrait = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
-proptest = { workspace = true }
+seql-parser = { workspace = true }
+proptest    = { workspace = true }

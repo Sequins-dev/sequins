@@ -3,10 +3,10 @@ import SequinsFFI
 
 /// Configuration for the embedded OTLP server
 public struct OTLPServerConfig {
-    /// gRPC port (0 = disabled, default 4317)
+    /// gRPC port. Use 0 to request an OS-assigned ephemeral port.
     public let grpcPort: UInt16
 
-    /// HTTP port (0 = disabled, default 4318)
+    /// HTTP port. Use 0 to request an OS-assigned ephemeral port.
     public let httpPort: UInt16
 
     public init(grpcPort: UInt16 = 4317, httpPort: UInt16 = 4318) {
@@ -95,16 +95,6 @@ public final class DataSource {
     // Internal accessor for other components
     internal var rawPointer: OpaquePointer {
         return pointer
-    }
-
-    // MARK: - Server Status
-
-    /// Whether the embedded OTLP server task is still alive.
-    ///
-    /// Returns `false` if the server was never started or has crashed since startup
-    /// (e.g., because another process grabbed the port).
-    public func isServerAlive() -> Bool {
-        return sequins_data_source_is_server_alive(pointer)
     }
 
     // MARK: - Health Configuration

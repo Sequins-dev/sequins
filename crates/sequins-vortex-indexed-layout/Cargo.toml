@@ -1,0 +1,30 @@
+[package]
+name = "sequins-vortex-indexed-layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Custom Vortex layout embedding companion indexes in columnar files"
+
+[dependencies]
+sequins-companion-index = { workspace = true }
+
+# Vortex
+vortex = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+futures     = { workspace = true }
+
+# Serialization
+bincode = { workspace = true }
+serde   = { workspace = true }
+
+# Tantivy (for reader)
+tantivy  = { workspace = true }
+tempfile = { workspace = true }
+
+# Arrow (for reader expression handling)
+arrow = { workspace = true }
+datafusion = { workspace = true }

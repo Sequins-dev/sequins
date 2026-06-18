@@ -3,7 +3,7 @@
 use crate::delta::ViewDelta;
 use async_trait::async_trait;
 use futures::Stream;
-use sequins_query::SeqlStream;
+use sequins_traits::SeqlStream;
 use std::pin::Pin;
 
 /// A pinned, boxed stream of [`ViewDelta`] items.

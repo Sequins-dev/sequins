@@ -12,6 +12,8 @@ use std::os::raw::c_char;
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "local")]
+use sequins_datafusion_backend::DataFusionBackend;
+#[cfg(feature = "local")]
 use sequins_server::OtlpServer;
 #[cfg(feature = "local")]
 use sequins_storage::Storage;
@@ -49,6 +51,9 @@ pub(crate) enum DataSourceImpl {
     #[cfg(feature = "local")]
     Local {
         storage: Arc<Storage>,
+        /// Shared DataFusion backend — session context is initialised once and reused
+        /// across all queries, avoiding the per-query `infer_schema` overhead.
+        backend: Arc<DataFusionBackend>,
         otlp_server: Mutex<Option<OtlpServerHandle>>,
     },
     Remote {
@@ -65,9 +70,9 @@ pub(crate) enum DataSourceImpl {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct COtlpServerConfig {
-    /// gRPC port (0 = disabled, default 4317)
+    /// gRPC port. Use 0 to request an OS-assigned ephemeral port.
     pub grpc_port: u16,
-    /// HTTP port (0 = disabled, default 4318)
+    /// HTTP port. Use 0 to request an OS-assigned ephemeral port.
     pub http_port: u16,
 }
 
@@ -122,9 +127,16 @@ pub extern "C" fn sequins_data_source_new_local(
         }
     };
 
+    // Create the shared DataFusion backend once. The SessionContext inside it is
+    // initialised lazily on the first query and then reused for all subsequent
+    // queries, so the expensive infer_schema call over all cold-tier Vortex files
+    // only happens once per data source lifetime.
+    let backend = Arc::new(DataFusionBackend::new(Arc::clone(&storage)));
+
     // Create DataSourceImpl (OTLP server will be started separately via start_otlp_server)
     let impl_box = Box::new(DataSourceImpl::Local {
         storage,
+        backend,
         otlp_server: Mutex::new(None),
     });
 
@@ -248,6 +260,7 @@ pub extern "C" fn sequins_data_source_start_otlp_server(
         DataSourceImpl::Local {
             storage,
             otlp_server,
+            ..
         } => {
             let mut server_guard = match otlp_server.lock() {
                 Ok(guard) => guard,
@@ -262,18 +275,11 @@ pub extern "C" fn sequins_data_source_start_otlp_server(
                 return false;
             }
 
-            // Determine ports to use
-            let grpc_port = if config.grpc_port == 0 {
-                4317 // Default gRPC port
-            } else {
-                config.grpc_port
-            };
-
-            let http_port = if config.http_port == 0 {
-                4318 // Default HTTP port
-            } else {
-                config.http_port
-            };
+            // Swift's default config passes the standard ports explicitly. When
+            // tests pass 0, preserve it so the OS assigns an ephemeral port and
+            // parallel/nearby test instances do not collide on 4317/4318.
+            let grpc_port = config.grpc_port;
+            let http_port = config.http_port;
 
             // Create OTLP server
             let server = OtlpServer::new(storage.clone());
@@ -419,8 +425,8 @@ pub extern "C" fn sequins_data_source_stop_otlp_server(data_source: *mut CDataSo
 ///
 /// # Arguments
 /// * `data_source` - Local data source
-/// * `grpc_port_out` - Output parameter for gRPC port (0 if disabled)
-/// * `http_port_out` - Output parameter for HTTP port (0 if disabled)
+/// * `grpc_port_out` - Configured gRPC port (0 if OS-assigned ephemeral)
+/// * `http_port_out` - Configured HTTP port (0 if OS-assigned ephemeral)
 ///
 /// # Returns
 /// * true if server is running, false otherwise
@@ -581,8 +587,8 @@ mod tests {
         let path_c = CString::new(db_path.to_str().unwrap()).unwrap();
 
         let config = COtlpServerConfig {
-            grpc_port: 0, // Will use default 4317
-            http_port: 0, // Will use default 4318
+            grpc_port: 0,
+            http_port: 0,
         };
 
         let mut error: *mut c_char = std::ptr::null_mut();

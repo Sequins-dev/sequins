@@ -1,0 +1,28 @@
+[package]
+name = "sequins-attribute-codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CBOR-encoded overflow attribute map codec for Sequins"
+
+[dependencies]
+sequins-types = { workspace = true }
+
+# Arrow (for OverflowMapBuilder)
+arrow = { workspace = true }
+
+# CBOR encoding
+ciborium = { workspace = true }
+
+# OpenTelemetry (for OTLP KeyValue types)
+opentelemetry-proto = { workspace = true }
+
+# DataFusion UDFs (optional)
+datafusion = { workspace = true, optional = true }
+once_cell  = { workspace = true, optional = true }
+
+[features]
+default = []
+datafusion = ["dep:datafusion", "dep:once_cell"]

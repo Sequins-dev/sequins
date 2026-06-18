@@ -44,132 +44,66 @@ impl ColdTier {
         )
     }
 
+    /// Delete all `.vortex` files under `telemetry_type/` that are older than `retention_period`.
+    ///
+    /// Uses `ObjectStore::list` rather than `std::fs::read_dir` so it works on any
+    /// object store backend (local filesystem, S3, GCS, Azure Blob Storage).
+    ///
+    /// Files are identified by their nanosecond-timestamp filename: every Vortex file
+    /// written by `write_signal_batch` is named `{timestamp_nanos}.vortex`.
     pub async fn cleanup_old_files(
         &self,
         telemetry_type: &str,
         retention_period: sequins_types::Duration,
     ) -> Result<usize> {
+        use futures::StreamExt;
         use object_store::path::Path as ObjectPath;
 
+        let cutoff_nanos = {
+            let now = Timestamp::now()
+                .map_err(|e| Error::Storage(format!("Failed to get current time: {}", e)))?;
+            (now - retention_period).as_nanos()
+        };
+
+        // Build the full prefix including the base path, since the LocalFileSystem store
+        // is rooted at `/` and uses absolute paths (matching write_signal_batch behaviour).
         let base_path = self
             .config
             .uri
             .strip_prefix("file://")
             .unwrap_or(&self.config.uri);
+        let prefix_str = format!("{}/{}", base_path.trim_end_matches('/'), telemetry_type);
+        let prefix = ObjectPath::from(prefix_str.as_str());
+        let mut list_stream = self.store.list(Some(&prefix));
+        let mut to_delete: Vec<ObjectPath> = Vec::new();
 
-        // Calculate cutoff timestamp
-        let now = Timestamp::now()
-            .map_err(|e| Error::Storage(format!("Failed to get current time: {}", e)))?;
-        let cutoff = now - retention_period;
-        let cutoff_nanos = cutoff.as_nanos();
+        while let Some(meta) = list_stream.next().await {
+            let meta =
+                meta.map_err(|e| Error::Storage(format!("Failed to list objects: {}", e)))?;
 
-        // List all files in the telemetry type directory
-        let type_path = format!("{}/{}", base_path, telemetry_type);
+            let location = meta.location.to_string();
+            if !location.ends_with(".vortex") {
+                continue;
+            }
 
-        // Check if directory exists
-        if !std::path::Path::new(&type_path).exists() {
-            return Ok(0);
-        }
-
-        let mut deleted_count = 0;
-
-        // Walk through year/month/day directories and find old files
-        if let Ok(entries) = std::fs::read_dir(&type_path) {
-            for year_entry in entries.flatten() {
-                if let Ok(year_meta) = year_entry.metadata() {
-                    if !year_meta.is_dir() {
-                        continue;
-                    }
-
-                    // Read month directories
-                    if let Ok(month_entries) = std::fs::read_dir(year_entry.path()) {
-                        for month_entry in month_entries.flatten() {
-                            if let Ok(month_meta) = month_entry.metadata() {
-                                if !month_meta.is_dir() {
-                                    continue;
-                                }
-
-                                // Read day directories
-                                if let Ok(day_entries) = std::fs::read_dir(month_entry.path()) {
-                                    for day_entry in day_entries.flatten() {
-                                        if let Ok(day_meta) = day_entry.metadata() {
-                                            if !day_meta.is_dir() {
-                                                continue;
-                                            }
-
-                                            // Read parquet files in day directory
-                                            if let Ok(file_entries) =
-                                                std::fs::read_dir(day_entry.path())
-                                            {
-                                                for file_entry in file_entries.flatten() {
-                                                    if let Some(filename) =
-                                                        file_entry.file_name().to_str()
-                                                    {
-                                                        if filename.ends_with(".vortex") {
-                                                            // Extract timestamp from filename
-                                                            // Format: {timestamp}.vortex
-                                                            if let Some(timestamp_str) =
-                                                                filename.strip_suffix(".vortex")
-                                                            {
-                                                                if let Ok(file_timestamp) =
-                                                                    timestamp_str.parse::<i64>()
-                                                                {
-                                                                    // Delete if older than retention period
-                                                                    if file_timestamp < cutoff_nanos
-                                                                    {
-                                                                        // Delete the file using object store
-                                                                        let file_path =
-                                                                            file_entry.path();
-                                                                        let relative_path = file_path
-                                                                            .strip_prefix(base_path)
-                                                                            .map_err(|e| {
-                                                                                Error::Storage(
-                                                                                    format!(
-                                                                                "Failed to strip prefix: {}",
-                                                                                e
-                                                                            ),
-                                                                                )
-                                                                            })?
-                                                                            .to_str()
-                                                                            .ok_or_else(|| {
-                                                                                Error::Storage(
-                                                                                    "Invalid path"
-                                                                                        .to_string(),
-                                                                                )
-                                                                            })?;
-
-                                                                        let object_path =
-                                                                            ObjectPath::from(
-                                                                                relative_path,
-                                                                            );
-                                                                        self.store
-                                                                            .delete(&object_path)
-                                                                            .await
-                                                                            .map_err(|e| {
-                                                                                Error::Storage(
-                                                                                    format!(
-                                                                                    "Failed to delete file: {}",
-                                                                                    e
-                                                                                ),
-                                                                                )
-                                                                            })?;
-
-                                                                        deleted_count += 1;
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+            // Filename is the last path component; strip `.vortex` to get the nanos timestamp.
+            if let Some(filename) = location.split('/').next_back() {
+                if let Some(ts_str) = filename.strip_suffix(".vortex") {
+                    if let Ok(file_nanos) = ts_str.parse::<i64>() {
+                        if file_nanos < cutoff_nanos {
+                            to_delete.push(meta.location);
                         }
                     }
                 }
             }
+        }
+
+        let deleted_count = to_delete.len();
+        for path in to_delete {
+            self.store
+                .delete(&path)
+                .await
+                .map_err(|e| Error::Storage(format!("Failed to delete {}: {}", path, e)))?;
         }
 
         Ok(deleted_count)
@@ -219,6 +153,67 @@ mod tests {
         assert_ne!(path1, path2);
         assert!(path1.contains("2024-01-15"));
         assert!(path2.contains("2024-01-16"));
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_old_files_via_object_store() {
+        use crate::test_helpers::create_test_cold_tier;
+        use object_store::path::Path as ObjectPath;
+        use object_store::PutPayload;
+
+        let (cold_tier, _temp) = create_test_cold_tier().await;
+
+        // Build paths matching the absolute-path convention used by write_record_batch.
+        let base = cold_tier
+            .config
+            .uri
+            .strip_prefix("file://")
+            .unwrap_or(&cold_tier.config.uri)
+            .to_string();
+
+        let old_nanos: i64 = 946684800_000_000_000; // 2000-01-01
+        let old_path = ObjectPath::from(
+            format!(
+                "{}/spans/year=2000/month=01/day=01/{}.vortex",
+                base, old_nanos
+            )
+            .as_str(),
+        );
+        cold_tier
+            .store
+            .put(&old_path, PutPayload::from_static(b"old"))
+            .await
+            .unwrap();
+
+        let future_nanos: i64 = 4102444800_000_000_000; // 2100-01-01
+        let new_path = ObjectPath::from(
+            format!(
+                "{}/spans/year=2100/month=01/day=01/{}.vortex",
+                base, future_nanos
+            )
+            .as_str(),
+        );
+        cold_tier
+            .store
+            .put(&new_path, PutPayload::from_static(b"new"))
+            .await
+            .unwrap();
+
+        let retention = sequins_types::Duration::from_hours(24);
+        let deleted = cold_tier
+            .cleanup_old_files("spans", retention)
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 1, "exactly the old file should be deleted");
+        assert!(
+            cold_tier.store.get(&old_path).await.is_err(),
+            "old file should be deleted"
+        );
+        assert!(
+            cold_tier.store.get(&new_path).await.is_ok(),
+            "new file should remain"
+        );
     }
 
     #[test]

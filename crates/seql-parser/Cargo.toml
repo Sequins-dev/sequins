@@ -1,0 +1,16 @@
+[package]
+name = "seql-parser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SeQL text parser — no DataFusion or Arrow dependencies"
+
+[dependencies]
+seql-ast       = { workspace = true }
+winnow         = { workspace = true }
+serde          = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

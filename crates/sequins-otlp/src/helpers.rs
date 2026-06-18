@@ -1,9 +1,134 @@
 //! OTLP helper functions for resource/scope registration and attribute conversion
 
+use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringViewArray};
 use opentelemetry_proto::tonic::common::v1::{any_value::Value as OtlpValue, KeyValue};
 use opentelemetry_proto::tonic::resource::v1::Resource;
+use sequins_arrow_schema::schema_catalog::AttributeValueType;
 use sequins_types::models::AttributeValue;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Accumulates per-row promoted attribute values for all catalog columns and
+/// produces the final `Vec<ArrayRef>` in catalog order.
+///
+/// # Usage
+/// ```ignore
+/// let mut builder = PromotedAttrBuilder::new(catalog);
+/// for row_attrs in rows {
+///     let overflow = builder.push_row(row_attrs);
+///     // push overflow KVs to your overflow accumulator
+/// }
+/// let arrays = builder.finish();
+/// ```
+pub struct PromotedAttrBuilder<'a> {
+    catalog: &'a sequins_arrow_schema::SchemaCatalog,
+    col_strings: Vec<Vec<Option<String>>>,
+    col_i64: Vec<Vec<Option<i64>>>,
+    col_f64: Vec<Vec<Option<f64>>>,
+    col_bool: Vec<Vec<Option<bool>>>,
+    row_count: usize,
+}
+
+impl<'a> PromotedAttrBuilder<'a> {
+    /// Create a new builder for the given catalog.
+    pub fn new(catalog: &'a sequins_arrow_schema::SchemaCatalog) -> Self {
+        let n = catalog.len();
+        Self {
+            catalog,
+            col_strings: vec![Vec::new(); n],
+            col_i64: vec![Vec::new(); n],
+            col_f64: vec![Vec::new(); n],
+            col_bool: vec![Vec::new(); n],
+            row_count: 0,
+        }
+    }
+
+    /// Append one row's attributes.
+    ///
+    /// For each catalog column a `None` placeholder is pushed first; promoted
+    /// attributes then overwrite the placeholder.  Any attribute that cannot be
+    /// promoted (unknown key or type mismatch) is returned in the overflow vec.
+    pub fn push_row<'kv>(&mut self, attrs: &'kv [KeyValue]) -> Vec<&'kv KeyValue> {
+        let row_idx = self.row_count;
+        self.row_count += 1;
+        // Push None placeholders for every catalog column.
+        for (col_idx, attr) in self.catalog.promoted_columns().enumerate() {
+            match attr.value_type {
+                AttributeValueType::String => self.col_strings[col_idx].push(None),
+                AttributeValueType::Int64 => self.col_i64[col_idx].push(None),
+                AttributeValueType::Float64 => self.col_f64[col_idx].push(None),
+                AttributeValueType::Boolean => self.col_bool[col_idx].push(None),
+            }
+        }
+
+        let mut overflow = Vec::new();
+        for kv in attrs {
+            let routed = if let Some(col_idx) = self.catalog.column_index(&kv.key) {
+                let attr = &self.catalog.promoted[col_idx];
+                if let Some(av) = &kv.value {
+                    if let Some(val) = &av.value {
+                        match (&attr.value_type, val) {
+                            (AttributeValueType::String, OtlpValue::StringValue(s)) => {
+                                self.col_strings[col_idx][row_idx] = Some(s.clone());
+                                true
+                            }
+                            (AttributeValueType::Int64, OtlpValue::IntValue(i)) => {
+                                self.col_i64[col_idx][row_idx] = Some(*i);
+                                true
+                            }
+                            (AttributeValueType::Float64, OtlpValue::DoubleValue(f)) => {
+                                self.col_f64[col_idx][row_idx] = Some(*f);
+                                true
+                            }
+                            (AttributeValueType::Boolean, OtlpValue::BoolValue(b)) => {
+                                self.col_bool[col_idx][row_idx] = Some(*b);
+                                true
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !routed {
+                overflow.push(kv);
+            }
+        }
+        overflow
+    }
+
+    /// Consume the builder and produce one `ArrayRef` per catalog column in order.
+    pub fn finish(self) -> Vec<ArrayRef> {
+        let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.catalog.len());
+        for (col_idx, attr) in self.catalog.promoted_columns().enumerate() {
+            let arr: ArrayRef = match attr.value_type {
+                AttributeValueType::String => {
+                    let vals: Vec<Option<&str>> = self.col_strings[col_idx]
+                        .iter()
+                        .map(|s| s.as_deref())
+                        .collect();
+                    Arc::new(StringViewArray::from(vals)) as ArrayRef
+                }
+                AttributeValueType::Int64 => {
+                    Arc::new(Int64Array::from(self.col_i64[col_idx].clone())) as ArrayRef
+                }
+                AttributeValueType::Float64 => {
+                    Arc::new(Float64Array::from(self.col_f64[col_idx].clone())) as ArrayRef
+                }
+                AttributeValueType::Boolean => {
+                    Arc::new(BooleanArray::from(self.col_bool[col_idx].clone())) as ArrayRef
+                }
+            };
+            arrays.push(arr);
+        }
+        arrays
+    }
+}
 
 /// Convert OTLP attributes to HashMap of AttributeValues
 pub fn convert_attributes(otlp_attrs: Vec<KeyValue>) -> HashMap<String, AttributeValue> {

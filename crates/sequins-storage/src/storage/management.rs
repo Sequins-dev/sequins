@@ -1,12 +1,12 @@
 use super::Storage;
+use sequins_traits::ManagementApi;
 use sequins_types::models::{
     MaintenanceStats as CoreMaintenanceStats, RetentionPolicy, StorageStats as CoreStorageStats,
 };
-use sequins_types::ManagementApi;
 
 #[async_trait::async_trait]
 impl ManagementApi for Storage {
-    async fn run_retention_cleanup(&self) -> sequins_types::error::Result<usize> {
+    async fn run_retention_cleanup(&self) -> sequins_traits::Result<usize> {
         // Get the retention policy
         let policy = self.get_retention_policy().await?;
 
@@ -18,44 +18,51 @@ impl ManagementApi for Storage {
         total_deleted += cold_tier
             .cleanup_old_files("spans", policy.spans_retention)
             .await
-            .map_err(|e| {
-                sequins_types::error::Error::Other(format!("Failed to cleanup spans: {}", e))
-            })?;
+            .map_err(|e| sequins_traits::Error::Other(format!("Failed to cleanup spans: {}", e)))?;
 
         // Cleanup logs
         total_deleted += cold_tier
             .cleanup_old_files("logs", policy.logs_retention)
             .await
-            .map_err(|e| {
-                sequins_types::error::Error::Other(format!("Failed to cleanup logs: {}", e))
-            })?;
+            .map_err(|e| sequins_traits::Error::Other(format!("Failed to cleanup logs: {}", e)))?;
 
         // Cleanup metrics
         total_deleted += cold_tier
             .cleanup_old_files("metrics", policy.metrics_retention)
             .await
             .map_err(|e| {
-                sequins_types::error::Error::Other(format!("Failed to cleanup metrics: {}", e))
+                sequins_traits::Error::Other(format!("Failed to cleanup metrics: {}", e))
             })?;
 
-        // Cleanup profiles
+        // Cleanup profiles (metadata + samples + stacks + frames + mappings)
         total_deleted += cold_tier
             .cleanup_old_files("profiles", policy.profiles_retention)
             .await
             .map_err(|e| {
-                sequins_types::error::Error::Other(format!("Failed to cleanup profiles: {}", e))
+                sequins_traits::Error::Other(format!("Failed to cleanup profiles: {}", e))
+            })?;
+
+        // Cleanup resources and scopes (use spans_retention as a proxy for all metadata)
+        total_deleted += cold_tier
+            .cleanup_old_files("resources", policy.spans_retention)
+            .await
+            .map_err(|e| {
+                sequins_traits::Error::Other(format!("Failed to cleanup resources: {}", e))
+            })?;
+        total_deleted += cold_tier
+            .cleanup_old_files("scopes", policy.spans_retention)
+            .await
+            .map_err(|e| {
+                sequins_traits::Error::Other(format!("Failed to cleanup scopes: {}", e))
             })?;
 
         Ok(total_deleted)
     }
 
-    async fn update_retention_policy(
-        &self,
-        policy: RetentionPolicy,
-    ) -> sequins_types::error::Result<()> {
+    async fn update_retention_policy(&self, policy: RetentionPolicy) -> sequins_traits::Result<()> {
         // Save policy to disk
         self.save_retention_policy(&policy).map_err(|e| {
-            sequins_types::error::Error::Other(format!("Failed to save retention policy: {}", e))
+            sequins_traits::Error::Other(format!("Failed to save retention policy: {}", e))
         })?;
 
         // Update in-memory policy
@@ -65,7 +72,7 @@ impl ManagementApi for Storage {
         Ok(())
     }
 
-    async fn get_retention_policy(&self) -> sequins_types::error::Result<RetentionPolicy> {
+    async fn get_retention_policy(&self) -> sequins_traits::Result<RetentionPolicy> {
         // Return persisted policy if it exists, otherwise use defaults from config
         let retention_policy = self.retention_policy.read().await;
         Ok(retention_policy.clone().unwrap_or(RetentionPolicy {
@@ -76,11 +83,12 @@ impl ManagementApi for Storage {
         }))
     }
 
-    async fn run_maintenance(&self) -> sequins_types::error::Result<CoreMaintenanceStats> {
+    async fn run_maintenance(&self) -> sequins_traits::Result<CoreMaintenanceStats> {
         // Call the internal run_maintenance_internal method
-        let stats = self.run_maintenance_internal().await.map_err(|e| {
-            sequins_types::error::Error::Other(format!("Maintenance failed: {}", e))
-        })?;
+        let stats = self
+            .run_maintenance_internal()
+            .await
+            .map_err(|e| sequins_traits::Error::Other(format!("Maintenance failed: {}", e)))?;
 
         // Convert local MaintenanceStats to core MaintenanceStats
         Ok(CoreMaintenanceStats {
@@ -89,7 +97,7 @@ impl ManagementApi for Storage {
         })
     }
 
-    async fn get_storage_stats(&self) -> sequins_types::error::Result<CoreStorageStats> {
+    async fn get_storage_stats(&self) -> sequins_traits::Result<CoreStorageStats> {
         // Call the existing stats method
         let stats = self.stats();
 

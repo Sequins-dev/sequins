@@ -1,12 +1,13 @@
 use super::Storage;
-use crate::cold_tier::ColdTier;
 use crate::config::StorageConfig;
 use crate::error::Result;
-use crate::live_query::{LiveQueryConfig, LiveQueryManager};
-use crate::wal::{Wal, WalConfig};
 use arrow::array::RecordBatch;
-use sequins_query::ast::Signal;
+use seql_ast::ast::Signal;
+use sequins_cold_tier::ColdTier;
+use sequins_hot_tier::{HotTier, SignalColdFlushFn};
+use sequins_live_query::{LiveQueryConfig, LiveQueryManager};
 use sequins_types::{NowTime, SystemNowTime};
+use sequins_wal::{Wal, WalConfig};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
@@ -26,9 +27,26 @@ impl Storage {
     /// Pass `Arc::new(MockNowTime::new(base_ns))` in tests to make
     /// time-dependent logic fully deterministic.
     pub async fn new_with_clock(config: StorageConfig, clock: Arc<dyn NowTime>) -> Result<Self> {
-        let hot_tier = Arc::new(crate::hot_tier::HotTier::new(config.hot_tier.clone()));
         let cold_tier_inner = ColdTier::new(config.cold_tier.clone())?;
         let cold_tier = Arc::new(RwLock::new(cold_tier_inner));
+
+        // Build a cold-flush callback so completed hot-tier batches are durably persisted.
+        let cold_flush: SignalColdFlushFn = {
+            let cold_tier_ref = Arc::clone(&cold_tier);
+            Arc::new(move |signal, batch| {
+                let cold_tier_ref = Arc::clone(&cold_tier_ref);
+                Box::pin(async move {
+                    let ct = cold_tier_ref.read().await;
+                    if let Err(e) = ct.write_signal(signal, (*batch).clone()).await {
+                        tracing::error!("cold flush for {:?} failed: {}", signal, e);
+                    }
+                })
+            })
+        };
+        let hot_tier = Arc::new(HotTier::new_with_cold_writer(
+            config.hot_tier.clone(),
+            cold_flush,
+        ));
 
         // Load persisted retention policy if it exists
         let retention_policy = Self::load_retention_policy(&config.cold_tier.uri)?;
@@ -63,7 +81,7 @@ impl Storage {
             max_subscriptions: 1000,
             heartbeat_interval: Duration::from_secs(5),
         };
-        let live_query_manager = Arc::new(LiveQueryManager::new(wal.clone(), live_config));
+        let live_query_manager = Arc::new(LiveQueryManager::new(live_config));
 
         Ok(Self {
             config,

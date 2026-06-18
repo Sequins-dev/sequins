@@ -17,22 +17,40 @@ enum ChartDataUtils {
     static let gapMultiplier: Double = 1.5
 
     /// Segments data points based on time gaps
-    /// Points separated by more than gapMultiplier * bucketDuration are placed in different segments
+    /// Points separated by more than gapMultiplier * effectiveBucket are placed in different segments.
+    /// The effective bucket is max(bucketDuration, medianInterval) so that when bins are finer
+    /// than the actual data arrival rate, consecutive points still connect instead of becoming dots.
     static func segmentDataPoints(
         _ dataPoints: [MetricDataPoint],
         bucketDuration: TimeInterval
     ) -> [SegmentedDataPoint] {
         guard !dataPoints.isEmpty else { return [] }
 
-        let gapThreshold = bucketDuration * gapMultiplier
-        var segmentAssignments: [(point: MetricDataPoint, segmentId: Int)] = []
-        var currentSegment = 0
-        var previousTimestamp: Date?
-
         // DataFusion GROUP BY doesn't guarantee output order, so sort by timestamp first.
         // Without sorting, unsorted consecutive points produce large positive gaps that
         // trigger spurious segment splits, resulting in many disconnected line segments.
         let sorted = dataPoints.sorted { $0.timestamp < $1.timestamp }
+
+        // Compute the actual median gap between consecutive sorted points.
+        // Using max(bucketDuration, medianGap) prevents false segmentation when the
+        // query bin size is smaller than the data arrival rate (e.g. 5s bins with 10s data).
+        var gaps: [TimeInterval] = []
+        for i in 1..<sorted.count {
+            let g = sorted[i].timestamp.timeIntervalSince(sorted[i - 1].timestamp)
+            if g > 0 { gaps.append(g) }
+        }
+        let medianGap: TimeInterval
+        if gaps.isEmpty {
+            medianGap = bucketDuration
+        } else {
+            gaps.sort()
+            medianGap = gaps[gaps.count / 2]
+        }
+        let effectiveBucket = max(bucketDuration, medianGap)
+        let gapThreshold = effectiveBucket * gapMultiplier
+        var segmentAssignments: [(point: MetricDataPoint, segmentId: Int)] = []
+        var currentSegment = 0
+        var previousTimestamp: Date?
 
         // First pass: assign segment IDs
         for point in sorted {
@@ -95,20 +113,14 @@ enum ChartDataUtils {
         return ticks
     }
 
-    /// Estimate the typical data reporting interval from a set of data points.
-    ///
-    /// Sorts by timestamp first so unsorted input doesn't produce negative intervals.
-    /// Returns the median of all positive inter-point gaps (skips duplicates).
+    /// Estimate bucket duration from data using the median interval
     static func estimateBucketDuration(from dataPoints: [MetricDataPoint]) -> TimeInterval? {
         guard dataPoints.count >= 2 else { return nil }
-        let sorted = dataPoints.sorted { $0.timestamp < $1.timestamp }
         var intervals: [TimeInterval] = []
-        for i in 1..<sorted.count {
-            let gap = sorted[i].timestamp.timeIntervalSince(sorted[i-1].timestamp)
-            if gap > 0 { intervals.append(gap) }
+        for i in 1..<dataPoints.count {
+            intervals.append(dataPoints[i].timestamp.timeIntervalSince(dataPoints[i-1].timestamp))
         }
-        guard !intervals.isEmpty else { return nil }
-        let sortedIntervals = intervals.sorted()
-        return sortedIntervals[sortedIntervals.count / 2]
+        let sorted = intervals.sorted()
+        return sorted[sorted.count / 2]  // Median
     }
 }

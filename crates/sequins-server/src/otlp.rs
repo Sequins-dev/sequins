@@ -38,7 +38,7 @@ use opentelemetry_proto::tonic::collector::{
     },
 };
 use prost::Message as ProstMessage;
-use sequins_types::OtlpIngest;
+use sequins_traits::OtlpIngest;
 use std::sync::Arc;
 use tonic::{transport::Server, Request as TonicRequest, Response as TonicResponse, Status};
 use tower_http::cors::CorsLayer;
@@ -380,6 +380,67 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
+/// Maximum OTLP HTTP body size (64 MiB).  Requests larger than this return 413.
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Generic HTTP handler for all four OTLP signal types.
+///
+/// Reads the body (capped at `MAX_BODY_BYTES`), decodes protobuf or JSON
+/// depending on Content-Type, calls the provided ingest function, and encodes
+/// the response.  Returns:
+/// - 400 on malformed payload (protobuf/JSON decode error)
+/// - 413 when the request body exceeds `MAX_BODY_BYTES`
+/// - 500 on internal ingestion errors
+async fn ingest_http<Req, Resp, F, Fut>(
+    ingest: Arc<dyn OtlpIngest>,
+    request: Request,
+    f: F,
+) -> Response
+where
+    Req: ProstMessage + Default + serde::de::DeserializeOwned,
+    Resp: ProstMessage + serde::Serialize,
+    F: FnOnce(Arc<dyn OtlpIngest>, Req) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<Resp, sequins_traits::Error>>,
+{
+    let (parts, body) = request.into_parts();
+
+    let content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_owned();
+
+    let accept = parts
+        .headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok());
+
+    let bytes = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(e) => {
+            let msg = e.to_string();
+            // axum surfaces a length-limit error when the body exceeds the cap
+            let status = if msg.contains("length limit") || msg.contains("too large") {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return (status, msg).into_response();
+        }
+    };
+
+    let req: Req = match decode_request(&content_type, &bytes) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+
+    match f(ingest, req).await {
+        Ok(resp) => encode_response(accept, resp),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 /// Decode bytes as OTLP binary protobuf or JSON depending on Content-Type.
 #[allow(clippy::result_large_err)]
 fn decode_request<T>(content_type: &str, bytes: &Bytes) -> std::result::Result<T, Response>
@@ -442,190 +503,41 @@ where
     }
 }
 
-/// POST /v1/traces — OTLP HTTP trace ingestion (protobuf binary or JSON)
 async fn ingest_traces_http(
     State(ingest): State<Arc<dyn OtlpIngest>>,
     request: Request,
 ) -> Response {
-    let (parts, body) = request.into_parts();
-
-    let content_type = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/json")
-        .to_owned();
-
-    let accept = parts
-        .headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok());
-
-    let bytes = match axum::body::to_bytes(body, 64 * 1024 * 1024).await {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to read body: {}", e),
-            )
-                .into_response()
-        }
-    };
-
-    let req: ExportTraceServiceRequest = match decode_request(&content_type, &bytes) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-
-    // Pass through to storage layer
-    match ingest.ingest_traces(req).await {
-        Ok(resp) => encode_response(accept, resp),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to ingest traces: {}", e),
-        )
-            .into_response(),
-    }
+    ingest_http(ingest, request, |ing, req| async move {
+        ing.ingest_traces(req).await
+    })
+    .await
 }
 
-/// POST /v1/logs — OTLP HTTP log ingestion (protobuf binary or JSON)
 async fn ingest_logs_http(State(ingest): State<Arc<dyn OtlpIngest>>, request: Request) -> Response {
-    let (parts, body) = request.into_parts();
-
-    let content_type = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/json")
-        .to_owned();
-
-    let accept = parts
-        .headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok());
-
-    let bytes = match axum::body::to_bytes(body, 64 * 1024 * 1024).await {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to read body: {}", e),
-            )
-                .into_response()
-        }
-    };
-
-    let req: ExportLogsServiceRequest = match decode_request(&content_type, &bytes) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-
-    tracing::debug!(
-        "Received {} resource_logs via HTTP",
-        req.resource_logs.len()
-    );
-
-    // Pass through to storage layer
-    match ingest.ingest_logs(req).await {
-        Ok(resp) => encode_response(accept, resp),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to ingest logs: {}", e),
-        )
-            .into_response(),
-    }
+    ingest_http(ingest, request, |ing, req| async move {
+        ing.ingest_logs(req).await
+    })
+    .await
 }
 
-/// POST /v1/metrics — OTLP HTTP metric ingestion (protobuf binary or JSON)
 async fn ingest_metrics_http(
     State(ingest): State<Arc<dyn OtlpIngest>>,
     request: Request,
 ) -> Response {
-    let (parts, body) = request.into_parts();
-
-    let content_type = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/json")
-        .to_owned();
-
-    let accept = parts
-        .headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok());
-
-    let bytes = match axum::body::to_bytes(body, 64 * 1024 * 1024).await {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to read body: {}", e),
-            )
-                .into_response()
-        }
-    };
-
-    let req: ExportMetricsServiceRequest = match decode_request(&content_type, &bytes) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-
-    // Pass through to storage layer
-    match ingest.ingest_metrics(req).await {
-        Ok(resp) => encode_response(accept, resp),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to ingest metrics: {}", e),
-        )
-            .into_response(),
-    }
+    ingest_http(ingest, request, |ing, req| async move {
+        ing.ingest_metrics(req).await
+    })
+    .await
 }
 
-/// POST /v1development/profiles — OTLP HTTP profile ingestion (protobuf binary or JSON)
 async fn ingest_profiles_http(
     State(ingest): State<Arc<dyn OtlpIngest>>,
     request: Request,
 ) -> Response {
-    let (parts, body) = request.into_parts();
-
-    let content_type = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/json")
-        .to_owned();
-
-    let accept = parts
-        .headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok());
-
-    let bytes = match axum::body::to_bytes(body, 64 * 1024 * 1024).await {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to read body: {}", e),
-            )
-                .into_response()
-        }
-    };
-
-    let req: ExportProfilesServiceRequest = match decode_request(&content_type, &bytes) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-
-    // Pass through to storage layer
-    match ingest.ingest_profiles(req).await {
-        Ok(resp) => encode_response(accept, resp),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to ingest profiles: {}", e),
-        )
-            .into_response(),
-    }
+    ingest_http(ingest, request, |ing, req| async move {
+        ing.ingest_profiles(req).await
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -655,10 +567,12 @@ mod tests {
         async fn ingest_traces(
             &self,
             request: ExportTraceServiceRequest,
-        ) -> std::result::Result<ExportTraceServiceResponse, sequins_types::Error> {
+        ) -> std::result::Result<ExportTraceServiceResponse, sequins_traits::Error> {
             // Validate request has data
             if request.resource_spans.is_empty() {
-                return Err(sequins_types::Error::Other("No resource spans".to_string()));
+                return Err(sequins_traits::Error::Other(
+                    "No resource spans".to_string(),
+                ));
             }
             Ok(ExportTraceServiceResponse {
                 partial_success: None,
@@ -668,10 +582,10 @@ mod tests {
         async fn ingest_logs(
             &self,
             request: ExportLogsServiceRequest,
-        ) -> std::result::Result<ExportLogsServiceResponse, sequins_types::Error> {
+        ) -> std::result::Result<ExportLogsServiceResponse, sequins_traits::Error> {
             // Validate request has data
             if request.resource_logs.is_empty() {
-                return Err(sequins_types::Error::Other("No resource logs".to_string()));
+                return Err(sequins_traits::Error::Other("No resource logs".to_string()));
             }
             Ok(ExportLogsServiceResponse {
                 partial_success: None,
@@ -681,10 +595,10 @@ mod tests {
         async fn ingest_metrics(
             &self,
             request: ExportMetricsServiceRequest,
-        ) -> std::result::Result<ExportMetricsServiceResponse, sequins_types::Error> {
+        ) -> std::result::Result<ExportMetricsServiceResponse, sequins_traits::Error> {
             // Validate request has data
             if request.resource_metrics.is_empty() {
-                return Err(sequins_types::Error::Other(
+                return Err(sequins_traits::Error::Other(
                     "No resource metrics".to_string(),
                 ));
             }
@@ -696,10 +610,10 @@ mod tests {
         async fn ingest_profiles(
             &self,
             request: ExportProfilesServiceRequest,
-        ) -> std::result::Result<ExportProfilesServiceResponse, sequins_types::Error> {
+        ) -> std::result::Result<ExportProfilesServiceResponse, sequins_traits::Error> {
             // Validate request has data
             if request.resource_profiles.is_empty() {
-                return Err(sequins_types::Error::Other(
+                return Err(sequins_traits::Error::Other(
                     "No resource profiles".to_string(),
                 ));
             }

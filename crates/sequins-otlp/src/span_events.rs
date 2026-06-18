@@ -1,10 +1,10 @@
 //! Direct OTLP span event → Arrow RecordBatch conversion
 
-use crate::overflow_map::build_overflow_column;
 use arrow::array::{ArrayRef, StringViewArray, TimestampNanosecondArray};
 use arrow::record_batch::RecordBatch;
 use opentelemetry_proto::tonic::common::v1::KeyValue;
-use sequins_types::arrow_schema::span_events_schema;
+use sequins_arrow_schema::arrow_schema::span_events_schema;
+use sequins_attribute_codec::build_overflow_column;
 use std::sync::Arc;
 
 /// Convert OTLP span events to an Arrow `RecordBatch` (span_events_schema).
@@ -53,7 +53,7 @@ pub fn otlp_span_events_to_batch(
 mod tests {
     use super::*;
     use opentelemetry_proto::tonic::trace::v1::span::Event;
-    use sequins_types::arrow_schema::span_events_schema;
+    use sequins_arrow_schema::arrow_schema::span_events_schema;
 
     fn make_event(name: &str, ts_ns: u64) -> Event {
         Event {

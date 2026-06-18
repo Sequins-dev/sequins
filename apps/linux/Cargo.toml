@@ -13,12 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 # Internal crates (direct Rust dependency, no C FFI)
-sequins-types   = { workspace = true }
-sequins-query   = { workspace = true }
-sequins-storage = { workspace = true }
-sequins-server  = { workspace = true }
-sequins-client  = { workspace = true }
-sequins-view    = { workspace = true }
+sequins-types              = { workspace = true }
+sequins-storage            = { workspace = true }
+sequins-datafusion-backend = { workspace = true }
+sequins-server             = { workspace = true }
+sequins-client             = { workspace = true }
+sequins-view               = { workspace = true }
+sequins-traits             = { workspace = true }
 
 # Arrow (access RecordBatch directly, no IPC boundary)
 arrow = { workspace = true }
@@ -49,4 +50,3 @@ ciborium   = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 uuid       = { workspace = true }
-

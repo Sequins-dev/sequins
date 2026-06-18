@@ -1,0 +1,23 @@
+[package]
+name = "sequins-batch-chain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Lock-free Arrow RecordBatch chain with DataFusion TableProvider and background compaction"
+
+[dependencies]
+arrow        = { workspace = true }
+datafusion   = { workspace = true }
+futures      = { workspace = true }
+tokio        = { workspace = true }
+crossbeam-epoch = { workspace = true }
+
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }

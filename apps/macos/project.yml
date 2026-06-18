@@ -23,6 +23,13 @@ targets:
     platform: macOS
     sources:
       - path: Sequins
+        excludes:
+          - "**/*.xcassets"
+      - path: Sequins/Assets.xcassets
+        type: folder
+    resources:
+      - path: Sequins/Assets.xcassets
+      - path: Sequins/AppIcon.icns
     dependencies:
       - package: SequinsData
       - sdk: SwiftUI.framework
@@ -38,6 +45,7 @@ targets:
       path: Sequins/Info.plist
       properties:
         CFBundleDisplayName: Sequins
+        CFBundleIconFile: AppIcon
         LSMinimumSystemVersion: "14.0"
         NSHighResolutionCapable: true
         NSPrincipalClass: NSApplication

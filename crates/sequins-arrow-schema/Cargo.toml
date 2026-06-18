@@ -1,0 +1,21 @@
+[package]
+name = "sequins-arrow-schema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Arrow schemas, signal types, and schema catalog for Sequins telemetry data"
+
+[dependencies]
+# Arrow schemas
+arrow = { workspace = true }
+
+# Vortex (for ExtDType definitions)
+vortex = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+
+# Utilities
+once_cell = { workspace = true }

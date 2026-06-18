@@ -87,7 +87,11 @@ public final class SeQLStream {
 
     deinit {
         if let h = handle {
-            sequins_seql_stream_free(h)
+            let ctx = context
+            DispatchQueue.global(qos: .utility).async {
+                sequins_seql_stream_free(h)
+                _ = ctx
+            }
         }
     }
 }
@@ -147,6 +151,9 @@ public final class LiveSeQLStream {
     /// The `String?` parameter is the table name: `nil` = primary, non-nil = auxiliary alias.
     public var onBatchCallback: ((RecordBatch, String?) -> Void)?
 
+    /// Optional callback invoked when the schema frame arrives (always fires, even for empty results).
+    public var onSchemaCallback: ((SeQLSchema) -> Void)?
+
     /// Optional callback invoked after each delta frame is applied.
     /// Receives all ops in the frame; Update ops carry a single-row RecordBatch.
     public var onDeltaCallback: (([SeQLDeltaOp]) -> Void)?
@@ -164,6 +171,7 @@ public final class LiveSeQLStream {
     // Called from main thread only
     func applySchema(_ schema: SeQLSchema) {
         self.schema = schema
+        onSchemaCallback?(schema)
     }
 
     // Called from main thread only — snapshot-style data batch (for live queries that
@@ -221,8 +229,13 @@ public final class LiveSeQLStream {
     }
 
     deinit {
-        if let h = handle {
+        guard let h = handle else { return }
+        handle = nil
+        let retainer = _contextRetainer
+        _contextRetainer = nil
+        DispatchQueue.global(qos: .utility).async {
             sequins_seql_stream_free(h)
+            _ = retainer
         }
     }
 }
@@ -298,9 +311,13 @@ public final class ViewHandle {
     }
 
     deinit {
-        if let h = handle {
+        guard let h = handle else { return }
+        handle = nil
+        let retainer = _contextRetainer
+        _contextRetainer = nil
+        DispatchQueue.global(qos: .utility).async {
             sequins_view_free(h)
-            handle = nil
+            _ = retainer
         }
     }
 }

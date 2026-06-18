@@ -17,15 +17,15 @@ pub mod write_spans;
 
 // Data modules
 pub mod cold_tier;
+pub mod compact;
 pub mod query;
 pub mod rollups;
-pub mod series_index;
 
-// Companion indexes
-pub mod index;
-
-// Custom Vortex layout embedding companion indexes
-pub mod indexed_layout;
+// series_index, companion indexes, and indexed layout now live in dedicated crates.
+// Re-export under the same module names so internal paths (e.g. `crate::index::*`) continue to resolve.
+pub use sequins_companion_index as index;
+pub use sequins_series_index as series_index;
+pub use sequins_vortex_indexed_layout as indexed_layout;
 
 // Test helpers
 #[cfg(test)]

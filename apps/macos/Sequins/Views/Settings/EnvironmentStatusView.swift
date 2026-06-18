@@ -39,19 +39,14 @@ struct EnvironmentStatusView: View {
 
             Divider()
 
-            // Query connection status for the selected environment
+            // Connection status and details
             if let env = appState.environmentManager.selectedEnvironment {
                 VStack(alignment: .leading, spacing: 12) {
+                    // Status indicator
                     HStack(spacing: 8) {
-                        if case .starting = appState.serverStatus {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .frame(width: 10, height: 10)
-                        } else {
-                            Circle()
-                                .fill(appState.serverStatus.statusColor)
-                                .frame(width: 10, height: 10)
-                        }
+                        Circle()
+                            .fill(appState.serverStatus.statusColor)
+                            .frame(width: 10, height: 10)
                         Text(appState.serverStatus.statusText)
                             .font(.subheadline)
                         Spacer()
@@ -60,13 +55,9 @@ struct EnvironmentStatusView: View {
                         }
                         .buttonStyle(.borderless)
                         .font(.caption)
-                        .disabled(
-                            appState.serverStatus == .starting ||
-                            appState.localServerStatus == .starting
-                        )
                     }
 
-                    // Query connection error
+                    // Error message
                     if let error = appState.dataSourceError {
                         Text(error)
                             .font(.caption)
@@ -75,6 +66,27 @@ struct EnvironmentStatusView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(Color.red.opacity(0.1))
                             .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+
+                    // Endpoint info for local environment
+                    if env.isLocal, case .running(let grpcPort, let httpPort) = appState.serverStatus {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Send telemetry to:")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            EndpointRow(
+                                icon: "network",
+                                label: "gRPC",
+                                url: "http://localhost:\(String(grpcPort))"
+                            )
+
+                            EndpointRow(
+                                icon: "network",
+                                label: "HTTP",
+                                url: "http://localhost:\(String(httpPort))"
+                            )
+                        }
                     }
 
                     // Remote endpoint info
@@ -91,11 +103,6 @@ struct EnvironmentStatusView: View {
                 }
                 .padding()
             }
-
-            Divider()
-
-            // Always-on local OTLP server status (visible regardless of selected env)
-            LocalServerStatusSection()
 
             Divider()
 
@@ -118,59 +125,6 @@ struct EnvironmentStatusView: View {
     }
 }
 
-/// Shows the status of the always-on embedded OTLP server.
-struct LocalServerStatusSection: View {
-    @Environment(AppStateViewModel.self) private var appState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                if case .starting = appState.localServerStatus {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .frame(width: 8, height: 8)
-                } else {
-                    Circle()
-                        .fill(appState.localServerStatus.statusColor)
-                        .frame(width: 8, height: 8)
-                }
-                Text("Local OTLP")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(appState.localServerStatus.statusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if case .running(let grpcPort, let httpPort) = appState.localServerStatus {
-                VStack(alignment: .leading, spacing: 6) {
-                    EndpointRow(
-                        icon: "network",
-                        label: "gRPC",
-                        url: "localhost:\(grpcPort)"
-                    )
-                    EndpointRow(
-                        icon: "network",
-                        label: "HTTP",
-                        url: "localhost:\(httpPort)"
-                    )
-                }
-            }
-
-            if case .error(let msg) = appState.localServerStatus {
-                Text(msg)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .padding(6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.red.opacity(0.1))
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-            }
-        }
-        .padding()
-    }
-}
-
 struct EnvironmentOptionRow: View {
     let environment: ConnectionEnvironment
     let isSelected: Bool
@@ -179,19 +133,23 @@ struct EnvironmentOptionRow: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: 10) {
+                // Selection indicator
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(isSelected ? .blue : .secondary)
                     .font(.system(size: 14))
 
+                // Icon
                 Image(systemName: environment.isLocal ? "laptopcomputer" : "network")
                     .foregroundStyle(.secondary)
                     .frame(width: 16)
 
+                // Name
                 Text(environment.name)
                     .foregroundStyle(.primary)
 
                 Spacer()
 
+                // Subtitle
                 if environment.isLocal {
                     Text("localhost:\(String(environment.effectiveGrpcPort))")
                         .font(.caption)

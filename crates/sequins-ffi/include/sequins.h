@@ -235,11 +235,11 @@ typedef struct CViewHandle CViewHandle;
  */
 typedef struct COtlpServerConfig {
   /**
-   * gRPC port (0 = disabled, default 4317)
+   * gRPC port. Use 0 to request an OS-assigned ephemeral port.
    */
   uint16_t grpc_port;
   /**
-   * HTTP port (0 = disabled, default 4318)
+   * HTTP port. Use 0 to request an OS-assigned ephemeral port.
    */
   uint16_t http_port;
 } COtlpServerConfig;
@@ -1513,8 +1513,8 @@ void sequins_data_source_stop_otlp_server(struct CDataSource *data_source);
  *
  * # Arguments
  * * `data_source` - Local data source
- * * `grpc_port_out` - Output parameter for gRPC port (0 if disabled)
- * * `http_port_out` - Output parameter for HTTP port (0 if disabled)
+ * * `grpc_port_out` - Configured gRPC port (0 if OS-assigned ephemeral)
+ * * `http_port_out` - Configured HTTP port (0 if OS-assigned ephemeral)
  *
  * # Returns
  * * true if server is running, false otherwise

@@ -5,17 +5,12 @@
 //! - OTLP test data generators for traces, logs, metrics, and profiles
 //! - Assertion helpers for validating RecordBatch data
 
-#[cfg(test)]
 use crate::config::{
     ColdTierConfig, CompanionIndexConfig, HotTierConfig, LifecycleConfig, StorageConfig,
 };
-#[cfg(test)]
 use crate::Storage;
-#[cfg(test)]
 use arrow::datatypes::DataType;
-#[cfg(test)]
 use arrow::record_batch::RecordBatch;
-#[cfg(test)]
 use opentelemetry_proto::tonic::{
     collector::{
         logs::v1::ExportLogsServiceRequest, metrics::v1::ExportMetricsServiceRequest,
@@ -29,18 +24,13 @@ use opentelemetry_proto::tonic::{
     resource::v1::Resource,
     trace::v1::{ResourceSpans, ScopeSpans, Span, Status},
 };
-#[cfg(test)]
 use sequins_types::models::Duration;
-#[cfg(test)]
 use sequins_types::MockNowTime;
-#[cfg(test)]
 use std::sync::Arc;
-#[cfg(test)]
 use tempfile::TempDir;
 
 /// Builder for creating test Storage instances with configurable parameters
-#[cfg(test)]
-pub(crate) struct TestStorageBuilder {
+pub struct TestStorageBuilder {
     hot_tier_max_age: Duration,
     hot_tier_max_entries: usize,
     cold_tier_row_block_size: usize,
@@ -56,14 +46,13 @@ pub(crate) struct TestStorageBuilder {
     base_ns: u64,
 }
 
-#[cfg(test)]
 impl TestStorageBuilder {
     /// Create a new builder with sensible defaults for testing.
     ///
     /// The mock clock starts at approximately `SystemTime::now()` so that
     /// test data generated with `builder.base_ns()` always falls within a
     /// `last 1h` query window.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let base_ns = sequins_types::NowTime::now_ns(&sequins_types::SystemNowTime);
         Self {
             hot_tier_max_age: Duration::from_minutes(5),
@@ -78,25 +67,25 @@ impl TestStorageBuilder {
     }
 
     /// Set hot tier max age
-    pub(crate) fn hot_tier_max_age(mut self, max_age: Duration) -> Self {
+    pub fn hot_tier_max_age(mut self, max_age: Duration) -> Self {
         self.hot_tier_max_age = max_age;
         self
     }
 
     /// Set hot tier max entries
-    pub(crate) fn hot_tier_max_entries(mut self, max_entries: usize) -> Self {
+    pub fn hot_tier_max_entries(mut self, max_entries: usize) -> Self {
         self.hot_tier_max_entries = max_entries;
         self
     }
 
     /// Set retention duration
-    pub(crate) fn retention(mut self, retention: Duration) -> Self {
+    pub fn retention(mut self, retention: Duration) -> Self {
         self.retention = retention;
         self
     }
 
     /// Set flush interval
-    pub(crate) fn flush_interval(mut self, flush_interval: Duration) -> Self {
+    pub fn flush_interval(mut self, flush_interval: Duration) -> Self {
         self.flush_interval = flush_interval;
         self
     }
@@ -104,7 +93,7 @@ impl TestStorageBuilder {
     /// Build a Storage instance with the configured parameters
     ///
     /// Returns (Storage, TempDir) - the TempDir must be kept alive for the duration of the test
-    pub(crate) async fn build(mut self) -> (Storage, TempDir) {
+    pub async fn build(mut self) -> (Storage, TempDir) {
         let temp_dir = self
             .temp_dir
             .take()
@@ -142,7 +131,6 @@ impl TestStorageBuilder {
     }
 }
 
-#[cfg(test)]
 impl Default for TestStorageBuilder {
     fn default() -> Self {
         Self::new()
@@ -153,8 +141,7 @@ impl Default for TestStorageBuilder {
 ///
 /// Convenience for test fixture timestamp generation — using this ensures
 /// test data falls within `last 1h` query windows.
-#[cfg(test)]
-pub(crate) fn now_ns() -> u64 {
+pub fn now_ns() -> u64 {
     sequins_types::NowTime::now_ns(&sequins_types::SystemNowTime)
 }
 
@@ -169,17 +156,12 @@ pub(crate) fn now_ns() -> u64 {
 ///
 /// # Returns
 /// A valid ExportTraceServiceRequest with realistic span hierarchy and attributes
-#[cfg(test)]
-pub(crate) fn make_test_otlp_traces(
-    n_resources: usize,
-    n_spans: usize,
-) -> ExportTraceServiceRequest {
+pub fn make_test_otlp_traces(n_resources: usize, n_spans: usize) -> ExportTraceServiceRequest {
     make_test_otlp_traces_at(n_resources, n_spans, now_ns())
 }
 
 /// Create a test OTLP traces request with timestamps starting at `base_time_ns`.
-#[cfg(test)]
-pub(crate) fn make_test_otlp_traces_at(
+pub fn make_test_otlp_traces_at(
     n_resources: usize,
     n_spans: usize,
     base_time_ns: u64,
@@ -294,14 +276,12 @@ pub(crate) fn make_test_otlp_traces_at(
 ///
 /// # Returns
 /// A valid ExportLogsServiceRequest with realistic log data
-#[cfg(test)]
-pub(crate) fn make_test_otlp_logs(n_resources: usize, n_logs: usize) -> ExportLogsServiceRequest {
+pub fn make_test_otlp_logs(n_resources: usize, n_logs: usize) -> ExportLogsServiceRequest {
     make_test_otlp_logs_at(n_resources, n_logs, now_ns())
 }
 
 /// Create a test OTLP logs request with timestamps starting at `base_time_ns`.
-#[cfg(test)]
-pub(crate) fn make_test_otlp_logs_at(
+pub fn make_test_otlp_logs_at(
     n_resources: usize,
     n_logs: usize,
     base_time_ns: u64,
@@ -394,8 +374,7 @@ pub(crate) fn make_test_otlp_logs_at(
 ///
 /// # Returns
 /// A valid ExportMetricsServiceRequest with gauge, sum, and histogram metrics
-#[cfg(test)]
-pub(crate) fn make_test_otlp_metrics(
+pub fn make_test_otlp_metrics(
     n_resources: usize,
     n_metrics: usize,
     n_datapoints: usize,
@@ -404,8 +383,7 @@ pub(crate) fn make_test_otlp_metrics(
 }
 
 /// Create a test OTLP metrics request with timestamps starting at `base_time_ns`.
-#[cfg(test)]
-pub(crate) fn make_test_otlp_metrics_at(
+pub fn make_test_otlp_metrics_at(
     n_resources: usize,
     n_metrics: usize,
     n_datapoints: usize,
@@ -494,10 +472,9 @@ pub(crate) fn make_test_otlp_metrics_at(
 ///
 /// Produces one profile with one sample referencing a minimal stack and frame so that
 /// `batches.samples.num_rows() > 0` after OTLP conversion.
-#[cfg(test)]
-pub(crate) fn make_test_otlp_profiles_with_samples() -> ExportProfilesServiceRequest {
+pub fn make_test_otlp_profiles_with_samples() -> ExportProfilesServiceRequest {
     use opentelemetry_proto::tonic::profiles::v1development::{
-        Function, Line, Location, ProfilesDictionary, Sample, Stack,
+        Function, Line, Location, ProfilesDictionary, Stack,
     };
 
     // string_table[0] must be "".
@@ -551,7 +528,7 @@ pub(crate) fn make_test_otlp_profiles_with_samples() -> ExportProfilesServiceReq
         dropped_attributes_count: 0,
     };
 
-    let sample = Sample {
+    let sample = opentelemetry_proto::tonic::profiles::v1development::Sample {
         stack_index: 0,
         values: vec![1_000_000],
         ..Default::default()
@@ -589,8 +566,7 @@ pub(crate) fn make_test_otlp_profiles_with_samples() -> ExportProfilesServiceReq
 ///
 /// # Returns
 /// A valid ExportProfilesServiceRequest with CPU profile data
-#[cfg(test)]
-pub(crate) fn make_test_otlp_profiles(
+pub fn make_test_otlp_profiles(
     n_resources: usize,
     n_profiles: usize,
 ) -> ExportProfilesServiceRequest {
@@ -598,8 +574,7 @@ pub(crate) fn make_test_otlp_profiles(
 }
 
 /// Create a test OTLP profiles request with timestamps starting at `base_time_ns`.
-#[cfg(test)]
-pub(crate) fn make_test_otlp_profiles_at(
+pub fn make_test_otlp_profiles_at(
     n_resources: usize,
     n_profiles: usize,
     base_time_ns: u64,
@@ -685,8 +660,7 @@ pub(crate) fn make_test_otlp_profiles_at(
 }
 
 /// Assert that a RecordBatch has a specific column with the expected type
-#[cfg(test)]
-pub(crate) fn assert_batch_has_column(batch: &RecordBatch, name: &str, expected_type: &DataType) {
+pub fn assert_batch_has_column(batch: &RecordBatch, name: &str, expected_type: &DataType) {
     let schema = batch.schema();
     let field = schema.field_with_name(name).unwrap_or_else(|_| {
         panic!(
@@ -707,8 +681,7 @@ pub(crate) fn assert_batch_has_column(batch: &RecordBatch, name: &str, expected_
 }
 
 /// Assert that a RecordBatch has the expected number of rows
-#[cfg(test)]
-pub(crate) fn assert_batch_row_count(batch: &RecordBatch, expected: usize) {
+pub fn assert_batch_row_count(batch: &RecordBatch, expected: usize) {
     assert_eq!(
         batch.num_rows(),
         expected,
@@ -720,7 +693,6 @@ pub(crate) fn assert_batch_row_count(batch: &RecordBatch, expected: usize) {
 
 // Helper functions for generating realistic IDs
 
-#[cfg(test)]
 fn generate_trace_id(index: usize) -> Vec<u8> {
     let mut trace_id = vec![0u8; 16];
     let bytes = (index as u64).to_be_bytes();
@@ -728,7 +700,6 @@ fn generate_trace_id(index: usize) -> Vec<u8> {
     trace_id
 }
 
-#[cfg(test)]
 fn generate_span_id(index: usize) -> Vec<u8> {
     let mut span_id = vec![0u8; 8];
     let bytes = (index as u64).to_be_bytes();
@@ -736,7 +707,6 @@ fn generate_span_id(index: usize) -> Vec<u8> {
     span_id
 }
 
-#[cfg(test)]
 fn generate_profile_id(index: usize) -> Vec<u8> {
     let mut profile_id = vec![0u8; 16];
     let bytes = (index as u64).to_be_bytes();

@@ -8,9 +8,10 @@ authors.workspace = true
 description = "OTLP ingest, SeQL query, and management HTTP servers for Sequins"
 
 [dependencies]
+sequins-flight = { workspace = true }
 sequins-types   = { workspace = true }
-sequins-query   = { workspace = true }
 sequins-storage = { workspace = true }
+sequins-traits  = { workspace = true }
 
 # Arrow Flight
 arrow-flight = { workspace = true }
@@ -50,6 +51,8 @@ hex  = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+seql-substrait = { workspace = true }
+sequins-datafusion-backend = { workspace = true }
 datafusion = { workspace = true }
 object_store = { workspace = true }
 tempfile = { workspace = true }
