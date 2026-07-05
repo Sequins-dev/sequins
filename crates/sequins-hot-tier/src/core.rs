@@ -140,10 +140,13 @@ impl HotTier {
                     let f = Arc::clone(&f);
                     let flushed = Arc::clone(&flushed);
                     Box::pin(async move {
-                        // Advance the durable watermark only on a successful write.
-                        if f(signal, batch).await && max_wal_seq > 0 {
+                        // Advance the durable watermark only on a successful write,
+                        // and report success so the compactor evicts only durable data.
+                        let ok = f(signal, batch).await;
+                        if ok && max_wal_seq > 0 {
                             flushed[sig_idx].fetch_max(max_wal_seq, Ordering::AcqRel);
                         }
+                        ok
                     })
                 });
                 w
@@ -230,6 +233,22 @@ impl HotTier {
             w = w.min(boundary);
         }
         w
+    }
+
+    /// Force every content-addressed chain (resources, scopes, metric
+    /// descriptors, profile stacks/frames/mappings) to cold storage.
+    ///
+    /// These chains are excluded from the watermark (they de-dup on replay and
+    /// are low-volume, so they would otherwise pin it). Draining them at
+    /// checkpoint time — before the watermark is persisted — guarantees that the
+    /// metadata for every entry at or below the watermark is durable in cold, so
+    /// a restart never loses it even though it isn't tracked by the watermark.
+    pub async fn flush_content_addressed(&self) {
+        for signal in SignalType::all() {
+            if Self::is_content_addressed(*signal) {
+                self.chain(signal).flush_all().await;
+            }
+        }
     }
 
     /// Returns `true` if this metric ID is newly seen and has been recorded.

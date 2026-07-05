@@ -69,6 +69,11 @@ impl Storage {
     /// Safe to call repeatedly; a no-op until some data has been flushed to
     /// cold storage.
     pub async fn checkpoint(&self) -> Result<u64> {
+        // Force content-addressed metadata (resources/scopes/…) into cold first.
+        // It's excluded from the watermark, so this guarantees the metadata for
+        // every entry at or below the watermark is durable before we advance it.
+        self.hot_tier.flush_content_addressed().await;
+
         // `durable_watermark()` returns u64::MAX when nothing is outstanding;
         // cap it at the last assigned WAL sequence so we never claim beyond it.
         let w = self.hot_tier.durable_watermark().min(self.wal.last_seq());
