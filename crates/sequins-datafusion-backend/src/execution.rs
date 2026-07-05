@@ -58,6 +58,17 @@ pub(super) async fn execute_plan(
     }
 }
 
+/// Decode the [`seql_ext::QueryScope`] stamped in a plan, defaulting to `All`
+/// when the plan is unreadable or carries no explicit scope. Used to pick the
+/// scoped session context before execution.
+pub(crate) fn decode_plan_scope(plan_bytes: &[u8]) -> seql_ext::QueryScope {
+    Plan::decode(plan_bytes)
+        .ok()
+        .and_then(|plan| extract_seql_extension(&plan).ok())
+        .and_then(|ext| seql_ext::QueryScope::try_from(ext.scope).ok())
+        .unwrap_or(seql_ext::QueryScope::All)
+}
+
 /// Extract and decode the `SeqlExtension` from a Substrait plan.
 fn extract_seql_extension(plan: &Plan) -> Result<seql_ext::SeqlExtension, QueryError> {
     let ext_any = plan

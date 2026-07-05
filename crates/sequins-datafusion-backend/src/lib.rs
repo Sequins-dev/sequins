@@ -25,6 +25,7 @@
 //! - All signal types via `registration::SIGNAL_TABLE_DEFS` — union providers (hot + cold)
 
 use datafusion::execution::context::SessionContext;
+use seql_substrait::seql_ext::QueryScope;
 use sequins_storage::Storage;
 use sequins_traits::QueryError;
 use std::sync::Arc;
@@ -58,9 +59,10 @@ pub(crate) fn exec_err(msg: impl Into<String>) -> QueryError {
 /// (which lists and reads every cold-tier Vortex file just to check schema compatibility).
 pub struct DataFusionBackend {
     storage: Arc<Storage>,
-    /// Lazily-initialised, permanently-cached session context. Initialised once on
-    /// first query and reused for all subsequent queries.
-    ctx_cache: OnceCell<SessionContext>,
+    /// Lazily-initialised, permanently-cached session contexts — one per
+    /// [`QueryScope`] (indexed by `scope as usize`: All / HotOnly / ColdOnly).
+    /// Each registers the appropriate tier providers and is reused across queries.
+    ctx_cache: [OnceCell<SessionContext>; 3],
 }
 
 impl DataFusionBackend {
@@ -68,22 +70,29 @@ impl DataFusionBackend {
     pub fn new(storage: Arc<Storage>) -> Self {
         Self {
             storage,
-            ctx_cache: OnceCell::new(),
+            ctx_cache: std::array::from_fn(|_| OnceCell::new()),
         }
     }
 
-    /// Return the shared `SessionContext`, initialising it on first call.
+    /// Return the `All`-scope session context (used for compiling SeQL — the
+    /// scope only affects execution). Distributed execution selects a scoped
+    /// context via [`Self::session_ctx_for_scope`].
     async fn make_session_ctx(&self) -> Result<SessionContext, QueryError> {
-        // get_or_try_init ensures the expensive setup runs only once, even under
-        // concurrent callers — subsequent calls return a clone of the cached context.
-        let ctx = self
-            .ctx_cache
-            .get_or_try_init(|| self.build_session_ctx())
+        self.session_ctx_for_scope(QueryScope::All).await
+    }
+
+    /// Return the cached `SessionContext` for `scope`, initialising it on first use.
+    pub(crate) async fn session_ctx_for_scope(
+        &self,
+        scope: QueryScope,
+    ) -> Result<SessionContext, QueryError> {
+        let ctx = self.ctx_cache[scope as usize]
+            .get_or_try_init(|| self.build_session_ctx(scope))
             .await?;
         Ok(ctx.clone())
     }
 
-    async fn build_session_ctx(&self) -> Result<SessionContext, QueryError> {
+    async fn build_session_ctx(&self, scope: QueryScope) -> Result<SessionContext, QueryError> {
         let ctx = SessionContext::new();
         sequins_attribute_codec::register_overflow_udfs(&ctx);
         let hot_tier = self.storage.hot_tier_arc();
@@ -104,6 +113,7 @@ impl DataFusionBackend {
                 hot_tier.clone(),
                 base_path,
                 cold_tier.clone(),
+                scope,
             )
             .await?;
         }

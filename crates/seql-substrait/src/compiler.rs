@@ -113,6 +113,9 @@ pub async fn compile_ast(ast: QueryAst, ctx: &SessionContext) -> Result<Vec<u8>,
         auxiliary_aliases,
         auxiliary_signals,
         auxiliary_plan_bytes,
+        // Scope defaults to `All`; the distributed coordinator overrides it
+        // per-leg via `set_plan_scope`.
+        scope: crate::seql_ext::QueryScope::All as i32,
     };
 
     // Embed SeqlExtension in advanced_extensions.enhancement
@@ -124,6 +127,38 @@ pub async fn compile_ast(ast: QueryAst, ctx: &SessionContext) -> Result<Vec<u8>,
         optimization: vec![],
     });
 
+    Ok(plan.encode_to_vec())
+}
+
+/// Override the query scope stamped in a compiled plan's `SeqlExtension`.
+///
+/// The distributed query coordinator uses this to derive a `HotOnly` plan for
+/// peer fan-out and a `ColdOnly` plan for its own shared-cold read from a single
+/// client-supplied plan. Auxiliary plans need no change: they execute against
+/// the same (scoped) session context as the primary plan.
+pub fn set_plan_scope(
+    plan_bytes: &[u8],
+    scope: crate::seql_ext::QueryScope,
+) -> Result<Vec<u8>, QueryError> {
+    use datafusion_substrait::substrait::proto::Plan;
+
+    let mut plan: Plan = Message::decode(plan_bytes).map_err(|e| QueryError::Execution {
+        message: format!("set_plan_scope: failed to decode plan: {e}"),
+    })?;
+    let ext_any = plan
+        .advanced_extensions
+        .as_mut()
+        .and_then(|adv| adv.enhancement.as_mut())
+        .ok_or_else(|| QueryError::Execution {
+            message: "set_plan_scope: plan missing SeqlExtension enhancement".to_string(),
+        })?;
+    let mut ext = crate::seql_ext::SeqlExtension::decode(&ext_any.value[..]).map_err(|e| {
+        QueryError::Execution {
+            message: format!("set_plan_scope: failed to decode SeqlExtension: {e}"),
+        }
+    })?;
+    ext.scope = scope as i32;
+    ext_any.value = ext.encode_to_vec().into();
     Ok(plan.encode_to_vec())
 }
 
