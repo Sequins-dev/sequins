@@ -183,6 +183,7 @@ impl Storage {
                 min_timestamp: 0,
                 max_timestamp: i64::MAX,
                 row_count: batch.num_rows(),
+                ..Default::default()
             };
             self.hot_tier
                 .chain(&SignalType::Spans)

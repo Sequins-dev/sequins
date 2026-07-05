@@ -53,11 +53,18 @@ impl Storage {
                         if let Err(e) = storage.run_maintenance_internal().await {
                             eprintln!("Background flush error: {}", e);
                         }
+                        // Advance the durable watermark + compact the WAL.
+                        if let Err(e) = storage.checkpoint().await {
+                            tracing::warn!(error = %e, "periodic checkpoint failed");
+                        }
                     }
                     _ = shutdown_notify.notified() => {
-                        // Graceful shutdown: run one final flush
+                        // Graceful shutdown: run one final flush + checkpoint
                         if let Err(e) = storage.run_maintenance_internal().await {
                             eprintln!("Final flush error during shutdown: {}", e);
+                        }
+                        if let Err(e) = storage.checkpoint().await {
+                            tracing::warn!(error = %e, "shutdown checkpoint failed");
                         }
                         break;
                     }

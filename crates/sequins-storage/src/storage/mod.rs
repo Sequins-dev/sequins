@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 // Module declarations
 mod accessors;
 mod background;
+mod checkpoint;
 mod constructor;
 mod health;
 mod ingest;
@@ -44,6 +45,14 @@ pub struct Storage {
     pub(super) health_config_path: PathBuf,
     /// Wall-clock time provider (injectable for deterministic testing)
     pub(crate) clock: Arc<dyn NowTime>,
+    /// WAL sequence to use for the entry currently being replayed on startup.
+    ///
+    /// `0` during normal operation (ingest appends to the WAL and uses the
+    /// returned seq). Set to a non-zero seq only while `replay_wal` re-applies
+    /// a persisted entry, so ingest reuses that seq instead of re-appending.
+    /// Replay runs single-threaded during construction, before any server
+    /// starts, so this needs no stronger synchronisation.
+    pub(super) replay_seq: std::sync::atomic::AtomicU64,
 }
 
 /// Statistics about maintenance operations

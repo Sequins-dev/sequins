@@ -35,7 +35,7 @@ use tokio::sync::mpsc;
 // ---------------------------------------------------------------------------
 
 /// Metadata for a single batch in the chain.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct BatchMeta {
     /// Earliest timestamp (nanoseconds) in the batch.
     pub min_timestamp: i64,
@@ -43,6 +43,14 @@ pub struct BatchMeta {
     pub max_timestamp: i64,
     /// Number of rows in the batch.
     pub row_count: usize,
+    /// Highest WAL sequence number whose data is contained in this batch.
+    ///
+    /// Used to advance the durable cold-flush watermark: when this batch is
+    /// flushed to cold storage, every WAL entry up to `max_wal_seq` (for this
+    /// signal) is durably persisted. `0` means "not tracked" (e.g. replay of
+    /// content-addressed metadata, or synthetic test batches) and never
+    /// constrains the watermark.
+    pub max_wal_seq: u64,
 }
 
 impl BatchMeta {
@@ -64,6 +72,7 @@ impl BatchMeta {
             min_timestamp: a.min_timestamp.min(b.min_timestamp),
             max_timestamp: a.max_timestamp.max(b.max_timestamp),
             row_count: a.row_count + b.row_count,
+            max_wal_seq: a.max_wal_seq.max(b.max_wal_seq),
         }
     }
 }
@@ -394,6 +403,7 @@ impl TableProvider for BatchChain {
 pub type ColdWriterFn = Arc<
     dyn Fn(
             Arc<RecordBatch>,
+            u64,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>
         + Send
         + Sync,
@@ -569,9 +579,9 @@ pub async fn compaction_loop(
         };
 
         // Await the cold flush AFTER the guard and all Shared<> pointers are gone.
-        if let Some((flush_batch, _flush_meta)) = flush_args {
+        if let Some((flush_batch, flush_meta)) = flush_args {
             if let Some(ref writer) = cold_writer_fn {
-                writer(flush_batch).await;
+                writer(flush_batch, flush_meta.max_wal_seq).await;
             }
         }
     }
@@ -613,6 +623,7 @@ mod tests {
             min_timestamp: min_ts,
             max_timestamp: max_ts,
             row_count,
+            ..Default::default()
         }
     }
 
