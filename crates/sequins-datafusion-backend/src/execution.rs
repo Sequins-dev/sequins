@@ -217,6 +217,114 @@ async fn consume_and_execute_root(
     Ok(batch)
 }
 
+/// How to frame the single aggregated batch produced by [`execute_over_memtables`].
+#[derive(Clone, Copy, Debug)]
+pub enum MemtableFraming {
+    /// One-shot snapshot: `Schema` + `Data` (if non-empty) + `Complete`.
+    Snapshot,
+    /// First emission of a live re-aggregation: `Schema` + `Replace` (the stream
+    /// stays open, so no terminal `Complete`).
+    LiveInitial,
+    /// A subsequent live re-aggregation: `Replace` only (schema already sent).
+    LiveReplace,
+}
+
+/// Run `plan_bytes` over `ctx` — whose signal tables are caller-supplied
+/// `MemTable`s — and frame the single aggregated result per `framing`.
+///
+/// The distributed coordinator uses this to re-run an aggregating plan over the
+/// union of raw rows gathered from every cluster node (primary-signal
+/// aggregations only; the coordinator keeps merge/navigate aggregations local).
+/// The whole consume → execute → concat path is shared with the snapshot path
+/// via [`consume_and_execute_root`]; only the framing differs.
+pub(crate) async fn execute_over_memtables(
+    plan_bytes: Vec<u8>,
+    ctx: SessionContext,
+    framing: MemtableFraming,
+    watermark_ns: u64,
+) -> Result<SeqlStream, QueryError> {
+    let start = Instant::now();
+
+    let plan: Plan = Message::decode(&plan_bytes[..])
+        .map_err(|e| exec_err(format!("execute_over_memtables: decode plan: {}", e)))?;
+    let ext = extract_seql_extension(&plan)?;
+    let response_shape = seql_ast::schema::ResponseShape::from_shape_str(&ext.response_shape)
+        .unwrap_or(seql_ast::schema::ResponseShape::Table);
+
+    // Consume the primary relation to a logical plan.
+    let extensions = Extensions::try_from(&plan.extensions)
+        .map_err(|e| exec_err(format!("execute_over_memtables: extensions: {}", e)))?;
+    let rel = plan
+        .relations
+        .first()
+        .and_then(|pr| pr.rel_type.as_ref())
+        .and_then(get_rel)
+        .ok_or_else(|| exec_err("execute_over_memtables: plan has no primary relation"))?;
+    let ctx_state = ctx.state();
+    let consumer = DefaultSubstraitConsumer::new(&extensions, &ctx_state);
+    let mut logical_plan = consumer
+        .consume_rel(rel)
+        .await
+        .map_err(|e| exec_err(format!("execute_over_memtables: consume_rel: {}", e)))?;
+    drop(ctx_state);
+
+    // A live re-aggregation must count rows ingested *after* the query opened,
+    // but the compiled plan carries a `time <= <open-time>` upper bound that
+    // would reject them (the same bound the live Append path strips). Snapshot
+    // framing keeps the bound (it wants the point-in-time result).
+    if matches!(
+        framing,
+        MemtableFraming::LiveInitial | MemtableFraming::LiveReplace
+    ) {
+        let time_col = time_column_for_signal(signal_from_str(&ext.signal));
+        logical_plan = strip_plan_time_upper_bound(logical_plan, time_col)?;
+    }
+
+    let (schema, batch) = execute_logical_plan_to_batch(&ctx, logical_plan).await?;
+    let col_defs = crate::arrow_convert::schema_to_col_defs(&schema);
+    let rows = batch.num_rows() as u64;
+
+    let mut frames: Vec<Result<FlightData, QueryError>> = Vec::new();
+    match framing {
+        MemtableFraming::Snapshot => {
+            frames.push(Ok(schema_flight_data(
+                None,
+                schema,
+                response_shape,
+                col_defs,
+                watermark_ns,
+            )));
+            if rows > 0 {
+                frames.push(Ok(data_flight_data(None, &batch)));
+            }
+            frames.push(Ok(complete_flight_data(QueryStats {
+                execution_time_us: start.elapsed().as_micros() as u64,
+                rows_scanned: rows,
+                bytes_read: 0,
+                rows_returned: rows,
+                warning_count: 0,
+            })));
+        }
+        MemtableFraming::LiveInitial => {
+            frames.push(Ok(schema_flight_data(
+                None,
+                schema,
+                response_shape,
+                col_defs,
+                watermark_ns,
+            )));
+            // Emit the initial aggregate as a Replace so the client seeds its
+            // state even when the aggregate is currently empty.
+            frames.push(Ok(replace_flight_data(None, &batch, watermark_ns)));
+        }
+        MemtableFraming::LiveReplace => {
+            frames.push(Ok(replace_flight_data(None, &batch, watermark_ns)));
+        }
+    }
+
+    Ok(Box::pin(stream::iter(frames)))
+}
+
 /// Execute each auxiliary plan and append `schema_flight_data` + `data_flight_data`
 /// frames to `frames`.
 ///
@@ -696,6 +804,30 @@ fn plan_has_aggregation(plan: &LogicalPlan) -> bool {
 /// For live streaming there is no meaningful upper bound — new data is always "now" — so
 /// we strip `<= lit(...)` predicates on the time column before the filter is compiled into
 /// a `PhysicalExpr`.
+/// Rewrite every `Filter` in a logical plan, stripping the time-column upper
+/// bound (`time <= <lit>`) from its predicate. Used by the memtable
+/// re-aggregation path so a live aggregate counts data ingested after the query
+/// opened (see [`strip_time_upper_bound`], which does the per-expression work).
+fn strip_plan_time_upper_bound(
+    plan: LogicalPlan,
+    time_col: Option<&str>,
+) -> Result<LogicalPlan, QueryError> {
+    use datafusion::common::tree_node::{Transformed, TreeNode};
+    use datafusion::logical_expr::Filter;
+
+    let rewritten = plan
+        .transform_up(|node| match node {
+            LogicalPlan::Filter(filter) => {
+                let predicate = strip_time_upper_bound(filter.predicate.clone(), time_col);
+                let new_filter = Filter::try_new(predicate, filter.input)?;
+                Ok(Transformed::yes(LogicalPlan::Filter(new_filter)))
+            }
+            other => Ok(Transformed::no(other)),
+        })
+        .map_err(|e| exec_err(format!("strip_plan_time_upper_bound: {}", e)))?;
+    Ok(rewritten.data)
+}
+
 fn strip_time_upper_bound(expr: Expr, time_col: Option<&str>) -> Expr {
     let Some(col_name) = time_col else {
         return expr;

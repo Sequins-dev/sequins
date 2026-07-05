@@ -38,6 +38,8 @@ mod registration;
 mod trait_impls;
 pub(crate) mod union_provider;
 
+pub use execution::MemtableFraming;
+
 /// Convenience constructor for `QueryError::Execution`
 pub(crate) fn exec_err(msg: impl Into<String>) -> QueryError {
     QueryError::Execution {
@@ -90,6 +92,26 @@ impl DataFusionBackend {
             .get_or_try_init(|| self.build_session_ctx(scope))
             .await?;
         Ok(ctx.clone())
+    }
+
+    /// Re-run an aggregating plan over caller-supplied in-memory batches per
+    /// signal table, framing the result per `framing`.
+    ///
+    /// The distributed coordinator gathers the raw rows of the plan's primary
+    /// signal from every cluster node, then calls this to re-aggregate over the
+    /// union — so a cluster-wide `count`/percentile/health rollup is correct even
+    /// though each node only holds its own hot data. `watermark_ns` is stamped on
+    /// the emitted `Schema`/`Replace` frames. Signals not present in `tables` are
+    /// registered as empty tables so every table reference still resolves.
+    pub async fn execute_over_memtables(
+        &self,
+        tables: Vec<(String, Vec<arrow::record_batch::RecordBatch>)>,
+        plan_bytes: Vec<u8>,
+        framing: MemtableFraming,
+        watermark_ns: u64,
+    ) -> Result<sequins_traits::SeqlStream, QueryError> {
+        let ctx = registration::build_memtable_ctx(&tables)?;
+        execution::execute_over_memtables(plan_bytes, ctx, framing, watermark_ns).await
     }
 
     async fn build_session_ctx(&self, scope: QueryScope) -> Result<SessionContext, QueryError> {

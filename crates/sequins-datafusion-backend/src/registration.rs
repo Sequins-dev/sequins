@@ -169,6 +169,45 @@ pub(super) async fn register_union_table(
     register(ctx, def.table_name, provider)
 }
 
+/// Build a session context whose signal tables are caller-supplied in-memory
+/// [`MemTable`]s (an [`EmptyTable`] for any signal not supplied), for the
+/// distributed coordinator to re-run an aggregating plan over rows gathered from
+/// the whole cluster. Overflow UDFs are registered exactly as the tier-backed
+/// context so `attr.*` aggregations still resolve.
+///
+/// Each supplied table's batches must share the canonical signal schema
+/// (`schema_fn`) — they do, because they come from a raw scan of that same
+/// signal — so column indices in the plan's `read` relation stay aligned.
+pub(super) fn build_memtable_ctx(
+    tables: &[(String, Vec<arrow::record_batch::RecordBatch>)],
+) -> Result<SessionContext, QueryError> {
+    use datafusion::datasource::MemTable;
+
+    let ctx = SessionContext::new();
+    sequins_attribute_codec::register_overflow_udfs(&ctx);
+
+    let provided: std::collections::HashMap<&str, &Vec<arrow::record_batch::RecordBatch>> =
+        tables.iter().map(|(n, b)| (n.as_str(), b)).collect();
+
+    for def in SIGNAL_TABLE_DEFS {
+        let schema = (def.schema_fn)();
+        let provider: Arc<dyn TableProvider> = match provided.get(def.table_name) {
+            Some(batches) if !batches.is_empty() => Arc::new(
+                MemTable::try_new(schema, vec![(*batches).clone()]).map_err(|e| {
+                    exec_err(format!(
+                        "Failed to build MemTable for {}: {}",
+                        def.table_name, e
+                    ))
+                })?,
+            ),
+            _ => Arc::new(EmptyTable::new(schema)),
+        };
+        register(&ctx, def.table_name, provider)?;
+    }
+
+    Ok(ctx)
+}
+
 /// Register a provider under `table_name`, mapping registration errors.
 fn register(
     ctx: &SessionContext,
