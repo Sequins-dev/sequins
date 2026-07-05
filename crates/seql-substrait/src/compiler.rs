@@ -116,6 +116,7 @@ pub async fn compile_ast(ast: QueryAst, ctx: &SessionContext) -> Result<Vec<u8>,
         // Scope defaults to `All`; the distributed coordinator overrides it
         // per-leg via `set_plan_scope`.
         scope: crate::seql_ext::QueryScope::All as i32,
+        aggregated: ast_is_aggregated(&ast),
     };
 
     // Embed SeqlExtension in advanced_extensions.enhancement
@@ -130,6 +131,17 @@ pub async fn compile_ast(ast: QueryAst, ctx: &SessionContext) -> Result<Vec<u8>,
     Ok(plan.encode_to_vec())
 }
 
+/// Whether a query aggregates or de-duplicates rows (an `Aggregate` or `Unique`
+/// stage in the main pipeline or any binding), and so is not row-distributive.
+fn ast_is_aggregated(ast: &QueryAst) -> bool {
+    fn has_agg(stages: &[Stage]) -> bool {
+        stages
+            .iter()
+            .any(|s| matches!(s, Stage::Aggregate(_) | Stage::Unique(_)))
+    }
+    has_agg(&ast.stages) || ast.bindings.iter().any(|b| has_agg(&b.stages))
+}
+
 /// Override the query scope stamped in a compiled plan's `SeqlExtension`.
 ///
 /// The distributed query coordinator uses this to derive a `HotOnly` plan for
@@ -140,26 +152,92 @@ pub fn set_plan_scope(
     plan_bytes: &[u8],
     scope: crate::seql_ext::QueryScope,
 ) -> Result<Vec<u8>, QueryError> {
+    rewrite_seql_ext(plan_bytes, |ext| ext.scope = scope as i32)
+}
+
+/// Override the query mode (live vs snapshot) stamped in a compiled plan.
+///
+/// The coordinator forces its cold-tier leg to snapshot mode even for a live
+/// query — cold data is historical and never streams, and a live cold leg would
+/// otherwise re-emit the local hot broadcast (duplicating the hot leg).
+pub fn set_plan_mode(plan_bytes: &[u8], live: bool) -> Result<Vec<u8>, QueryError> {
+    let mode = if live {
+        crate::seql_ext::QueryMode::Live
+    } else {
+        crate::seql_ext::QueryMode::Snapshot
+    };
+    rewrite_seql_ext(plan_bytes, |ext| ext.mode = mode as i32)
+}
+
+/// Decode a plan, mutate its `SeqlExtension` in place via `f`, and re-encode.
+fn rewrite_seql_ext(
+    plan_bytes: &[u8],
+    f: impl FnOnce(&mut crate::seql_ext::SeqlExtension),
+) -> Result<Vec<u8>, QueryError> {
     use datafusion_substrait::substrait::proto::Plan;
 
     let mut plan: Plan = Message::decode(plan_bytes).map_err(|e| QueryError::Execution {
-        message: format!("set_plan_scope: failed to decode plan: {e}"),
+        message: format!("rewrite_seql_ext: failed to decode plan: {e}"),
     })?;
     let ext_any = plan
         .advanced_extensions
         .as_mut()
         .and_then(|adv| adv.enhancement.as_mut())
         .ok_or_else(|| QueryError::Execution {
-            message: "set_plan_scope: plan missing SeqlExtension enhancement".to_string(),
+            message: "rewrite_seql_ext: plan missing SeqlExtension enhancement".to_string(),
         })?;
     let mut ext = crate::seql_ext::SeqlExtension::decode(&ext_any.value[..]).map_err(|e| {
         QueryError::Execution {
-            message: format!("set_plan_scope: failed to decode SeqlExtension: {e}"),
+            message: format!("rewrite_seql_ext: failed to decode SeqlExtension: {e}"),
         }
     })?;
-    ext.scope = scope as i32;
+    f(&mut ext);
     ext_any.value = ext.encode_to_vec().into();
     Ok(plan.encode_to_vec())
+}
+
+/// Routing metadata read from a compiled plan's `SeqlExtension` — enough for the
+/// distributed query coordinator to decide fan-out strategy without a full
+/// Substrait decode.
+#[derive(Debug, Clone)]
+pub struct PlanMeta {
+    /// Which tiers the plan scans (`All` for a client query; a coordinator sets
+    /// `HotOnly`/`ColdOnly` on the legs it fans out).
+    pub scope: crate::seql_ext::QueryScope,
+    /// True for a live (streaming) query, false for a one-shot snapshot.
+    pub live: bool,
+    /// True when the query aggregates/de-duplicates (needs coordinator recompute).
+    pub aggregated: bool,
+    /// Primary signal name (e.g. `"logs"`).
+    pub signal: String,
+}
+
+/// Decode a compiled plan's [`PlanMeta`].
+pub fn decode_plan_meta(plan_bytes: &[u8]) -> Result<PlanMeta, QueryError> {
+    use datafusion_substrait::substrait::proto::Plan;
+
+    let plan: Plan = Message::decode(plan_bytes).map_err(|e| QueryError::Execution {
+        message: format!("decode_plan_meta: failed to decode plan: {e}"),
+    })?;
+    let ext_any = plan
+        .advanced_extensions
+        .as_ref()
+        .and_then(|adv| adv.enhancement.as_ref())
+        .ok_or_else(|| QueryError::Execution {
+            message: "decode_plan_meta: plan missing SeqlExtension enhancement".to_string(),
+        })?;
+    let ext = crate::seql_ext::SeqlExtension::decode(&ext_any.value[..]).map_err(|e| {
+        QueryError::Execution {
+            message: format!("decode_plan_meta: failed to decode SeqlExtension: {e}"),
+        }
+    })?;
+    Ok(PlanMeta {
+        scope: crate::seql_ext::QueryScope::try_from(ext.scope)
+            .unwrap_or(crate::seql_ext::QueryScope::All),
+        live: ext.mode == crate::seql_ext::QueryMode::Live as i32,
+        aggregated: ext.aggregated,
+        signal: ext.signal,
+    })
 }
 
 /// Apply one pipeline stage that is common to both the primary plan and merge-aux paths.

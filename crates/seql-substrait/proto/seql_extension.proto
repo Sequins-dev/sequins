@@ -34,6 +34,12 @@ message SeqlExtension {
   // reads shared cold storage once (COLD_ONLY). ALL (the default) = hot + cold,
   // the single-node behaviour.
   QueryScope scope = 9;
+  // True when the query is not a pure row transform — it aggregates or
+  // de-duplicates rows (Aggregate / Unique stages) — so a distributed
+  // coordinator cannot simply union per-node rows and must recompute over the
+  // gathered union. False for filter/project/compute queries, which are
+  // row-distributive and can be merged directly.
+  bool aggregated = 10;
 }
 
 // Time range specification
