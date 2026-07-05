@@ -1093,24 +1093,22 @@ mod tests {
         let mut append_rows = 0u64;
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         while std::time::Instant::now() < deadline {
-            match tokio::time::timeout(std::time::Duration::from_millis(50), no_match_stream.next())
-                .await
+            if let Ok(Some(Ok(fd))) =
+                tokio::time::timeout(std::time::Duration::from_millis(50), no_match_stream.next())
+                    .await
             {
-                Ok(Some(Ok(fd))) => {
-                    if let SeqlMetadata::Append { .. } = get_metadata(&fd) {
-                        // Count the rows decoded from the IPC body.
-                        if !fd.data_body.is_empty() {
-                            use arrow::ipc::reader::StreamReader;
-                            let cursor = std::io::Cursor::new(&fd.data_body[..]);
-                            if let Ok(reader) = StreamReader::try_new(cursor, None) {
-                                for batch in reader.flatten() {
-                                    append_rows += batch.num_rows() as u64;
-                                }
+                if let SeqlMetadata::Append { .. } = get_metadata(&fd) {
+                    // Count the rows decoded from the IPC body.
+                    if !fd.data_body.is_empty() {
+                        use arrow::ipc::reader::StreamReader;
+                        let cursor = std::io::Cursor::new(&fd.data_body[..]);
+                        if let Ok(reader) = StreamReader::try_new(cursor, None) {
+                            for batch in reader.flatten() {
+                                append_rows += batch.num_rows() as u64;
                             }
                         }
                     }
                 }
-                _ => {}
             }
         }
         assert_eq!(

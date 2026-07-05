@@ -8,6 +8,16 @@ pub use sequins_hot_tier::HotTierConfig;
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct StorageConfig {
+    /// Stable identifier for this node.
+    ///
+    /// Used as the per-node object-store prefix (`{uri}/{node_id}/…`) so that
+    /// multiple nodes can share one bucket without WAL-sequence or file
+    /// collisions. Each node owns its own prefix for writes; readers union
+    /// across all node prefixes. Defaults to `"local"` for single-node
+    /// (embedded) use — **multi-node deployments must set a unique value.**
+    #[serde(default)]
+    pub node_id: Option<String>,
+
     /// Hot tier configuration
     pub hot_tier: HotTierConfig,
 
@@ -16,6 +26,13 @@ pub struct StorageConfig {
 
     /// Data lifecycle configuration
     pub lifecycle: LifecycleConfig,
+}
+
+impl StorageConfig {
+    /// The effective node identifier: the configured `node_id`, or `"local"`.
+    pub fn effective_node_id(&self) -> &str {
+        self.node_id.as_deref().unwrap_or("local")
+    }
 }
 
 /// Data lifecycle configuration

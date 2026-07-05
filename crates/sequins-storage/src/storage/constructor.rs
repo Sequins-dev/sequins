@@ -26,7 +26,19 @@ impl Storage {
     ///
     /// Pass `Arc::new(MockNowTime::new(base_ns))` in tests to make
     /// time-dependent logic fully deterministic.
-    pub async fn new_with_clock(config: StorageConfig, clock: Arc<dyn NowTime>) -> Result<Self> {
+    pub async fn new_with_clock(
+        mut config: StorageConfig,
+        clock: Arc<dyn NowTime>,
+    ) -> Result<Self> {
+        // Per-node object-store prefix: every node writes only under
+        // `{uri}/{node_id}/…` so multiple nodes can share one bucket without
+        // WAL-sequence or file collisions. Everything downstream (cold tier,
+        // WAL, series index, retention, health config) derives its paths from
+        // `cold_tier.uri`, so prefixing it once here threads through uniformly.
+        let node_id = config.effective_node_id().to_string();
+        config.cold_tier.uri =
+            format!("{}/{}", config.cold_tier.uri.trim_end_matches('/'), node_id);
+
         let cold_tier_inner = ColdTier::new(config.cold_tier.clone())?;
         let cold_tier = Arc::new(RwLock::new(cold_tier_inner));
 
@@ -85,6 +97,7 @@ impl Storage {
 
         Ok(Self {
             config,
+            node_id,
             hot_tier,
             cold_tier,
             wal,

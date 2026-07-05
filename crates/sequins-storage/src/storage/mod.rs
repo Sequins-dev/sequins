@@ -27,6 +27,8 @@ mod tests;
 /// Tiered storage combining hot (in-memory) and cold (Parquet) tiers
 pub struct Storage {
     pub(super) config: StorageConfig,
+    /// Stable node identifier; also the object-store prefix this node writes under.
+    pub(super) node_id: String,
     pub(super) hot_tier: Arc<HotTier>,
     pub(super) cold_tier: Arc<RwLock<ColdTier>>,
     // Write-Ahead Log for durable ingestion

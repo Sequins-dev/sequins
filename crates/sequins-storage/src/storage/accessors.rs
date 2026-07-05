@@ -15,6 +15,14 @@ impl Storage {
         &self.config
     }
 
+    /// The stable node identifier for this storage instance.
+    ///
+    /// This is also the object-store prefix this node writes under
+    /// (`{uri}/{node_id}/…`).
+    pub fn node_id(&self) -> &str {
+        &self.node_id
+    }
+
     /// Get the shutdown notify handle
     pub fn shutdown_notify(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.shutdown_notify)
