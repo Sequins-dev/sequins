@@ -1,14 +1,13 @@
-//! Sequins CLI — query, ingest, and daemon operations
+//! Sequins CLI — query, ingest, and configuration operations
+//!
+//! The query-serving daemon lives in the production distribution (`sequins-pro`);
+//! this CLI provides client and local-storage utilities only.
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use sequins_datafusion_backend::DataFusionBackend;
-use sequins_server::{flight_service_server, ManagementServer, OtlpServer};
-use sequins_storage::{Storage, StorageConfig};
+use sequins_storage::StorageConfig;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tracing::{error, info};
 
 mod ingest;
 mod query;
@@ -16,7 +15,7 @@ mod storage;
 
 #[derive(Parser, Debug)]
 #[command(name = "sequins")]
-#[command(about = "Sequins CLI - query, ingest, and daemon operations")]
+#[command(about = "Sequins CLI - query, ingest, and configuration operations")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -25,29 +24,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Start the daemon with all servers
-    Start {
-        /// Path to storage configuration file
-        #[arg(short, long, default_value = "sequins-storage.yaml")]
-        config: PathBuf,
-
-        /// Arrow Flight SQL gRPC bind address
-        #[arg(long, default_value = "0.0.0.0:4319")]
-        flight_addr: String,
-
-        /// Management API bind address
-        #[arg(long, default_value = "0.0.0.0:8081")]
-        management_addr: String,
-
-        /// OTLP gRPC bind address
-        #[arg(long, default_value = "0.0.0.0:4317")]
-        otlp_grpc_addr: String,
-
-        /// OTLP HTTP bind address
-        #[arg(long, default_value = "0.0.0.0:4318")]
-        otlp_http_addr: String,
-    },
-
     /// Execute a SeQL query
     Query {
         /// SeQL query string
@@ -145,69 +121,6 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Start {
-            config,
-            flight_addr,
-            management_addr,
-            otlp_grpc_addr,
-            otlp_http_addr,
-        } => {
-            info!("Starting Sequins Daemon");
-
-            let storage_config = load_config(&config)?;
-            let storage = Arc::new(
-                Storage::new(storage_config)
-                    .await
-                    .context("Failed to initialize storage")?,
-            );
-
-            let flush_handle = Storage::start_background_flush(Arc::clone(&storage));
-
-            // Wrap storage in DataFusion backend for query execution
-            let backend: Arc<dyn sequins_traits::QueryExec> =
-                Arc::new(DataFusionBackend::new(Arc::clone(&storage)));
-
-            let flight_svc = flight_service_server(backend);
-            let management_server = ManagementServer::new(Arc::clone(&storage));
-            let otlp_server = OtlpServer::new(Arc::clone(&storage));
-
-            info!("Flight SQL gRPC on {}", flight_addr);
-            info!("Management API on {}", management_addr);
-            info!("OTLP gRPC on {}", otlp_grpc_addr);
-            info!("OTLP HTTP on {}", otlp_http_addr);
-
-            let flight_listener = tokio::net::TcpListener::bind(&flight_addr)
-                .await
-                .with_context(|| format!("Failed to bind Flight SQL to {}", flight_addr))?;
-            let flight_incoming = tokio_stream::wrappers::TcpListenerStream::new(flight_listener);
-
-            tokio::select! {
-                result = tonic::transport::Server::builder()
-                    .add_service(flight_svc)
-                    .serve_with_incoming(flight_incoming) =>
-                {
-                    error!("Flight SQL server stopped: {:?}", result);
-                    result.context("Flight SQL server error")?;
-                }
-                result = management_server.serve(&management_addr) => {
-                    error!("Management server stopped: {:?}", result);
-                    result.context("Management server error")?;
-                }
-                result = otlp_server.serve(&otlp_grpc_addr, &otlp_http_addr) => {
-                    error!("OTLP server stopped: {:?}", result);
-                    result.context("OTLP server error")?;
-                }
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Shutdown signal received");
-                    storage.shutdown();
-                    let _ = flush_handle.await;
-                    info!("Shutdown complete");
-                }
-            }
-
-            Ok(())
-        }
-
         Command::Query {
             query: query_str,
             target,
@@ -261,32 +174,6 @@ fn load_config(path: &PathBuf) -> Result<StorageConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_cli_parse_start_command() {
-        let args = vec![
-            "sequins",
-            "start",
-            "--config",
-            "test-config.yaml",
-            "--flight-addr",
-            "127.0.0.1:4319",
-        ];
-        let cli = Cli::try_parse_from(args);
-        assert!(cli.is_ok(), "Expected start command to parse successfully");
-
-        match cli.unwrap().command {
-            Command::Start {
-                config,
-                flight_addr,
-                ..
-            } => {
-                assert_eq!(config, PathBuf::from("test-config.yaml"));
-                assert_eq!(flight_addr, "127.0.0.1:4319");
-            }
-            _ => panic!("Expected Start command"),
-        }
-    }
 
     #[test]
     fn test_cli_parse_query_command() {

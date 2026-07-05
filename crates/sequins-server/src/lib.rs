@@ -1,16 +1,15 @@
-//! sequins-server — Network servers for Sequins
+//! sequins-server — OTLP ingest server for Sequins
 //!
 //! Provides:
-//! - `OtlpServer` — OTLP/HTTP ingest server (port 4318)
-//! - `ManagementServer` — HTTP management API (port 8081)
-//! - `FlightSqlServer` — Arrow Flight SQL gRPC server (port 4319)
+//! - `OtlpServer` — OTLP/gRPC (port 4317) + OTLP/HTTP (port 4318) ingest receiver
+//!
+//! This crate deliberately contains **only** the OTLP ingest surface. The
+//! embedded/desktop app (via `sequins-ffi`) starts this server and nothing else;
+//! it queries the engine in-process. The query-serving (Arrow Flight SQL) and
+//! management HTTP servers live in the production distribution (`sequins-pro`).
 
 pub mod error;
-pub mod flight;
-pub mod management;
 pub mod otlp;
 
 pub use error::{Error, Result};
-pub use flight::{flight_service_server, SequinsFlightSqlService};
-pub use management::ManagementServer;
 pub use otlp::OtlpServer;

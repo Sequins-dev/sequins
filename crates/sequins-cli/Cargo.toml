@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "CLI for Sequins - query, ingest, and daemon operations"
+description = "CLI for Sequins - query, ingest, and configuration operations"
 
 [[bin]]
 name = "sequins"
@@ -18,10 +18,8 @@ sequins-flight             = { workspace = true }
 sequins-types              = { workspace = true }
 sequins-storage            = { workspace = true }
 sequins-datafusion-backend = { workspace = true }
-sequins-server             = { workspace = true }
 sequins-client             = { workspace = true }
 sequins-traits             = { workspace = true }
-arrow-flight    = { workspace = true }
 
 # OTLP proto types
 opentelemetry-proto = { workspace = true }
