@@ -132,12 +132,26 @@ pub async fn compile_ast(ast: QueryAst, ctx: &SessionContext) -> Result<Vec<u8>,
 }
 
 /// Whether a query aggregates or de-duplicates rows (an `Aggregate` or `Unique`
-/// stage in the main pipeline or any binding), and so is not row-distributive.
+/// stage in the main pipeline, any binding, **or any `merge` sub-pipeline**), and
+/// so is not row-distributive.
+///
+/// The merge case matters for distribution: a query like
+/// `metrics <- datapoints | group by … as datapoints` carries its aggregation
+/// inside the merge's inner pipeline, not the main one. Such a query cannot be
+/// correctly stream-merged across nodes (each node would produce its own partial
+/// aggregate) — it must go through the coordinator's gather-and-re-aggregate
+/// path, which requires this flag to be set.
 fn ast_is_aggregated(ast: &QueryAst) -> bool {
+    fn stage_aggregates(stage: &Stage) -> bool {
+        match stage {
+            Stage::Aggregate(_) | Stage::Unique(_) => true,
+            // Recurse into a merge's inner sub-pipeline (which may itself merge).
+            Stage::Merge(merge) => has_agg(&merge.stages),
+            _ => false,
+        }
+    }
     fn has_agg(stages: &[Stage]) -> bool {
-        stages
-            .iter()
-            .any(|s| matches!(s, Stage::Aggregate(_) | Stage::Unique(_)))
+        stages.iter().any(stage_aggregates)
     }
     has_agg(&ast.stages) || ast.bindings.iter().any(|b| has_agg(&b.stages))
 }
@@ -285,6 +299,16 @@ fn signal_from_name(name: &str) -> Option<Signal> {
         "span_links" => Signal::SpanLinks,
         _ => return None,
     })
+}
+
+/// Map a primary/auxiliary signal name (as stored in `SeqlExtension.signal` /
+/// `.auxiliary_signals`) to the registration table name that a plan's `read`
+/// relation references — e.g. `"histograms"` → `"histogram_data_points"`,
+/// `"traces"` → `"spans"`. The distributed coordinator registers gathered rows
+/// under this name so the re-run plan resolves them. Returns `None` for an
+/// unknown signal name.
+pub fn signal_table_name(signal_name: &str) -> Option<&'static str> {
+    signal_from_name(signal_name).map(signal_to_table_name)
 }
 
 /// Convert a `SeqlExtension` protobuf `TimeRange` back to an AST [`TimeRange`].

@@ -229,14 +229,66 @@ pub enum MemtableFraming {
     LiveReplace,
 }
 
-/// Run `plan_bytes` over `ctx` — whose signal tables are caller-supplied
-/// `MemTable`s — and frame the single aggregated result per `framing`.
+/// Result of consuming and executing one plan root over a memtable context.
+struct RootResult {
+    schema: Arc<arrow::datatypes::Schema>,
+    batch: arrow::record_batch::RecordBatch,
+    col_defs: Vec<seql_ast::schema::ColumnDef>,
+}
+
+/// Consume a self-contained Substrait plan's primary relation against `ctx`,
+/// optionally strip the time-column upper bound (for live re-aggregation), and
+/// execute it to a single batch.
+async fn consume_execute_root(
+    ctx: &SessionContext,
+    plan_bytes: &[u8],
+    strip_time_col: Option<&str>,
+) -> Result<RootResult, QueryError> {
+    let plan: Plan = Message::decode(plan_bytes)
+        .map_err(|e| exec_err(format!("consume_execute_root: decode: {}", e)))?;
+    let extensions = Extensions::try_from(&plan.extensions)
+        .map_err(|e| exec_err(format!("consume_execute_root: extensions: {}", e)))?;
+    let rel = plan
+        .relations
+        .first()
+        .and_then(|pr| pr.rel_type.as_ref())
+        .and_then(get_rel)
+        .ok_or_else(|| exec_err("consume_execute_root: plan has no primary relation"))?;
+    let ctx_state = ctx.state();
+    let consumer = DefaultSubstraitConsumer::new(&extensions, &ctx_state);
+    let mut logical_plan = consumer
+        .consume_rel(rel)
+        .await
+        .map_err(|e| exec_err(format!("consume_execute_root: consume_rel: {}", e)))?;
+    drop(ctx_state);
+
+    if strip_time_col.is_some() {
+        logical_plan = strip_plan_time_upper_bound(logical_plan, strip_time_col)?;
+    }
+
+    let (schema, batch) = execute_logical_plan_to_batch(ctx, logical_plan).await?;
+    let col_defs = crate::arrow_convert::schema_to_col_defs(&schema);
+    Ok(RootResult {
+        schema,
+        batch,
+        col_defs,
+    })
+}
+
+/// Run `plan_bytes` (primary relation **and** every auxiliary plan) over `ctx` —
+/// whose signal tables are caller-supplied `MemTable`s — and frame the result per
+/// `framing`.
 ///
-/// The distributed coordinator uses this to re-run an aggregating plan over the
-/// union of raw rows gathered from every cluster node (primary-signal
-/// aggregations only; the coordinator keeps merge/navigate aggregations local).
-/// The whole consume → execute → concat path is shared with the snapshot path
-/// via [`consume_and_execute_root`]; only the framing differs.
+/// The distributed coordinator uses this to re-run an aggregating query over rows
+/// gathered from every cluster node. Auxiliary plans (`merge`/`navigate`, e.g.
+/// metric histograms) are executed too, so an aggregation that embeds a
+/// sub-collection is correct cluster-wide as long as the coordinator gathered the
+/// auxiliary signals' rows into the context (which it does).
+///
+/// A live re-aggregation must count rows ingested *after* the query opened, but
+/// the compiled plan carries a `time <= <open-time>` upper bound that would reject
+/// them (the same bound the live Append path strips). Live framings strip it from
+/// the primary and each auxiliary plan; snapshot framing keeps it.
 pub(crate) async fn execute_over_memtables(
     plan_bytes: Vec<u8>,
     ctx: SessionContext,
@@ -250,75 +302,107 @@ pub(crate) async fn execute_over_memtables(
     let ext = extract_seql_extension(&plan)?;
     let response_shape = seql_ast::schema::ResponseShape::from_shape_str(&ext.response_shape)
         .unwrap_or(seql_ast::schema::ResponseShape::Table);
-
-    // Consume the primary relation to a logical plan.
-    let extensions = Extensions::try_from(&plan.extensions)
-        .map_err(|e| exec_err(format!("execute_over_memtables: extensions: {}", e)))?;
-    let rel = plan
-        .relations
-        .first()
-        .and_then(|pr| pr.rel_type.as_ref())
-        .and_then(get_rel)
-        .ok_or_else(|| exec_err("execute_over_memtables: plan has no primary relation"))?;
-    let ctx_state = ctx.state();
-    let consumer = DefaultSubstraitConsumer::new(&extensions, &ctx_state);
-    let mut logical_plan = consumer
-        .consume_rel(rel)
-        .await
-        .map_err(|e| exec_err(format!("execute_over_memtables: consume_rel: {}", e)))?;
-    drop(ctx_state);
-
-    // A live re-aggregation must count rows ingested *after* the query opened,
-    // but the compiled plan carries a `time <= <open-time>` upper bound that
-    // would reject them (the same bound the live Append path strips). Snapshot
-    // framing keeps the bound (it wants the point-in-time result).
-    if matches!(
+    let live = matches!(
         framing,
         MemtableFraming::LiveInitial | MemtableFraming::LiveReplace
-    ) {
-        let time_col = time_column_for_signal(signal_from_str(&ext.signal));
-        logical_plan = strip_plan_time_upper_bound(logical_plan, time_col)?;
+    );
+
+    // Primary root.
+    let p_time_col = live
+        .then(|| time_column_for_signal(signal_from_str(&ext.signal)))
+        .flatten();
+    let primary = consume_execute_root(&ctx, &plan_bytes, p_time_col).await?;
+
+    // Auxiliary plans (each a self-contained Substrait plan referencing its own
+    // signal table, which the coordinator has registered as a MemTable).
+    let mut aux: Vec<(Option<String>, RootResult)> = Vec::new();
+    for (idx, aux_bytes) in ext.auxiliary_plan_bytes.iter().enumerate() {
+        let alias = ext.auxiliary_aliases.get(idx).cloned();
+        let a_time_col = live
+            .then(|| {
+                ext.auxiliary_signals
+                    .get(idx)
+                    .and_then(|s| time_column_for_signal(signal_from_str(s)))
+            })
+            .flatten();
+        let result = consume_execute_root(&ctx, aux_bytes, a_time_col).await?;
+        aux.push((alias, result));
     }
 
-    let (schema, batch) = execute_logical_plan_to_batch(&ctx, logical_plan).await?;
-    let col_defs = crate::arrow_convert::schema_to_col_defs(&schema);
-    let rows = batch.num_rows() as u64;
+    let total_rows = primary.batch.num_rows() as u64
+        + aux
+            .iter()
+            .map(|(_, r)| r.batch.num_rows() as u64)
+            .sum::<u64>();
 
     let mut frames: Vec<Result<FlightData, QueryError>> = Vec::new();
     match framing {
         MemtableFraming::Snapshot => {
             frames.push(Ok(schema_flight_data(
                 None,
-                schema,
+                primary.schema,
                 response_shape,
-                col_defs,
+                primary.col_defs,
                 watermark_ns,
             )));
-            if rows > 0 {
-                frames.push(Ok(data_flight_data(None, &batch)));
+            if primary.batch.num_rows() > 0 {
+                frames.push(Ok(data_flight_data(None, &primary.batch)));
+            }
+            for (alias, r) in &aux {
+                frames.push(Ok(schema_flight_data(
+                    alias.as_deref(),
+                    r.schema.clone(),
+                    seql_ast::schema::ResponseShape::Table,
+                    r.col_defs.clone(),
+                    watermark_ns,
+                )));
+                if r.batch.num_rows() > 0 {
+                    frames.push(Ok(data_flight_data(alias.as_deref(), &r.batch)));
+                }
             }
             frames.push(Ok(complete_flight_data(QueryStats {
                 execution_time_us: start.elapsed().as_micros() as u64,
-                rows_scanned: rows,
+                rows_scanned: total_rows,
                 bytes_read: 0,
-                rows_returned: rows,
+                rows_returned: total_rows,
                 warning_count: 0,
             })));
         }
         MemtableFraming::LiveInitial => {
             frames.push(Ok(schema_flight_data(
                 None,
-                schema,
+                primary.schema,
                 response_shape,
-                col_defs,
+                primary.col_defs,
                 watermark_ns,
             )));
             // Emit the initial aggregate as a Replace so the client seeds its
             // state even when the aggregate is currently empty.
-            frames.push(Ok(replace_flight_data(None, &batch, watermark_ns)));
+            frames.push(Ok(replace_flight_data(None, &primary.batch, watermark_ns)));
+            for (alias, r) in &aux {
+                frames.push(Ok(schema_flight_data(
+                    alias.as_deref(),
+                    r.schema.clone(),
+                    seql_ast::schema::ResponseShape::Table,
+                    r.col_defs.clone(),
+                    watermark_ns,
+                )));
+                frames.push(Ok(replace_flight_data(
+                    alias.as_deref(),
+                    &r.batch,
+                    watermark_ns,
+                )));
+            }
         }
         MemtableFraming::LiveReplace => {
-            frames.push(Ok(replace_flight_data(None, &batch, watermark_ns)));
+            frames.push(Ok(replace_flight_data(None, &primary.batch, watermark_ns)));
+            for (alias, r) in &aux {
+                frames.push(Ok(replace_flight_data(
+                    alias.as_deref(),
+                    &r.batch,
+                    watermark_ns,
+                )));
+            }
         }
     }
 
