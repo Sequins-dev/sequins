@@ -11,7 +11,7 @@
 use super::Storage;
 use crate::error::{Error, Result};
 use object_store::path::Path as ObjPath;
-use object_store::{ObjectStore, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use std::sync::Arc;
 
 impl Storage {

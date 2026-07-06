@@ -24,7 +24,8 @@ impl ColdTier {
         use vortex::dtype::DType;
         use vortex::error::VortexResult;
         use vortex::file::WriteOptionsSessionExt;
-        use vortex::io::{ObjectStoreWriter, VortexWrite};
+        use vortex::io::object_store::ObjectStoreWrite;
+        use vortex::io::VortexWrite;
         use vortex::layout::LayoutStrategy;
         use vortex::session::VortexSession;
         use vortex::VortexSessionDefault;
@@ -36,12 +37,12 @@ impl ColdTier {
 
         // Build the inner write strategy from config.
         let inner_strategy: std::sync::Arc<dyn LayoutStrategy> = {
-            use vortex::compressor::CompactCompressor;
+            use vortex::compressor::BtrBlocksCompressor;
             use vortex::file::WriteStrategyBuilder;
             let mut builder =
-                WriteStrategyBuilder::new().with_row_block_size(self.config.row_block_size);
+                WriteStrategyBuilder::default().with_row_block_size(self.config.row_block_size);
             if self.config.compact_encodings {
-                builder = builder.with_compressor(CompactCompressor::default());
+                builder = builder.with_compressor(BtrBlocksCompressor::default());
             }
             builder.build()
         };
@@ -59,15 +60,16 @@ impl ColdTier {
 
         // Convert Arrow RecordBatch to Vortex Array
         // The false parameter indicates not to preserve nullability
-        let vortex_array = ArrayRef::from_arrow(batch, false);
+        let vortex_array = ArrayRef::from_arrow(batch, false)
+            .map_err(|e| Error::Storage(format!("Failed to convert Arrow batch: {}", e)))?;
 
         // Create a stream from the single array
         let stream = stream::once(async move { VortexResult::Ok(vortex_array) });
         let array_stream = ArrayStreamAdapter::new(dtype, stream);
 
-        // Create an ObjectStoreWriter for the target path
+        // Create an ObjectStoreWrite for the target path
         let object_path = ObjectPath::from(path);
-        let mut writer = ObjectStoreWriter::new(self.store.clone(), &object_path)
+        let mut writer = ObjectStoreWrite::new(self.store.clone(), &object_path)
             .await
             .map_err(|e| Error::Storage(format!("Failed to create Vortex writer: {}", e)))?;
 

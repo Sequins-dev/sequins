@@ -10,31 +10,31 @@ pub mod strategy;
 
 use std::sync::Arc;
 
-use vortex::array::{ArrayContext, DeserializeMetadata, SerializeMetadata};
+use vortex::array::{DeserializeMetadata, SerializeMetadata};
 use vortex::dtype::DType;
 use vortex::error::{vortex_bail, VortexResult};
 use vortex::layout::segments::{SegmentId, SegmentSource};
 use vortex::layout::session::LayoutSessionExt;
 use vortex::layout::{
-    LayoutChildType, LayoutChildren, LayoutEncodingRef, LayoutId, LayoutReaderRef, LayoutRef,
-    VTable,
+    LayoutBuildContext, LayoutChildType, LayoutChildren, LayoutEncodingRef, LayoutId,
+    LayoutReaderContext, LayoutReaderRef, LayoutRef, VTable,
 };
 use vortex::session::VortexSession;
 
 use crate::reader::IndexedLayoutReader;
 
 // Generate the VTable boilerplate for IndexedLayout.
-// This macro (defined in vortex_layout) creates IndexedVTable, and implements
+// This macro (defined in vortex_layout) creates the `Indexed` vtable tag type, and implements
 // Deref, AsRef, IntoLayout, and From<IndexedLayout> for LayoutRef.
 vortex::layout::vtable!(Indexed);
 
-impl VTable for IndexedVTable {
+impl VTable for Indexed {
     type Layout = IndexedLayout;
     type Encoding = IndexedLayoutEncoding;
     type Metadata = IndexedMeta;
 
     fn id(_encoding: &Self::Encoding) -> LayoutId {
-        LayoutId::new_ref("sequins.indexed")
+        LayoutId::new_static("sequins.indexed")
     }
 
     fn encoding(_layout: &Self::Layout) -> LayoutEncodingRef {
@@ -94,11 +94,12 @@ impl VTable for IndexedVTable {
         name: Arc<str>,
         segment_source: Arc<dyn SegmentSource>,
         session: &VortexSession,
+        ctx: &LayoutReaderContext,
     ) -> VortexResult<LayoutReaderRef> {
         let data_reader =
             layout
                 .data_child
-                .new_reader(name.clone(), segment_source.clone(), session)?;
+                .new_reader(name.clone(), segment_source.clone(), session, ctx)?;
 
         Ok(Arc::new(IndexedLayoutReader {
             name,
@@ -119,7 +120,7 @@ impl VTable for IndexedVTable {
         metadata: &IndexedMeta,
         segment_ids: Vec<SegmentId>,
         children: &dyn LayoutChildren,
-        _ctx: ArrayContext,
+        _build_ctx: &LayoutBuildContext<'_>,
     ) -> VortexResult<Self::Layout> {
         let data_child = children.child(0, dtype)?;
 

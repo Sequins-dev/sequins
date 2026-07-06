@@ -5,7 +5,6 @@ use datafusion::datasource::TableProvider;
 use datafusion::logical_expr::{Expr, TableType};
 use datafusion::physical_plan::union::UnionExec;
 use datafusion::physical_plan::ExecutionPlan;
-use std::any::Any;
 use std::sync::Arc;
 
 /// Union provider that queries both hot and cold tiers for any signal type
@@ -40,10 +39,6 @@ impl SignalUnionProvider {
 
 #[async_trait::async_trait]
 impl TableProvider for SignalUnionProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

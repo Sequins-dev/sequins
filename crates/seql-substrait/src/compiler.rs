@@ -712,9 +712,6 @@ macro_rules! overflow_stub_udf {
         struct $struct_name;
 
         impl ScalarUDFImpl for $struct_name {
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
             fn name(&self) -> &str {
                 $udf_name
             }

@@ -23,8 +23,8 @@ arrow-flight = { workspace = true }
 # DataFusion
 datafusion                     = { workspace = true }
 datafusion-substrait           = { workspace = true }
-datafusion-expr                = "51"
-datafusion-functions-aggregate = "51"
+datafusion-expr                = { workspace = true }
+datafusion-functions-aggregate = { workspace = true }
 
 # Serialization
 serde      = { workspace = true }

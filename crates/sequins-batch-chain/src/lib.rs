@@ -24,7 +24,6 @@ use datafusion::physical_plan::{
     PlanProperties, SendableRecordBatchStream, Statistics,
 };
 use futures::stream;
-use std::any::Any;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -257,7 +256,7 @@ struct BatchChainExec {
     schema: SchemaRef,
     /// Column indices to select from each batch, or `None` for all columns.
     projection: Option<Vec<usize>>,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl fmt::Debug for BatchChainExec {
@@ -280,15 +279,11 @@ impl ExecutionPlan for BatchChainExec {
         "BatchChainExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
@@ -332,8 +327,8 @@ impl ExecutionPlan for BatchChainExec {
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 
-    fn statistics(&self) -> DFResult<Statistics> {
-        Ok(Statistics::new_unknown(&self.schema))
+    fn partition_statistics(&self, _partition: Option<usize>) -> DFResult<Arc<Statistics>> {
+        Ok(Arc::new(Statistics::new_unknown(&self.schema)))
     }
 }
 
@@ -368,10 +363,6 @@ fn collect_batches(head_ptr: *const BatchNode) -> Vec<Arc<RecordBatch>> {
 
 #[async_trait::async_trait]
 impl TableProvider for BatchChain {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -399,12 +390,12 @@ impl TableProvider for BatchChain {
             head: Arc::clone(&self.head),
             schema: projected_schema.clone(),
             projection: projection_owned,
-            properties: PlanProperties::new(
+            properties: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(projected_schema),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
-            ),
+            )),
         }))
     }
 }

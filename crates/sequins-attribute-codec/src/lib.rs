@@ -322,9 +322,6 @@ macro_rules! impl_overflow_get_udf {
                 Lazy::new(|| Signature::any(2, Volatility::Immutable));
 
             impl ScalarUDFImpl for $struct_name {
-                fn as_any(&self) -> &dyn std::any::Any {
-                    self
-                }
                 fn name(&self) -> &str {
                     $udf_name
                 }

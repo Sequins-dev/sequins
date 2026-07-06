@@ -6,7 +6,7 @@
 use arrow::array::{Array, Int64Array, StringViewArray, TimestampNanosecondArray, UInt8Array};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, Timelike, Utc};
-use object_store::{path::Path as ObjectPath, ObjectStore};
+use object_store::{path::Path as ObjectPath, ObjectStore, ObjectStoreExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -237,7 +237,8 @@ pub async fn write_span_rollups(
     use vortex::dtype::DType;
     use vortex::error::VortexResult;
     use vortex::file::WriteOptionsSessionExt;
-    use vortex::io::ObjectStoreWriter;
+    use vortex::io::object_store::ObjectStoreWrite;
+    use vortex::io::VortexWrite;
     use vortex::session::VortexSession;
     use vortex::VortexSessionDefault;
 
@@ -351,7 +352,8 @@ pub async fn write_span_rollups(
     let session = VortexSession::default();
     let arrow_schema = batch.schema();
     let dtype = DType::from_arrow(arrow_schema);
-    let vortex_array = VortexArrayRef::from_arrow(batch, false);
+    let vortex_array = VortexArrayRef::from_arrow(batch, false)
+        .map_err(|e| Error::Storage(format!("Failed to convert Arrow batch: {}", e)))?;
     let stream = stream::once(async move { VortexResult::Ok(vortex_array) });
     let array_stream = ArrayStreamAdapter::new(dtype, stream);
 
@@ -367,16 +369,16 @@ pub async fn write_span_rollups(
     );
 
     let object_path = ObjectPath::from(path.as_str());
-    let mut writer = ObjectStoreWriter::new(store, &object_path)
+    let mut writer = ObjectStoreWrite::new(store, &object_path)
         .await
         .map_err(|e| Error::Storage(format!("Failed to create rollup writer: {}", e)))?;
 
     let strategy = {
-        use vortex::compressor::CompactCompressor;
+        use vortex::compressor::BtrBlocksCompressor;
         use vortex::file::WriteStrategyBuilder;
-        let mut builder = WriteStrategyBuilder::new().with_row_block_size(row_block_size);
+        let mut builder = WriteStrategyBuilder::default().with_row_block_size(row_block_size);
         if compact_encodings {
-            builder = builder.with_compressor(CompactCompressor::default());
+            builder = builder.with_compressor(BtrBlocksCompressor::default());
         }
         builder.build()
     };
@@ -386,6 +388,11 @@ pub async fn write_span_rollups(
         .write(&mut writer, array_stream)
         .await
         .map_err(|e| Error::Storage(format!("Failed to write rollups: {}", e)))?;
+
+    writer
+        .shutdown()
+        .await
+        .map_err(|e| Error::Storage(format!("Failed to shutdown rollup writer: {}", e)))?;
 
     Ok(path)
 }
@@ -693,7 +700,8 @@ pub async fn write_metric_rollups(
     use vortex::dtype::DType;
     use vortex::error::VortexResult;
     use vortex::file::WriteOptionsSessionExt;
-    use vortex::io::ObjectStoreWriter;
+    use vortex::io::object_store::ObjectStoreWrite;
+    use vortex::io::VortexWrite;
     use vortex::session::VortexSession;
     use vortex::VortexSessionDefault;
 
@@ -744,7 +752,8 @@ pub async fn write_metric_rollups(
     let session = VortexSession::default();
     let arrow_schema = batch.schema();
     let dtype = DType::from_arrow(arrow_schema);
-    let vortex_array = VortexArrayRef::from_arrow(batch, false);
+    let vortex_array = VortexArrayRef::from_arrow(batch, false)
+        .map_err(|e| Error::Storage(format!("Failed to convert Arrow batch: {}", e)))?;
     let stream = stream::once(async move { VortexResult::Ok(vortex_array) });
     let array_stream = ArrayStreamAdapter::new(dtype, stream);
 
@@ -761,16 +770,16 @@ pub async fn write_metric_rollups(
     );
 
     let object_path = ObjectPath::from(path.as_str());
-    let mut writer = ObjectStoreWriter::new(store, &object_path)
+    let mut writer = ObjectStoreWrite::new(store, &object_path)
         .await
         .map_err(|e| Error::Storage(format!("Failed to create rollup writer: {}", e)))?;
 
     let strategy = {
-        use vortex::compressor::CompactCompressor;
+        use vortex::compressor::BtrBlocksCompressor;
         use vortex::file::WriteStrategyBuilder;
-        let mut builder = WriteStrategyBuilder::new().with_row_block_size(row_block_size);
+        let mut builder = WriteStrategyBuilder::default().with_row_block_size(row_block_size);
         if compact_encodings {
-            builder = builder.with_compressor(CompactCompressor::default());
+            builder = builder.with_compressor(BtrBlocksCompressor::default());
         }
         builder.build()
     };
@@ -780,6 +789,11 @@ pub async fn write_metric_rollups(
         .write(&mut writer, array_stream)
         .await
         .map_err(|e| Error::Storage(format!("Failed to write rollups: {}", e)))?;
+
+    writer
+        .shutdown()
+        .await
+        .map_err(|e| Error::Storage(format!("Failed to shutdown rollup writer: {}", e)))?;
 
     Ok(path)
 }
@@ -982,7 +996,8 @@ pub async fn write_profile_rollups(
     use vortex::dtype::DType;
     use vortex::error::VortexResult;
     use vortex::file::WriteOptionsSessionExt;
-    use vortex::io::ObjectStoreWriter;
+    use vortex::io::object_store::ObjectStoreWrite;
+    use vortex::io::VortexWrite;
     use vortex::session::VortexSession;
     use vortex::VortexSessionDefault;
 
@@ -1042,7 +1057,8 @@ pub async fn write_profile_rollups(
     let session = VortexSession::default();
     let arrow_schema = batch.schema();
     let dtype = DType::from_arrow(arrow_schema);
-    let vortex_array = VortexArrayRef::from_arrow(batch, false);
+    let vortex_array = VortexArrayRef::from_arrow(batch, false)
+        .map_err(|e| Error::Storage(format!("Failed to convert Arrow batch: {}", e)))?;
     let stream = stream::once(async move { VortexResult::Ok(vortex_array) });
     let array_stream = ArrayStreamAdapter::new(dtype, stream);
 
@@ -1058,16 +1074,16 @@ pub async fn write_profile_rollups(
     );
 
     let object_path = ObjectPath::from(path.as_str());
-    let mut writer = ObjectStoreWriter::new(store, &object_path)
+    let mut writer = ObjectStoreWrite::new(store, &object_path)
         .await
         .map_err(|e| Error::Storage(format!("Failed to create profile rollup writer: {}", e)))?;
 
     let strategy = {
-        use vortex::compressor::CompactCompressor;
+        use vortex::compressor::BtrBlocksCompressor;
         use vortex::file::WriteStrategyBuilder;
-        let mut builder = WriteStrategyBuilder::new().with_row_block_size(row_block_size);
+        let mut builder = WriteStrategyBuilder::default().with_row_block_size(row_block_size);
         if compact_encodings {
-            builder = builder.with_compressor(CompactCompressor::default());
+            builder = builder.with_compressor(BtrBlocksCompressor::default());
         }
         builder.build()
     };
@@ -1077,6 +1093,11 @@ pub async fn write_profile_rollups(
         .write(&mut writer, array_stream)
         .await
         .map_err(|e| Error::Storage(format!("Failed to write profile rollups: {}", e)))?;
+
+    writer
+        .shutdown()
+        .await
+        .map_err(|e| Error::Storage(format!("Failed to shutdown rollup writer: {}", e)))?;
 
     Ok(path)
 }
