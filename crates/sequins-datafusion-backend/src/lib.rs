@@ -99,6 +99,30 @@ impl DataFusionBackend {
         execution::execute_snapshot(&self.storage, plan_bytes, async move { Ok(ctx) }).await
     }
 
+    /// Build a **cold-only** scan `ExecutionPlan` for a signal's registration
+    /// table (the shared Vortex tier, unioned across all node prefixes).
+    ///
+    /// The distributed two-phase coordinator's leaf uses this so one designated
+    /// task additionally contributes the shared cold data to its `Partial`
+    /// aggregate — read exactly once cluster-wide, so a two-phase aggregation is
+    /// correct even for windows whose data has aged into cold.
+    pub async fn cold_scan_exec(
+        &self,
+        table_name: &str,
+        projection: Option<&Vec<usize>>,
+    ) -> Result<Arc<dyn datafusion::physical_plan::ExecutionPlan>, QueryError> {
+        let ctx = self.session_ctx_for_scope(QueryScope::ColdOnly).await?;
+        let provider = ctx
+            .table_provider(table_name)
+            .await
+            .map_err(|e| exec_err(format!("cold_scan_exec: table {table_name}: {e}")))?;
+        let state = ctx.state();
+        provider
+            .scan(&state, projection, &[], None)
+            .await
+            .map_err(|e| exec_err(format!("cold_scan_exec: scan {table_name}: {e}")))
+    }
+
     /// Return the `All`-scope session context (used for compiling SeQL — the
     /// scope only affects execution). Distributed execution selects a scoped
     /// context via [`Self::session_ctx_for_scope`].
