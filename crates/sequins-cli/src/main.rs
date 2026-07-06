@@ -36,6 +36,12 @@ enum Command {
         /// Output format
         #[arg(short, long, default_value = "table")]
         format: OutputFormat,
+
+        /// Run as a live query: emit the initial snapshot, then stream updates
+        /// continuously as new data is ingested (until interrupted with Ctrl-C).
+        /// Best paired with `--format jsonl` for piping.
+        #[arg(short, long)]
+        live: bool,
     },
 
     /// Ingest telemetry data from OTLP files
@@ -125,7 +131,8 @@ async fn main() -> Result<()> {
             query: query_str,
             target,
             format,
-        } => query::execute(query_str, target, format).await,
+            live,
+        } => query::execute(query_str, target, format, live).await,
 
         Command::Ingest {
             file,
@@ -194,10 +201,34 @@ mod tests {
                 query,
                 target,
                 format,
+                live,
             } => {
                 assert_eq!(query, "spans | select trace_id");
                 assert_eq!(target, "http://localhost:8080");
                 assert!(matches!(format, OutputFormat::Json));
+                assert!(!live, "live should default to false");
+            }
+            _ => panic!("Expected Query command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_query_live_flag() {
+        let args = vec![
+            "sequins",
+            "query",
+            "logs last 1h",
+            "--target",
+            "http://localhost:8080",
+            "--live",
+            "--format",
+            "jsonl",
+        ];
+        let cli = Cli::try_parse_from(args).expect("live query should parse");
+        match cli.command {
+            Command::Query { live, format, .. } => {
+                assert!(live, "--live should set the live flag");
+                assert!(matches!(format, OutputFormat::Jsonl));
             }
             _ => panic!("Expected Query command"),
         }
