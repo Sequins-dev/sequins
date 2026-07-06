@@ -121,7 +121,7 @@ fn signal_from_str(s: &str) -> Signal {
 /// avoiding the "function reference not found" error that occurred when auxiliary
 /// relations were merged into the primary plan (dropping their extensions).
 #[tracing::instrument(skip_all)]
-async fn execute_snapshot(
+pub(crate) async fn execute_snapshot(
     storage: &Arc<Storage>,
     plan_bytes: Vec<u8>,
     make_session_ctx: impl std::future::Future<Output = Result<SessionContext, QueryError>>,

@@ -378,9 +378,22 @@ impl TableProvider for BatchChain {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        // Apply projection to schema so the returned plan reports the correct
-        // field subset. DataFusion relies on this to match with the cold tier
-        // provider when both are unioned in SignalUnionProvider.
+        self.scan_exec(projection)
+    }
+}
+
+impl BatchChain {
+    /// Build the leaf [`ExecutionPlan`] that streams this chain's snapshot,
+    /// optionally projected. This is the synchronous core of [`TableProvider::scan`]
+    /// (whose body never awaits), exposed directly so callers that already hold an
+    /// `Arc<BatchChain>` — notably the distributed two-phase `HotScanExec`, which
+    /// must bind to a node-local hot tier from within a synchronous `execute()` —
+    /// can obtain the same leaf without an async `Session`.
+    ///
+    /// Apply projection to the schema so the returned plan reports the correct
+    /// field subset. DataFusion relies on this to match with the cold tier
+    /// provider when both are unioned in `SignalUnionProvider`.
+    pub fn scan_exec(&self, projection: Option<&Vec<usize>>) -> DFResult<Arc<dyn ExecutionPlan>> {
         let projected_schema = match projection {
             Some(proj) => Arc::new(self.schema.project(proj)?),
             None => self.schema.clone(),

@@ -32,13 +32,14 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 // Submodules
-mod arrow_convert;
+pub mod arrow_convert;
 pub(crate) mod execution;
-mod registration;
+pub mod registration;
 mod trait_impls;
 pub(crate) mod union_provider;
 
 pub use execution::MemtableFraming;
+pub use registration::{hot_signal_tables, hot_signal_type_for_table};
 
 /// Convenience constructor for `QueryError::Execution`
 pub(crate) fn exec_err(msg: impl Into<String>) -> QueryError {
@@ -74,6 +75,28 @@ impl DataFusionBackend {
             storage,
             ctx_cache: std::array::from_fn(|_| OnceCell::new()),
         }
+    }
+
+    /// The [`Storage`] this backend wraps. Exposed so the distributed
+    /// coordinator can reach the node-local hot tier for two-phase execution.
+    pub fn storage(&self) -> &Arc<Storage> {
+        &self.storage
+    }
+
+    /// Run a compiled Substrait plan as a **snapshot** over a caller-supplied
+    /// [`SessionContext`], returning the framed `SeqlStream`.
+    ///
+    /// The distributed two-phase coordinator uses this to execute the query over
+    /// a *distributed* session (one whose signal tables scan node-local hot tiers
+    /// via `HotScanExec` and whose planner fans partial aggregates to workers),
+    /// reusing this crate's snapshot framing (Schema/Data/Complete, auxiliary
+    /// plans, column defs) instead of duplicating it.
+    pub async fn execute_snapshot_with_ctx(
+        &self,
+        ctx: SessionContext,
+        plan_bytes: Vec<u8>,
+    ) -> Result<sequins_traits::SeqlStream, QueryError> {
+        execution::execute_snapshot(&self.storage, plan_bytes, async move { Ok(ctx) }).await
     }
 
     /// Return the `All`-scope session context (used for compiling SeQL — the

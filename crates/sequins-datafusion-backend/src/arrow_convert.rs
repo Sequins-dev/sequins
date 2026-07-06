@@ -4,7 +4,7 @@ use arrow::datatypes::DataType as ArrowDataType;
 use seql_ast::schema::{ColumnDef, ColumnRole, DataType};
 
 /// Convert an Arrow schema into a list of ColumnDef (no batch data needed)
-pub(crate) fn schema_to_col_defs(schema: &arrow::datatypes::Schema) -> Vec<ColumnDef> {
+pub fn schema_to_col_defs(schema: &arrow::datatypes::Schema) -> Vec<ColumnDef> {
     schema
         .fields()
         .iter()
@@ -17,7 +17,7 @@ pub(crate) fn schema_to_col_defs(schema: &arrow::datatypes::Schema) -> Vec<Colum
 }
 
 /// Map Arrow data type to SeQL schema DataType
-pub(crate) fn arrow_type_to_data_type(dt: &ArrowDataType) -> DataType {
+pub fn arrow_type_to_data_type(dt: &ArrowDataType) -> DataType {
     match dt {
         ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
             DataType::String

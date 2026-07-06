@@ -128,6 +128,26 @@ pub(super) static SIGNAL_TABLE_DEFS: &[SignalTableDef] = &[
     },
 ];
 
+/// Map a signal **table name** (e.g. `"logs"`, `"histogram_data_points"`) to the
+/// [`SignalType`] whose hot-tier `BatchChain` holds its rows.
+///
+/// Used by the distributed two-phase coordinator to resolve a `HotScanExec`'s
+/// table back to the node-local hot chain at `execute()` time.
+pub fn hot_signal_type_for_table(table_name: &str) -> Option<SignalType> {
+    SIGNAL_TABLE_DEFS
+        .iter()
+        .find(|def| def.table_name == table_name)
+        .map(|def| def.hot_signal_type)
+}
+
+/// Every `(table_name, hot SignalType)` pair known to the backend, so the
+/// distributed coordinator can register a hot-scan `TableProvider` per signal.
+pub fn hot_signal_tables() -> impl Iterator<Item = (&'static str, SignalType)> {
+    SIGNAL_TABLE_DEFS
+        .iter()
+        .map(|def| (def.table_name, def.hot_signal_type))
+}
+
 /// Register the table provider for a signal, honouring the [`QueryScope`]:
 /// - `HotOnly` → the in-memory `BatchChain` only (peer fan-out; no cold work).
 /// - `ColdOnly` → the shared cold Vortex files only (coordinator's single read).
