@@ -188,6 +188,10 @@ impl HotTier {
     /// metadata chain would pin the watermark forever. Their rows are simply
     /// re-applied (and de-duplicated) on replay.
     pub fn push(&self, signal: SignalType, batch: Arc<RecordBatch>, meta: BatchMeta) {
+        // Ingest observability: rows pushed into the hot tier, labelled by signal.
+        // A no-op unless a metrics recorder is installed (the daemon installs one).
+        metrics::counter!("sequins_ingest_rows_total", "signal" => signal.name())
+            .increment(batch.num_rows() as u64);
         if meta.max_wal_seq > 0 && !Self::is_content_addressed(signal) {
             self.ingested[signal.index()].fetch_max(meta.max_wal_seq, Ordering::AcqRel);
         }

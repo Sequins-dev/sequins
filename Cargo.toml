@@ -100,6 +100,7 @@ bincode    = "1"
 # Arrow + DataFusion
 arrow               = "58"
 arrow-flight        = { version = "58", features = ["flight-sql-experimental"] }
+metrics             = "0.24"
 datafusion          = "54"
 datafusion-substrait = "54"
 datafusion-expr                = "54"
