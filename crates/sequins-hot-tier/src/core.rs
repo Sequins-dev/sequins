@@ -9,6 +9,7 @@ use sequins_arrow_schema::arrow_schema;
 use sequins_arrow_schema::SignalType;
 use sequins_types::models::InstrumentationScope;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Compact resource ID — content-addressed FNV-1a hash of the attribute set.
@@ -63,6 +64,14 @@ pub struct HotTier {
     /// One chain per signal type.  Index via `SignalType::index()` — O(1), no match needed.
     chains: [Arc<BatchChain>; SignalType::COUNT],
 
+    /// Per-signal highest WAL seq pushed via [`HotTier::push`]. `0` = none.
+    ingested: [AtomicU64; SignalType::COUNT],
+    /// Per-signal highest WAL seq **successfully** flushed to the cold tier.
+    /// Advanced by the cold-writer callback only after a durable write, so it
+    /// is a safe lower bound on what is persisted. Shared with the per-chain
+    /// compaction closures via `Arc`.
+    flushed: Arc<[AtomicU64; SignalType::COUNT]>,
+
     // -----------------------------------------------------------------------
     // Content-addressed dedup sets — hash IS the ID, so just track presence.
     // -----------------------------------------------------------------------
@@ -77,11 +86,16 @@ pub struct HotTier {
 
 /// A `ColdFlushFn` that additionally captures the `SignalType` so the storage
 /// layer can route completed hot-tier batches to the right cold-tier partition.
+///
+/// Returns `true` if the batch was durably written to cold storage. Only a
+/// `true` result advances the durable cold-flush watermark — a failed write
+/// leaves the corresponding WAL entries un-checkpointed so they survive to be
+/// replayed after a restart.
 pub type SignalColdFlushFn = Arc<
     dyn Fn(
             SignalType,
             Arc<RecordBatch>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'static>>
         + Send
         + Sync,
 >;
@@ -108,6 +122,11 @@ impl HotTier {
     fn new_internal(config: HotTierConfig, cold_flush: Option<SignalColdFlushFn>) -> Self {
         let target_rows = config.max_entries;
 
+        // Per-signal "flushed to cold" watermark, shared with each chain's
+        // compaction closure so a successful cold write can advance it.
+        let flushed: Arc<[AtomicU64; SignalType::COUNT]> =
+            Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
+
         let make_chain = |signal: SignalType| -> Arc<BatchChain> {
             let schema = signal.schema();
             let name = signal.name();
@@ -115,9 +134,20 @@ impl HotTier {
             let head = chain.head_arc();
             let writer: Option<ColdWriterFn> = cold_flush.as_ref().map(|f| {
                 let f = Arc::clone(f);
-                let w: ColdWriterFn = Arc::new(move |batch| {
+                let flushed = Arc::clone(&flushed);
+                let sig_idx = signal.index();
+                let w: ColdWriterFn = Arc::new(move |batch, max_wal_seq| {
                     let f = Arc::clone(&f);
-                    Box::pin(async move { f(signal, batch).await })
+                    let flushed = Arc::clone(&flushed);
+                    Box::pin(async move {
+                        // Advance the durable watermark only on a successful write,
+                        // and report success so the compactor evicts only durable data.
+                        let ok = f(signal, batch).await;
+                        if ok && max_wal_seq > 0 {
+                            flushed[sig_idx].fetch_max(max_wal_seq, Ordering::AcqRel);
+                        }
+                        ok
+                    })
                 });
                 w
             });
@@ -137,12 +167,91 @@ impl HotTier {
 
         Self {
             chains,
+            ingested: std::array::from_fn(|_| AtomicU64::new(0)),
+            flushed,
             known_resources: DashSet::new(),
             known_scopes: DashSet::new(),
             known_metrics: DashSet::new(),
             known_stacks: DashSet::new(),
             known_frames: DashSet::new(),
             known_mappings: DashSet::new(),
+        }
+    }
+
+    /// Push a converted `RecordBatch` into the chain for `signal`, recording
+    /// the batch's `max_wal_seq` so the durable watermark can account for it.
+    ///
+    /// Callers pass the ingesting WAL sequence uniformly in `meta.max_wal_seq`.
+    /// Content-addressed signals (resources, scopes, metric descriptors, profile
+    /// stacks/frames/mappings) are idempotent on replay and are low-volume, so
+    /// they are excluded from `ingested` here — otherwise a rarely-flushed
+    /// metadata chain would pin the watermark forever. Their rows are simply
+    /// re-applied (and de-duplicated) on replay.
+    pub fn push(&self, signal: SignalType, batch: Arc<RecordBatch>, meta: BatchMeta) {
+        // Ingest observability: rows pushed into the hot tier, labelled by signal.
+        // A no-op unless a metrics recorder is installed (the daemon installs one).
+        metrics::counter!("sequins_ingest_rows_total", "signal" => signal.name())
+            .increment(batch.num_rows() as u64);
+        if meta.max_wal_seq > 0 && !Self::is_content_addressed(signal) {
+            self.ingested[signal.index()].fetch_max(meta.max_wal_seq, Ordering::AcqRel);
+        }
+        self.chain(&signal).push(batch, meta);
+    }
+
+    /// Whether a signal's rows are content-addressed / de-duplicated on ingest
+    /// (and therefore idempotent to replay).
+    fn is_content_addressed(signal: SignalType) -> bool {
+        matches!(
+            signal,
+            SignalType::Resources
+                | SignalType::Scopes
+                | SignalType::MetricsMetadata
+                | SignalType::ProfileStacks
+                | SignalType::ProfileFrames
+                | SignalType::ProfileMappings
+        )
+    }
+
+    /// The highest WAL sequence number `W` such that every ingested entry with
+    /// seq ≤ `W` is durably persisted in the cold tier.
+    ///
+    /// Data with seq > `W` may live only in memory (and the WAL), so on restart
+    /// the node replays WAL entries after `W` to rebuild its un-flushed hot
+    /// window. A signal whose ingested seq is fully flushed does not constrain
+    /// the watermark; any signal with un-flushed data pins it at that signal's
+    /// flushed boundary. Chains flush oldest-first, so the boundary is
+    /// contiguous (everything ≤ it is in cold).
+    ///
+    /// Returns `u64::MAX` when nothing is outstanding; callers cap it at the
+    /// WAL's last sequence number.
+    pub fn durable_watermark(&self) -> u64 {
+        let mut w = u64::MAX;
+        for i in 0..SignalType::COUNT {
+            let ingested = self.ingested[i].load(Ordering::Acquire);
+            let flushed = self.flushed[i].load(Ordering::Acquire);
+            let boundary = if ingested <= flushed {
+                u64::MAX
+            } else {
+                flushed
+            };
+            w = w.min(boundary);
+        }
+        w
+    }
+
+    /// Force every content-addressed chain (resources, scopes, metric
+    /// descriptors, profile stacks/frames/mappings) to cold storage.
+    ///
+    /// These chains are excluded from the watermark (they de-dup on replay and
+    /// are low-volume, so they would otherwise pin it). Draining them at
+    /// checkpoint time — before the watermark is persisted — guarantees that the
+    /// metadata for every entry at or below the watermark is durable in cold, so
+    /// a restart never loses it even though it isn't tracked by the watermark.
+    pub async fn flush_content_addressed(&self) {
+        for signal in SignalType::all() {
+            if Self::is_content_addressed(*signal) {
+                self.chain(signal).flush_all().await;
+            }
         }
     }
 
@@ -301,6 +410,7 @@ impl HotTier {
                 min_timestamp: 0,
                 max_timestamp: 0,
                 row_count: 1,
+                ..Default::default()
             },
         );
 
@@ -331,6 +441,7 @@ impl HotTier {
                 min_timestamp: 0,
                 max_timestamp: 0,
                 row_count: 1,
+                ..Default::default()
             },
         );
 

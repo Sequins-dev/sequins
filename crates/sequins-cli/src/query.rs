@@ -11,24 +11,53 @@ use sequins_traits::QueryApi;
 use crate::storage::open_local_storage;
 use crate::OutputFormat;
 
-pub async fn execute(query_str: String, target: String, format: OutputFormat) -> Result<()> {
+pub async fn execute(
+    query_str: String,
+    target: String,
+    format: OutputFormat,
+    live: bool,
+) -> Result<()> {
     let is_remote = target.starts_with("http://") || target.starts_with("https://");
 
+    // Live queries emit the initial snapshot and then stream deltas indefinitely;
+    // one-shot queries run to completion. Both remote (Flight SQL) and local
+    // (in-process backend) targets support each mode.
     let mut stream = if is_remote {
         let client = RemoteClient::new(&target)
             .map_err(|e| anyhow::anyhow!("Failed to connect to {}: {}", target, e))?;
-        client
-            .query(&query_str)
-            .await
-            .context("Failed to execute remote query")?
+        if live {
+            client
+                .query_live(&query_str)
+                .await
+                .context("Failed to open remote live query")?
+        } else {
+            client
+                .query(&query_str)
+                .await
+                .context("Failed to execute remote query")?
+        }
     } else {
         let storage = open_local_storage(&target).await?;
         let backend = DataFusionBackend::new(storage);
-        backend
-            .query(&query_str)
-            .await
-            .context("Failed to execute local query")?
+        if live {
+            backend
+                .query_live(&query_str)
+                .await
+                .context("Failed to open local live query")?
+        } else {
+            backend
+                .query(&query_str)
+                .await
+                .context("Failed to execute local query")?
+        }
     };
+
+    if live {
+        // A live stream is unbounded — render each frame as it arrives rather
+        // than collecting the whole result first (a pretty JSON array can never
+        // close, so `json` degrades to line-delimited JSON here).
+        return stream_live(&mut stream, format).await;
+    }
 
     match format {
         OutputFormat::Table => print_stream_as_table(&mut stream).await,
@@ -45,6 +74,100 @@ pub async fn execute(query_str: String, target: String, format: OutputFormat) ->
             Ok(())
         }
     }
+}
+
+/// Render a live query stream continuously: the initial snapshot followed by
+/// Append/Update/Expire/Replace deltas, flushing after every frame so the output
+/// appears in real time (and pipes cleanly to `jq`, `grep`, etc.). Runs until the
+/// server ends the stream or the process is interrupted (Ctrl-C).
+async fn stream_live(stream: &mut sequins_traits::SeqlStream, format: OutputFormat) -> Result<()> {
+    use std::io::Write;
+    let jsonl = matches!(format, OutputFormat::Json | OutputFormat::Jsonl);
+
+    // Emit each row of a delta batch as line-delimited JSON (used for both the
+    // `json` and `jsonl` formats in live mode).
+    let emit_rows = |batch: &arrow::record_batch::RecordBatch| -> Result<()> {
+        for row in seql_substrait::reducer::batch_to_rows(batch) {
+            println!("{}", serde_json::to_string(&serde_json::Value::Array(row))?);
+        }
+        Ok(())
+    };
+
+    while let Some(result) = stream.next().await {
+        let fd = result.context("Live query stream error")?;
+        let Some(metadata) = decode_metadata(&fd.app_metadata) else {
+            continue;
+        };
+        match metadata {
+            SeqlMetadata::Schema {
+                shape,
+                columns,
+                watermark_ns,
+                ..
+            } if !jsonl => {
+                print_schema(&SchemaFrame {
+                    shape,
+                    columns,
+                    initial_watermark_ns: watermark_ns,
+                });
+            }
+            SeqlMetadata::Data { .. } => {
+                if let Ok(batch) = ipc_to_batch(&fd.data_body) {
+                    if jsonl {
+                        emit_rows(&batch)?;
+                    } else {
+                        print_batch(&batch)?;
+                    }
+                }
+            }
+            SeqlMetadata::Append { .. } => {
+                if let Ok(batch) = ipc_to_batch(&fd.data_body) {
+                    if jsonl {
+                        emit_rows(&batch)?;
+                    } else {
+                        println!("\n＋ appended {} row(s)", batch.num_rows());
+                        print_batch(&batch)?;
+                    }
+                }
+            }
+            SeqlMetadata::Update { row_id, .. } => {
+                if let Ok(batch) = ipc_to_batch(&fd.data_body) {
+                    if jsonl {
+                        emit_rows(&batch)?;
+                    } else {
+                        println!("\n~ updated row {row_id}");
+                        print_batch(&batch)?;
+                    }
+                }
+            }
+            SeqlMetadata::Replace { .. } => {
+                if let Ok(batch) = ipc_to_batch(&fd.data_body) {
+                    if jsonl {
+                        emit_rows(&batch)?;
+                    } else {
+                        println!("\n= result replaced");
+                        print_batch(&batch)?;
+                    }
+                }
+            }
+            SeqlMetadata::Expire { row_id, .. } if !jsonl => {
+                println!("\n－ expired row {row_id}");
+            }
+            SeqlMetadata::Warning { code, message } => {
+                print_warning(&warning_from_parts(code, message));
+            }
+            SeqlMetadata::Complete { .. } => {
+                if !jsonl {
+                    println!("\n✓ Live query ended");
+                }
+                break;
+            }
+            // Heartbeat / Expire-in-jsonl / Schema-in-jsonl carry nothing to render.
+            _ => {}
+        }
+        std::io::stdout().flush().ok();
+    }
+    Ok(())
 }
 
 async fn print_stream_as_table(stream: &mut sequins_traits::SeqlStream) -> Result<()> {

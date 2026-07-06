@@ -98,17 +98,20 @@ serde_yaml = "0.9"
 bincode    = "1"
 
 # Arrow + DataFusion
-arrow               = "57"
-arrow-flight        = { version = "57", features = ["flight-sql-experimental"] }
-datafusion          = "51"
-datafusion-substrait = "51"
+arrow               = "58"
+arrow-flight        = { version = "58", features = ["flight-sql-experimental"] }
+metrics             = "0.24"
+datafusion          = "54"
+datafusion-substrait = "54"
+datafusion-expr                = "54"
+datafusion-functions-aggregate = "54"
 
 # Vortex columnar storage
-vortex            = { version = "0.58", features = ["files", "zstd", "tokio", "object_store"] }
-vortex-datafusion = "0.58"
+vortex            = { version = "0.76", features = ["files", "zstd", "tokio", "object_store"] }
+vortex-datafusion = "0.76"
 
 # Object storage
-object_store = { version = "0.12", features = ["aws", "gcp", "azure", "http"] }
+object_store = { version = "0.13", features = ["aws", "gcp", "azure", "http"] }
 
 # Companion indexes
 tantivy     = "0.25"

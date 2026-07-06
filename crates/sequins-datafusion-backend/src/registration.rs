@@ -6,11 +6,13 @@
 use crate::exec_err;
 use crate::union_provider::SignalUnionProvider;
 use arrow::datatypes::SchemaRef;
+use datafusion::datasource::empty::EmptyTable;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
 };
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionContext;
+use seql_substrait::seql_ext::QueryScope;
 use sequins_arrow_schema::SignalType;
 use sequins_cold_tier::ColdTier;
 use sequins_hot_tier::HotTier;
@@ -126,22 +128,128 @@ pub(super) static SIGNAL_TABLE_DEFS: &[SignalTableDef] = &[
     },
 ];
 
-/// Register a union table (hot + cold tiers)
+/// Map a signal **table name** (e.g. `"logs"`, `"histogram_data_points"`) to the
+/// [`SignalType`] whose hot-tier `BatchChain` holds its rows.
+///
+/// Used by the distributed two-phase coordinator to resolve a `HotScanExec`'s
+/// table back to the node-local hot chain at `execute()` time.
+pub fn hot_signal_type_for_table(table_name: &str) -> Option<SignalType> {
+    SIGNAL_TABLE_DEFS
+        .iter()
+        .find(|def| def.table_name == table_name)
+        .map(|def| def.hot_signal_type)
+}
+
+/// Every `(table_name, hot SignalType)` pair known to the backend, so the
+/// distributed coordinator can register a hot-scan `TableProvider` per signal.
+pub fn hot_signal_tables() -> impl Iterator<Item = (&'static str, SignalType)> {
+    SIGNAL_TABLE_DEFS
+        .iter()
+        .map(|def| (def.table_name, def.hot_signal_type))
+}
+
+/// Register the table provider for a signal, honouring the [`QueryScope`]:
+/// - `HotOnly` → the in-memory `BatchChain` only (peer fan-out; no cold work).
+/// - `ColdOnly` → the shared cold Vortex files only (coordinator's single read).
+/// - `All` → a union of hot + cold (single-node / coordinator default).
 pub(super) async fn register_union_table(
     ctx: &SessionContext,
     def: &SignalTableDef,
     hot_tier: Arc<HotTier>,
     cold_tier_base_path: &str,
     cold_tier: Arc<tokio::sync::RwLock<ColdTier>>,
+    scope: QueryScope,
 ) -> Result<(), QueryError> {
     // Use the BatchChain for this signal type directly as a TableProvider.
-    // BatchChain already implements TableProvider, so we just hand the Arc in.
     let hot_provider: Arc<dyn TableProvider> = hot_tier.chain_arc(&def.hot_signal_type);
+    let schema = (def.schema_fn)();
 
-    // Get Vortex format from cold tier
+    // Hot-only needs no cold-tier work at all (skips the expensive infer_schema).
+    if scope == QueryScope::HotOnly {
+        return register(ctx, def.table_name, hot_provider);
+    }
+
+    // Cold provider, or `None` when the cold tier is empty / schema-incompatible.
+    let cold_provider =
+        build_cold_provider(ctx, def, cold_tier_base_path, &cold_tier, &schema).await?;
+
+    let provider: Arc<dyn TableProvider> = match scope {
+        QueryScope::ColdOnly => match cold_provider {
+            Some(cold) => cold,
+            // Unreadable / absent cold data → an empty table (zero rows, no error).
+            None => Arc::new(EmptyTable::new(schema)),
+        },
+        // All (and any unknown value) → hot ∪ cold, or hot-only when cold is absent.
+        _ => match cold_provider {
+            Some(cold) => Arc::new(SignalUnionProvider::new(hot_provider, cold, schema)),
+            None => hot_provider,
+        },
+    };
+
+    register(ctx, def.table_name, provider)
+}
+
+/// Build a session context whose signal tables are caller-supplied in-memory
+/// [`MemTable`]s (an [`EmptyTable`] for any signal not supplied), for the
+/// distributed coordinator to re-run an aggregating plan over rows gathered from
+/// the whole cluster. Overflow UDFs are registered exactly as the tier-backed
+/// context so `attr.*` aggregations still resolve.
+///
+/// Each supplied table's batches must share the canonical signal schema
+/// (`schema_fn`) — they do, because they come from a raw scan of that same
+/// signal — so column indices in the plan's `read` relation stay aligned.
+pub(super) fn build_memtable_ctx(
+    tables: &[(String, Vec<arrow::record_batch::RecordBatch>)],
+) -> Result<SessionContext, QueryError> {
+    use datafusion::datasource::MemTable;
+
+    let ctx = SessionContext::new();
+    sequins_attribute_codec::register_overflow_udfs(&ctx);
+
+    let provided: std::collections::HashMap<&str, &Vec<arrow::record_batch::RecordBatch>> =
+        tables.iter().map(|(n, b)| (n.as_str(), b)).collect();
+
+    for def in SIGNAL_TABLE_DEFS {
+        let schema = (def.schema_fn)();
+        let provider: Arc<dyn TableProvider> = match provided.get(def.table_name) {
+            Some(batches) if !batches.is_empty() => Arc::new(
+                MemTable::try_new(schema, vec![(*batches).clone()]).map_err(|e| {
+                    exec_err(format!(
+                        "Failed to build MemTable for {}: {}",
+                        def.table_name, e
+                    ))
+                })?,
+            ),
+            _ => Arc::new(EmptyTable::new(schema)),
+        };
+        register(&ctx, def.table_name, provider)?;
+    }
+
+    Ok(ctx)
+}
+
+/// Register a provider under `table_name`, mapping registration errors.
+fn register(
+    ctx: &SessionContext,
+    table_name: &str,
+    provider: Arc<dyn TableProvider>,
+) -> Result<(), QueryError> {
+    ctx.register_table(table_name, provider)
+        .map_err(|e| exec_err(format!("Failed to register {} table: {}", table_name, e)))?;
+    Ok(())
+}
+
+/// Build the cold-tier `ListingTable` provider for a signal, or `None` when the
+/// cold tier has an incompatible (old) schema and should be skipped.
+async fn build_cold_provider(
+    ctx: &SessionContext,
+    def: &SignalTableDef,
+    cold_tier_base_path: &str,
+    cold_tier: &Arc<tokio::sync::RwLock<ColdTier>>,
+    schema: &arrow::datatypes::SchemaRef,
+) -> Result<Option<Arc<dyn TableProvider>>, QueryError> {
     let vortex_format = cold_tier.read().await.create_vortex_format();
 
-    // Build cold tier listing table
     let cold_path = format!("file://{}/{}", cold_tier_base_path, def.cold_path);
     let cold_url = ListingTableUrl::parse(&cold_path).map_err(|e| {
         exec_err(format!(
@@ -153,15 +261,10 @@ pub(super) async fn register_union_table(
     let mut options = ListingOptions::new(vortex_format);
     options.file_extension = ".vortex".to_string();
 
-    let schema = (def.schema_fn)();
-
-    // Try to infer the actual schema from cold-tier files to detect schema evolution.
-    // If files were written with an older schema (e.g. renamed columns), the inferred
-    // schema will differ from the declared schema and we fall back to hot-tier only.
-    //
-    // Spawned in a separate task so that a panic inside Vortex's Arrow type conversion
-    // (e.g. Map<Utf8, LargeBinary> for _overflow_attrs) is caught by Tokio's task
-    // harness rather than propagating and unwinding through the registration call.
+    // Infer the cold-tier schema to detect schema evolution. Spawned in a separate
+    // task so a panic inside Vortex's Arrow type conversion (e.g. Map<Utf8,
+    // LargeBinary> for _overflow_attrs) is caught by Tokio rather than unwinding
+    // through registration.
     let cold_url_infer = cold_url.clone();
     let options_infer = options.clone();
     let state = ctx.state();
@@ -175,68 +278,42 @@ pub(super) async fn register_union_table(
         _ => None, // Panic or error → treat as empty cold tier
     };
 
-    // Check whether the inferred cold-tier schema is compatible with the declared schema.
-    // Compatible means all declared field names appear in the cold-tier files.
+    // Compatible means every declared field name appears in the cold-tier files.
     let cold_schema_compatible = match &inferred_schema {
-        None => true, // No files → empty cold tier, no conflict
-        Some(cold_schema) if cold_schema.fields().is_empty() => true, // empty schema
+        None => true,
+        Some(cold_schema) if cold_schema.fields().is_empty() => true,
         Some(cold_schema) => {
-            let declared_names: Vec<&str> =
-                schema.fields().iter().map(|f| f.name().as_str()).collect();
             let cold_names: std::collections::HashSet<&str> = cold_schema
                 .fields()
                 .iter()
                 .map(|f| f.name().as_str())
                 .collect();
-            declared_names.iter().all(|n| cold_names.contains(n))
+            schema
+                .fields()
+                .iter()
+                .all(|f| cold_names.contains(f.name().as_str()))
         }
     };
 
     if !cold_schema_compatible {
-        // Cold-tier files have a different schema (e.g. old column names from a previous
-        // schema version). Skip the cold tier for this table so queries don't fail.
-        // The stale files can be cleared manually to restore cold-tier reads.
         eprintln!(
             "⚠️ [register_union_table] Cold tier '{}' has incompatible schema (likely old data). \
              Using hot-tier only until cold-tier data is cleared.",
             def.table_name
         );
-        ctx.register_table(def.table_name, hot_provider)
-            .map_err(|e| {
-                exec_err(format!(
-                    "Failed to register hot-only table {}: {}",
-                    def.table_name, e
-                ))
-            })?;
-        return Ok(());
+        return Ok(None);
     }
 
     let config = ListingTableConfig::new(cold_url)
         .with_listing_options(options)
         .with_schema(schema.clone());
-
     let cold_table = ListingTable::try_new(config).map_err(|e| {
         exec_err(format!(
             "Failed to create ListingTable for {}: {}",
             def.table_name, e
         ))
     })?;
-
-    let cold_provider: Arc<dyn TableProvider> = Arc::new(cold_table);
-
-    // Create union provider
-    let union_provider = SignalUnionProvider::new(hot_provider, cold_provider, schema);
-
-    // Register table
-    ctx.register_table(def.table_name, Arc::new(union_provider))
-        .map_err(|e| {
-            exec_err(format!(
-                "Failed to register {} union table: {}",
-                def.table_name, e
-            ))
-        })?;
-
-    Ok(())
+    Ok(Some(Arc::new(cold_table)))
 }
 
 #[cfg(test)]
@@ -268,9 +345,16 @@ mod tests {
             .strip_prefix("file://")
             .unwrap();
 
-        register_union_table(&ctx, spans_def, hot_tier, base_path, cold_tier)
-            .await
-            .expect("Should register spans table");
+        register_union_table(
+            &ctx,
+            spans_def,
+            hot_tier,
+            base_path,
+            cold_tier,
+            QueryScope::All,
+        )
+        .await
+        .expect("Should register spans table");
 
         // Verify table is queryable
         let table = ctx
@@ -304,9 +388,16 @@ mod tests {
 
         // Register all signal tables
         for def in SIGNAL_TABLE_DEFS {
-            register_union_table(&ctx, def, hot_tier.clone(), base_path, cold_tier.clone())
-                .await
-                .expect("Should register table");
+            register_union_table(
+                &ctx,
+                def,
+                hot_tier.clone(),
+                base_path,
+                cold_tier.clone(),
+                QueryScope::All,
+            )
+            .await
+            .expect("Should register table");
         }
 
         // Verify all tables are registered

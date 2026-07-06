@@ -13,10 +13,10 @@ use futures::try_join;
 use vortex::array::ArrayContext;
 use vortex::buffer::ByteBuffer;
 use vortex::error::VortexResult;
-use vortex::io::runtime::Handle;
 use vortex::layout::segments::SegmentSinkRef;
 use vortex::layout::sequence::{SendableSequentialStream, SequencePointer};
 use vortex::layout::{LayoutRef, LayoutStrategy};
+use vortex::session::VortexSession;
 
 use crate::IndexedLayout;
 use vortex::layout::IntoLayout;
@@ -54,13 +54,13 @@ impl LayoutStrategy for IndexedLayoutStrategy {
         segment_sink: SegmentSinkRef,
         stream: SendableSequentialStream,
         mut eof: SequencePointer,
-        handle: Handle,
+        session: &VortexSession,
     ) -> VortexResult<LayoutRef> {
         // If no companion data, just pass through to inner strategy unchanged.
         let Some(companion) = &self.companion_data else {
             return self
                 .inner
-                .write_stream(ctx, segment_sink, stream, eof, handle)
+                .write_stream(ctx, segment_sink, stream, eof, session)
                 .await;
         };
 
@@ -133,7 +133,7 @@ impl LayoutStrategy for IndexedLayoutStrategy {
         // while companion waits.
         let (data_layout, (bloom_seg, trigram_seg, tantivy_seg)) = try_join!(
             self.inner
-                .write_stream(ctx, segment_sink, stream, data_eof, handle),
+                .write_stream(ctx, segment_sink, stream, data_eof, session),
             companion_future
         )?;
 

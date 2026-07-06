@@ -1159,7 +1159,7 @@ impl Component for AppModel {
                     .build();
 
                 let subtitle = gtk4::Label::builder()
-                    .label(&env.kind.subtitle())
+                    .label(env.kind.subtitle())
                     .css_classes(["caption", "dim-label"])
                     .build();
 

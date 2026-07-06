@@ -29,6 +29,17 @@ message SeqlExtension {
   // This replaces the old approach of pushing aux relations into plan.relations,
   // which discarded the auxiliary extensions (causing function-not-found errors).
   repeated bytes auxiliary_plan_bytes = 8;
+  // Which storage tiers to scan. Set by the distributed query coordinator so a
+  // peer returns only its hot-tier contribution (HOT_ONLY) while the coordinator
+  // reads shared cold storage once (COLD_ONLY). ALL (the default) = hot + cold,
+  // the single-node behaviour.
+  QueryScope scope = 9;
+  // True when the query is not a pure row transform — it aggregates or
+  // de-duplicates rows (Aggregate / Unique stages) — so a distributed
+  // coordinator cannot simply union per-node rows and must recompute over the
+  // gathered union. False for filter/project/compute queries, which are
+  // row-distributive and can be merged directly.
+  bool aggregated = 10;
 }
 
 // Time range specification
@@ -51,4 +62,11 @@ message AbsoluteRange {
 enum QueryMode {
   SNAPSHOT = 0;
   LIVE = 1;
+}
+
+// Which storage tiers a query should scan.
+enum QueryScope {
+  ALL = 0;        // hot + cold (single-node / coordinator default)
+  HOT_ONLY = 1;   // hot tier only (peer fan-out for distributed queries)
+  COLD_ONLY = 2;  // cold tier only (coordinator reads shared cold once)
 }

@@ -1,6 +1,6 @@
 use crate::entry::WalEntry;
 use crate::error::{Result, WalError};
-use object_store::{path::Path, ObjectStore};
+use object_store::{path::Path, ObjectStore, ObjectStoreExt};
 use std::sync::Arc;
 
 /// Metadata for a WAL segment file

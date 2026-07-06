@@ -869,7 +869,7 @@ impl Component for HealthModel {
             }
             HealthInput::ServiceFilter(filter) => {
                 if filter != self.service_filter {
-                    self.service_filter = filter.clone();
+                    self.service_filter = filter;
                     if filter.is_some() {
                         self.restart_streams(sender);
                     } else {
@@ -1156,7 +1156,7 @@ impl HealthModel {
 
 fn start_streams(model: &mut HealthModel, sender: ComponentSender<HealthModel>) {
     let ds = model.data_source.clone();
-    let service = model.service_filter.clone();
+    let service = model.service_filter;
     let range = model.time_range;
     let span_query = build_span_query(service, range);
     let log_query = build_log_query(service, range);

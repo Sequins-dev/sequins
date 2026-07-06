@@ -14,7 +14,12 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 fn create_test_config(temp_dir: &TempDir) -> StorageConfig {
+    create_test_config_with_node(temp_dir, None)
+}
+
+fn create_test_config_with_node(temp_dir: &TempDir, node_id: Option<&str>) -> StorageConfig {
     StorageConfig {
+        node_id: node_id.map(|s| s.to_string()),
         hot_tier: HotTierConfig {
             max_age: Duration::from_minutes(5),
             max_entries: 1000,
@@ -196,6 +201,7 @@ impl Storage {
             min_timestamp: 0,
             max_timestamp: i64::MAX,
             row_count: batch.num_rows(),
+            ..Default::default()
         };
         self.hot_tier
             .chain(&SignalType::Spans)
@@ -274,6 +280,7 @@ impl Storage {
             min_timestamp: 0,
             max_timestamp: i64::MAX,
             row_count: batch.num_rows(),
+            ..Default::default()
         };
         self.hot_tier
             .chain(&SignalType::Logs)
@@ -335,6 +342,7 @@ impl Storage {
             min_timestamp: 0,
             max_timestamp: i64::MAX,
             row_count: batch.num_rows(),
+            ..Default::default()
         };
         self.hot_tier
             .chain(&SignalType::MetricsMetadata)
@@ -401,6 +409,7 @@ impl Storage {
             min_timestamp: 0,
             max_timestamp: i64::MAX,
             row_count: batch.num_rows(),
+            ..Default::default()
         };
         self.hot_tier
             .chain(&SignalType::ProfilesMetadata)
@@ -502,6 +511,7 @@ async fn test_retention_cleanup_deletes_old_files() {
 
     // Create config with very short retention (1 second)
     let config = StorageConfig {
+        node_id: None,
         hot_tier: HotTierConfig {
             max_age: Duration::from_minutes(5),
             max_entries: 1000,
@@ -1274,4 +1284,135 @@ async fn test_retention_cleanup_respects_policy() {
 
     // No files to delete since we haven't written any
     assert_eq!(deleted_count, 0);
+}
+
+#[tokio::test]
+async fn test_per_node_prefix_isolation() {
+    use crate::test_fixtures::make_test_otlp_logs;
+    use std::path::Path;
+
+    // Two nodes share one object-store base but own distinct `node_id` prefixes.
+    let temp_dir = TempDir::new().unwrap();
+    let base = temp_dir.path().to_path_buf();
+
+    let storage_a = Storage::new(create_test_config_with_node(&temp_dir, Some("node-a")))
+        .await
+        .unwrap();
+    let storage_b = Storage::new(create_test_config_with_node(&temp_dir, Some("node-b")))
+        .await
+        .unwrap();
+
+    // node_id is recorded and the effective cold-tier uri is prefixed per node.
+    assert_eq!(storage_a.node_id(), "node-a");
+    assert_eq!(storage_b.node_id(), "node-b");
+    assert!(storage_a.config().cold_tier.uri.ends_with("/node-a"));
+    assert!(storage_b.config().cold_tier.uri.ends_with("/node-b"));
+
+    // Ingest a different number of logs into each node.
+    storage_a
+        .ingest_logs(make_test_otlp_logs(1, 3))
+        .await
+        .unwrap();
+    storage_b
+        .ingest_logs(make_test_otlp_logs(1, 5))
+        .await
+        .unwrap();
+
+    // Hot tiers are independent — each node sees only its own data.
+    assert_eq!(storage_a.stats().log_count, 3);
+    assert_eq!(storage_b.stats().log_count, 5);
+
+    // Both WALs independently allocate seq 1 for their first append.
+    assert_eq!(storage_a.wal().last_seq(), 1);
+    assert_eq!(storage_b.wal().last_seq(), 1);
+
+    // Flush the buffered WAL writers so segments hit the (local) object store.
+    storage_a.wal().flush().await.unwrap();
+    storage_b.wal().flush().await.unwrap();
+
+    // Each node wrote its own `segment_00000001.wal` under its own prefix.
+    // Without per-node prefixing these would be the same path and collide.
+    let a_seg = Path::new(&base).join("node-a/wal/segment_00000001.wal");
+    let b_seg = Path::new(&base).join("node-b/wal/segment_00000001.wal");
+    assert!(a_seg.is_file(), "node-a segment missing: {:?}", a_seg);
+    assert!(b_seg.is_file(), "node-b segment missing: {:?}", b_seg);
+}
+
+#[tokio::test]
+async fn test_default_node_id_is_local() {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Storage::new(create_test_config(&temp_dir)).await.unwrap();
+    assert_eq!(storage.node_id(), "local");
+    assert!(storage.config().cold_tier.uri.ends_with("/local"));
+}
+
+#[tokio::test]
+async fn test_wal_replay_recovers_unflushed_hot_data() {
+    use crate::test_fixtures::make_test_otlp_logs;
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Node A: ingest three separate log entries (WAL seq 1, 2, 3). With the
+    // default hot-tier size they never complete a node, so nothing flushes to
+    // cold — the data lives only in the hot tier and the WAL.
+    {
+        let storage_a = Storage::new(create_test_config_with_node(&temp_dir, Some("n1")))
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            storage_a
+                .ingest_logs(make_test_otlp_logs(1, 1))
+                .await
+                .unwrap();
+        }
+        assert_eq!(storage_a.stats().log_count, 3);
+        // Nothing flushed → watermark stays 0.
+        assert_eq!(storage_a.checkpoint().await.unwrap(), 0);
+        // Persist the WAL segments to the (shared) object store before "crashing".
+        storage_a.wal().flush().await.unwrap();
+    }
+
+    // Node A "restarts": a fresh Storage over the same prefix replays its WAL
+    // on construction and recovers the un-flushed hot window.
+    let storage_b = Storage::new(create_test_config_with_node(&temp_dir, Some("n1")))
+        .await
+        .unwrap();
+    assert_eq!(
+        storage_b.stats().log_count,
+        3,
+        "restart should replay all un-flushed WAL entries into the hot tier"
+    );
+}
+
+#[tokio::test]
+async fn test_wal_replay_respects_watermark() {
+    use crate::test_fixtures::make_test_otlp_logs;
+
+    let temp_dir = TempDir::new().unwrap();
+
+    {
+        let storage_a = Storage::new(create_test_config_with_node(&temp_dir, Some("n1")))
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            storage_a
+                .ingest_logs(make_test_otlp_logs(1, 1))
+                .await
+                .unwrap();
+        }
+        // Pretend entries 1 and 2 are already durable in the cold tier.
+        storage_a.persist_watermark(2).await.unwrap();
+        storage_a.wal().flush().await.unwrap();
+    }
+
+    // Replay must skip entries ≤ watermark (already in cold) and re-apply only
+    // entry 3 — proving no duplication of cold data.
+    let storage_b = Storage::new(create_test_config_with_node(&temp_dir, Some("n1")))
+        .await
+        .unwrap();
+    assert_eq!(
+        storage_b.stats().log_count,
+        1,
+        "replay should re-apply only WAL entries past the watermark"
+    );
 }

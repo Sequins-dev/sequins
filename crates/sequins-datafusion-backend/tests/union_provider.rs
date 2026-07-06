@@ -47,7 +47,7 @@ async fn test_union_provider_hot_and_cold() {
 
     // Verify we got data frame
     let has_data_frame = frames.iter().any(|f| {
-        decode_metadata(&f.app_metadata).map_or(false, |m| matches!(m, SeqlMetadata::Data { .. }))
+        decode_metadata(&f.app_metadata).is_some_and(|m| matches!(m, SeqlMetadata::Data { .. }))
     });
     assert!(has_data_frame, "Should have at least one data frame");
 }
@@ -78,8 +78,7 @@ async fn test_union_provider_with_filters() {
 
     // Verify complete frame exists
     let has_complete = frames.iter().any(|f| {
-        decode_metadata(&f.app_metadata)
-            .map_or(false, |m| matches!(m, SeqlMetadata::Complete { .. }))
+        decode_metadata(&f.app_metadata).is_some_and(|m| matches!(m, SeqlMetadata::Complete { .. }))
     });
     assert!(has_complete, "Should have complete frame");
 }

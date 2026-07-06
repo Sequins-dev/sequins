@@ -58,6 +58,17 @@ pub(super) async fn execute_plan(
     }
 }
 
+/// Decode the [`seql_ext::QueryScope`] stamped in a plan, defaulting to `All`
+/// when the plan is unreadable or carries no explicit scope. Used to pick the
+/// scoped session context before execution.
+pub(crate) fn decode_plan_scope(plan_bytes: &[u8]) -> seql_ext::QueryScope {
+    Plan::decode(plan_bytes)
+        .ok()
+        .and_then(|plan| extract_seql_extension(&plan).ok())
+        .and_then(|ext| seql_ext::QueryScope::try_from(ext.scope).ok())
+        .unwrap_or(seql_ext::QueryScope::All)
+}
+
 /// Extract and decode the `SeqlExtension` from a Substrait plan.
 fn extract_seql_extension(plan: &Plan) -> Result<seql_ext::SeqlExtension, QueryError> {
     let ext_any = plan
@@ -110,7 +121,7 @@ fn signal_from_str(s: &str) -> Signal {
 /// avoiding the "function reference not found" error that occurred when auxiliary
 /// relations were merged into the primary plan (dropping their extensions).
 #[tracing::instrument(skip_all)]
-async fn execute_snapshot(
+pub(crate) async fn execute_snapshot(
     storage: &Arc<Storage>,
     plan_bytes: Vec<u8>,
     make_session_ctx: impl std::future::Future<Output = Result<SessionContext, QueryError>>,
@@ -204,6 +215,198 @@ async fn consume_and_execute_root(
         .map_err(|e| exec_err(format!("consume_rel: {}", e)))?;
     let (_schema, batch) = execute_logical_plan_to_batch(ctx, logical_plan).await?;
     Ok(batch)
+}
+
+/// How to frame the single aggregated batch produced by [`execute_over_memtables`].
+#[derive(Clone, Copy, Debug)]
+pub enum MemtableFraming {
+    /// One-shot snapshot: `Schema` + `Data` (if non-empty) + `Complete`.
+    Snapshot,
+    /// First emission of a live re-aggregation: `Schema` + `Replace` (the stream
+    /// stays open, so no terminal `Complete`).
+    LiveInitial,
+    /// A subsequent live re-aggregation: `Replace` only (schema already sent).
+    LiveReplace,
+}
+
+/// Result of consuming and executing one plan root over a memtable context.
+struct RootResult {
+    schema: Arc<arrow::datatypes::Schema>,
+    batch: arrow::record_batch::RecordBatch,
+    col_defs: Vec<seql_ast::schema::ColumnDef>,
+}
+
+/// Consume a self-contained Substrait plan's primary relation against `ctx`,
+/// optionally strip the time-column upper bound (for live re-aggregation), and
+/// execute it to a single batch.
+async fn consume_execute_root(
+    ctx: &SessionContext,
+    plan_bytes: &[u8],
+    strip_time_col: Option<&str>,
+) -> Result<RootResult, QueryError> {
+    let plan: Plan = Message::decode(plan_bytes)
+        .map_err(|e| exec_err(format!("consume_execute_root: decode: {}", e)))?;
+    let extensions = Extensions::try_from(&plan.extensions)
+        .map_err(|e| exec_err(format!("consume_execute_root: extensions: {}", e)))?;
+    let rel = plan
+        .relations
+        .first()
+        .and_then(|pr| pr.rel_type.as_ref())
+        .and_then(get_rel)
+        .ok_or_else(|| exec_err("consume_execute_root: plan has no primary relation"))?;
+    let ctx_state = ctx.state();
+    let consumer = DefaultSubstraitConsumer::new(&extensions, &ctx_state);
+    let mut logical_plan = consumer
+        .consume_rel(rel)
+        .await
+        .map_err(|e| exec_err(format!("consume_execute_root: consume_rel: {}", e)))?;
+    drop(ctx_state);
+
+    if strip_time_col.is_some() {
+        logical_plan = strip_plan_time_upper_bound(logical_plan, strip_time_col)?;
+    }
+
+    let (schema, batch) = execute_logical_plan_to_batch(ctx, logical_plan).await?;
+    let col_defs = crate::arrow_convert::schema_to_col_defs(&schema);
+    Ok(RootResult {
+        schema,
+        batch,
+        col_defs,
+    })
+}
+
+/// Run `plan_bytes` (primary relation **and** every auxiliary plan) over `ctx` —
+/// whose signal tables are caller-supplied `MemTable`s — and frame the result per
+/// `framing`.
+///
+/// The distributed coordinator uses this to re-run an aggregating query over rows
+/// gathered from every cluster node. Auxiliary plans (`merge`/`navigate`, e.g.
+/// metric histograms) are executed too, so an aggregation that embeds a
+/// sub-collection is correct cluster-wide as long as the coordinator gathered the
+/// auxiliary signals' rows into the context (which it does).
+///
+/// A live re-aggregation must count rows ingested *after* the query opened, but
+/// the compiled plan carries a `time <= <open-time>` upper bound that would reject
+/// them (the same bound the live Append path strips). Live framings strip it from
+/// the primary and each auxiliary plan; snapshot framing keeps it.
+pub(crate) async fn execute_over_memtables(
+    plan_bytes: Vec<u8>,
+    ctx: SessionContext,
+    framing: MemtableFraming,
+    watermark_ns: u64,
+) -> Result<SeqlStream, QueryError> {
+    let start = Instant::now();
+
+    let plan: Plan = Message::decode(&plan_bytes[..])
+        .map_err(|e| exec_err(format!("execute_over_memtables: decode plan: {}", e)))?;
+    let ext = extract_seql_extension(&plan)?;
+    let response_shape = seql_ast::schema::ResponseShape::from_shape_str(&ext.response_shape)
+        .unwrap_or(seql_ast::schema::ResponseShape::Table);
+    let live = matches!(
+        framing,
+        MemtableFraming::LiveInitial | MemtableFraming::LiveReplace
+    );
+
+    // Primary root.
+    let p_time_col = live
+        .then(|| time_column_for_signal(signal_from_str(&ext.signal)))
+        .flatten();
+    let primary = consume_execute_root(&ctx, &plan_bytes, p_time_col).await?;
+
+    // Auxiliary plans (each a self-contained Substrait plan referencing its own
+    // signal table, which the coordinator has registered as a MemTable).
+    let mut aux: Vec<(Option<String>, RootResult)> = Vec::new();
+    for (idx, aux_bytes) in ext.auxiliary_plan_bytes.iter().enumerate() {
+        let alias = ext.auxiliary_aliases.get(idx).cloned();
+        let a_time_col = live
+            .then(|| {
+                ext.auxiliary_signals
+                    .get(idx)
+                    .and_then(|s| time_column_for_signal(signal_from_str(s)))
+            })
+            .flatten();
+        let result = consume_execute_root(&ctx, aux_bytes, a_time_col).await?;
+        aux.push((alias, result));
+    }
+
+    let total_rows = primary.batch.num_rows() as u64
+        + aux
+            .iter()
+            .map(|(_, r)| r.batch.num_rows() as u64)
+            .sum::<u64>();
+
+    let mut frames: Vec<Result<FlightData, QueryError>> = Vec::new();
+    match framing {
+        MemtableFraming::Snapshot => {
+            frames.push(Ok(schema_flight_data(
+                None,
+                primary.schema,
+                response_shape,
+                primary.col_defs,
+                watermark_ns,
+            )));
+            if primary.batch.num_rows() > 0 {
+                frames.push(Ok(data_flight_data(None, &primary.batch)));
+            }
+            for (alias, r) in &aux {
+                frames.push(Ok(schema_flight_data(
+                    alias.as_deref(),
+                    r.schema.clone(),
+                    seql_ast::schema::ResponseShape::Table,
+                    r.col_defs.clone(),
+                    watermark_ns,
+                )));
+                if r.batch.num_rows() > 0 {
+                    frames.push(Ok(data_flight_data(alias.as_deref(), &r.batch)));
+                }
+            }
+            frames.push(Ok(complete_flight_data(QueryStats {
+                execution_time_us: start.elapsed().as_micros() as u64,
+                rows_scanned: total_rows,
+                bytes_read: 0,
+                rows_returned: total_rows,
+                warning_count: 0,
+            })));
+        }
+        MemtableFraming::LiveInitial => {
+            frames.push(Ok(schema_flight_data(
+                None,
+                primary.schema,
+                response_shape,
+                primary.col_defs,
+                watermark_ns,
+            )));
+            // Emit the initial aggregate as a Replace so the client seeds its
+            // state even when the aggregate is currently empty.
+            frames.push(Ok(replace_flight_data(None, &primary.batch, watermark_ns)));
+            for (alias, r) in &aux {
+                frames.push(Ok(schema_flight_data(
+                    alias.as_deref(),
+                    r.schema.clone(),
+                    seql_ast::schema::ResponseShape::Table,
+                    r.col_defs.clone(),
+                    watermark_ns,
+                )));
+                frames.push(Ok(replace_flight_data(
+                    alias.as_deref(),
+                    &r.batch,
+                    watermark_ns,
+                )));
+            }
+        }
+        MemtableFraming::LiveReplace => {
+            frames.push(Ok(replace_flight_data(None, &primary.batch, watermark_ns)));
+            for (alias, r) in &aux {
+                frames.push(Ok(replace_flight_data(
+                    alias.as_deref(),
+                    &r.batch,
+                    watermark_ns,
+                )));
+            }
+        }
+    }
+
+    Ok(Box::pin(stream::iter(frames)))
 }
 
 /// Execute each auxiliary plan and append `schema_flight_data` + `data_flight_data`
@@ -685,6 +888,30 @@ fn plan_has_aggregation(plan: &LogicalPlan) -> bool {
 /// For live streaming there is no meaningful upper bound — new data is always "now" — so
 /// we strip `<= lit(...)` predicates on the time column before the filter is compiled into
 /// a `PhysicalExpr`.
+/// Rewrite every `Filter` in a logical plan, stripping the time-column upper
+/// bound (`time <= <lit>`) from its predicate. Used by the memtable
+/// re-aggregation path so a live aggregate counts data ingested after the query
+/// opened (see [`strip_time_upper_bound`], which does the per-expression work).
+fn strip_plan_time_upper_bound(
+    plan: LogicalPlan,
+    time_col: Option<&str>,
+) -> Result<LogicalPlan, QueryError> {
+    use datafusion::common::tree_node::{Transformed, TreeNode};
+    use datafusion::logical_expr::Filter;
+
+    let rewritten = plan
+        .transform_up(|node| match node {
+            LogicalPlan::Filter(filter) => {
+                let predicate = strip_time_upper_bound(filter.predicate.clone(), time_col);
+                let new_filter = Filter::try_new(predicate, filter.input)?;
+                Ok(Transformed::yes(LogicalPlan::Filter(new_filter)))
+            }
+            other => Ok(Transformed::no(other)),
+        })
+        .map_err(|e| exec_err(format!("strip_plan_time_upper_bound: {}", e)))?;
+    Ok(rewritten.data)
+}
+
 fn strip_time_upper_bound(expr: Expr, time_col: Option<&str>) -> Expr {
     let Some(col_name) = time_col else {
         return expr;
@@ -1093,24 +1320,22 @@ mod tests {
         let mut append_rows = 0u64;
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         while std::time::Instant::now() < deadline {
-            match tokio::time::timeout(std::time::Duration::from_millis(50), no_match_stream.next())
-                .await
+            if let Ok(Some(Ok(fd))) =
+                tokio::time::timeout(std::time::Duration::from_millis(50), no_match_stream.next())
+                    .await
             {
-                Ok(Some(Ok(fd))) => {
-                    if let SeqlMetadata::Append { .. } = get_metadata(&fd) {
-                        // Count the rows decoded from the IPC body.
-                        if !fd.data_body.is_empty() {
-                            use arrow::ipc::reader::StreamReader;
-                            let cursor = std::io::Cursor::new(&fd.data_body[..]);
-                            if let Ok(reader) = StreamReader::try_new(cursor, None) {
-                                for batch in reader.flatten() {
-                                    append_rows += batch.num_rows() as u64;
-                                }
+                if let SeqlMetadata::Append { .. } = get_metadata(&fd) {
+                    // Count the rows decoded from the IPC body.
+                    if !fd.data_body.is_empty() {
+                        use arrow::ipc::reader::StreamReader;
+                        let cursor = std::io::Cursor::new(&fd.data_body[..]);
+                        if let Ok(reader) = StreamReader::try_new(cursor, None) {
+                            for batch in reader.flatten() {
+                                append_rows += batch.num_rows() as u64;
                             }
                         }
                     }
                 }
-                _ => {}
             }
         }
         assert_eq!(

@@ -229,6 +229,7 @@ fn simple_meta(row_count: usize) -> BatchMeta {
         min_timestamp: 0,
         max_timestamp: i64::MAX,
         row_count,
+        ..Default::default()
     }
 }
 

@@ -26,19 +26,37 @@ impl Storage {
     ///
     /// Pass `Arc::new(MockNowTime::new(base_ns))` in tests to make
     /// time-dependent logic fully deterministic.
-    pub async fn new_with_clock(config: StorageConfig, clock: Arc<dyn NowTime>) -> Result<Self> {
+    pub async fn new_with_clock(
+        mut config: StorageConfig,
+        clock: Arc<dyn NowTime>,
+    ) -> Result<Self> {
+        // Per-node object-store prefix: every node writes only under
+        // `{uri}/{node_id}/…` so multiple nodes can share one bucket without
+        // WAL-sequence or file collisions. Everything downstream (cold tier,
+        // WAL, series index, retention, health config) derives its paths from
+        // `cold_tier.uri`, so prefixing it once here threads through uniformly.
+        let node_id = config.effective_node_id().to_string();
+        config.cold_tier.uri =
+            format!("{}/{}", config.cold_tier.uri.trim_end_matches('/'), node_id);
+
         let cold_tier_inner = ColdTier::new(config.cold_tier.clone())?;
         let cold_tier = Arc::new(RwLock::new(cold_tier_inner));
 
-        // Build a cold-flush callback so completed hot-tier batches are durably persisted.
+        // Build a cold-flush callback so completed hot-tier batches are durably
+        // persisted. Returns `true` only on a successful write so the hot tier
+        // can advance its durable cold-flush watermark.
         let cold_flush: SignalColdFlushFn = {
             let cold_tier_ref = Arc::clone(&cold_tier);
             Arc::new(move |signal, batch| {
                 let cold_tier_ref = Arc::clone(&cold_tier_ref);
                 Box::pin(async move {
                     let ct = cold_tier_ref.read().await;
-                    if let Err(e) = ct.write_signal(signal, (*batch).clone()).await {
-                        tracing::error!("cold flush for {:?} failed: {}", signal, e);
+                    match ct.write_signal(signal, (*batch).clone()).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::error!("cold flush for {:?} failed: {}", signal, e);
+                            false
+                        }
                     }
                 })
             })
@@ -83,8 +101,9 @@ impl Storage {
         };
         let live_query_manager = Arc::new(LiveQueryManager::new(live_config));
 
-        Ok(Self {
+        let storage = Self {
             config,
+            node_id,
             hot_tier,
             cold_tier,
             wal,
@@ -94,6 +113,18 @@ impl Storage {
             retention_policy: Arc::new(RwLock::new(retention_policy)),
             health_config_path,
             clock,
-        })
+            replay_seq: std::sync::atomic::AtomicU64::new(0),
+        };
+
+        // Recover this node's un-flushed hot window: replay WAL entries newer
+        // than the durable cold-flush watermark back into the hot tier. Entries
+        // at or below the watermark are already in the cold tier, so they are
+        // skipped — no duplication. Runs before any server is started.
+        let replayed = storage.replay_wal().await?;
+        if replayed > 0 {
+            tracing::info!(entries = replayed, "replayed WAL entries into hot tier");
+        }
+
+        Ok(storage)
     }
 }

@@ -24,7 +24,6 @@ use datafusion::physical_plan::{
     PlanProperties, SendableRecordBatchStream, Statistics,
 };
 use futures::stream;
-use std::any::Any;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -35,7 +34,7 @@ use tokio::sync::mpsc;
 // ---------------------------------------------------------------------------
 
 /// Metadata for a single batch in the chain.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct BatchMeta {
     /// Earliest timestamp (nanoseconds) in the batch.
     pub min_timestamp: i64,
@@ -43,6 +42,14 @@ pub struct BatchMeta {
     pub max_timestamp: i64,
     /// Number of rows in the batch.
     pub row_count: usize,
+    /// Highest WAL sequence number whose data is contained in this batch.
+    ///
+    /// Used to advance the durable cold-flush watermark: when this batch is
+    /// flushed to cold storage, every WAL entry up to `max_wal_seq` (for this
+    /// signal) is durably persisted. `0` means "not tracked" (e.g. replay of
+    /// content-addressed metadata, or synthetic test batches) and never
+    /// constrains the watermark.
+    pub max_wal_seq: u64,
 }
 
 impl BatchMeta {
@@ -64,6 +71,7 @@ impl BatchMeta {
             min_timestamp: a.min_timestamp.min(b.min_timestamp),
             max_timestamp: a.max_timestamp.max(b.max_timestamp),
             row_count: a.row_count + b.row_count,
+            max_wal_seq: a.max_wal_seq.max(b.max_wal_seq),
         }
     }
 }
@@ -96,6 +104,17 @@ pub struct BatchNode {
 // BatchChain
 // ---------------------------------------------------------------------------
 
+/// Message to the per-chain compaction task.
+pub enum CompactionSignal {
+    /// New data was pushed — try to merge / flush as usual.
+    Compact,
+    /// Drain every currently-reachable node to cold storage and detach them,
+    /// then signal completion. Used to force low-volume content-addressed
+    /// chains (resources, scopes, …) into cold at checkpoint time so the
+    /// durable watermark can safely advance past them.
+    FlushAll(tokio::sync::oneshot::Sender<()>),
+}
+
 /// A lock-free linked list of Arrow `RecordBatch`es with background compaction.
 ///
 /// Multiple threads may call `push` concurrently without synchronisation.
@@ -108,7 +127,7 @@ pub struct BatchChain {
     /// Schema shared by all `RecordBatch`es in this chain.
     schema: SchemaRef,
     /// Channel sender: each `push` sends a signal so the compactor wakes up.
-    compaction_tx: mpsc::UnboundedSender<()>,
+    compaction_tx: mpsc::UnboundedSender<CompactionSignal>,
 }
 
 impl fmt::Debug for BatchChain {
@@ -124,7 +143,7 @@ impl BatchChain {
     ///
     /// The caller is responsible for spawning a `compaction_loop` task that
     /// reads from the returned receiver.
-    pub fn new(schema: SchemaRef) -> (BatchChain, mpsc::UnboundedReceiver<()>) {
+    pub fn new(schema: SchemaRef) -> (BatchChain, mpsc::UnboundedReceiver<CompactionSignal>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let chain = BatchChain {
             head: Arc::new(Atomic::null()),
@@ -132,6 +151,24 @@ impl BatchChain {
             compaction_tx: tx,
         };
         (chain, rx)
+    }
+
+    /// Force every currently-reachable node to cold storage and detach them,
+    /// awaiting completion. Nodes pushed concurrently (at the head) are left in
+    /// place. Used at checkpoint time for low-volume content-addressed chains so
+    /// their data is durable before the watermark advances.
+    ///
+    /// Resolves immediately if the compaction task has stopped.
+    pub async fn flush_all(&self) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self
+            .compaction_tx
+            .send(CompactionSignal::FlushAll(tx))
+            .is_err()
+        {
+            return;
+        }
+        let _ = rx.await;
     }
 
     /// Return a clone of the shared head pointer for use by `compaction_loop`.
@@ -198,7 +235,7 @@ impl BatchChain {
         }
 
         // Signal the compactor that new data is available.
-        let _ = self.compaction_tx.send(());
+        let _ = self.compaction_tx.send(CompactionSignal::Compact);
     }
 }
 
@@ -219,7 +256,7 @@ struct BatchChainExec {
     schema: SchemaRef,
     /// Column indices to select from each batch, or `None` for all columns.
     projection: Option<Vec<usize>>,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl fmt::Debug for BatchChainExec {
@@ -242,15 +279,11 @@ impl ExecutionPlan for BatchChainExec {
         "BatchChainExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
@@ -294,8 +327,8 @@ impl ExecutionPlan for BatchChainExec {
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 
-    fn statistics(&self) -> DFResult<Statistics> {
-        Ok(Statistics::new_unknown(&self.schema))
+    fn partition_statistics(&self, _partition: Option<usize>) -> DFResult<Arc<Statistics>> {
+        Ok(Arc::new(Statistics::new_unknown(&self.schema)))
     }
 }
 
@@ -330,10 +363,6 @@ fn collect_batches(head_ptr: *const BatchNode) -> Vec<Arc<RecordBatch>> {
 
 #[async_trait::async_trait]
 impl TableProvider for BatchChain {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -349,9 +378,22 @@ impl TableProvider for BatchChain {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        // Apply projection to schema so the returned plan reports the correct
-        // field subset. DataFusion relies on this to match with the cold tier
-        // provider when both are unioned in SignalUnionProvider.
+        self.scan_exec(projection)
+    }
+}
+
+impl BatchChain {
+    /// Build the leaf [`ExecutionPlan`] that streams this chain's snapshot,
+    /// optionally projected. This is the synchronous core of [`TableProvider::scan`]
+    /// (whose body never awaits), exposed directly so callers that already hold an
+    /// `Arc<BatchChain>` — notably the distributed two-phase `HotScanExec`, which
+    /// must bind to a node-local hot tier from within a synchronous `execute()` —
+    /// can obtain the same leaf without an async `Session`.
+    ///
+    /// Apply projection to the schema so the returned plan reports the correct
+    /// field subset. DataFusion relies on this to match with the cold tier
+    /// provider when both are unioned in `SignalUnionProvider`.
+    pub fn scan_exec(&self, projection: Option<&Vec<usize>>) -> DFResult<Arc<dyn ExecutionPlan>> {
         let projected_schema = match projection {
             Some(proj) => Arc::new(self.schema.project(proj)?),
             None => self.schema.clone(),
@@ -361,12 +403,12 @@ impl TableProvider for BatchChain {
             head: Arc::clone(&self.head),
             schema: projected_schema.clone(),
             projection: projection_owned,
-            properties: PlanProperties::new(
+            properties: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(projected_schema),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
-            ),
+            )),
         }))
     }
 }
@@ -394,7 +436,8 @@ impl TableProvider for BatchChain {
 pub type ColdWriterFn = Arc<
     dyn Fn(
             Arc<RecordBatch>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>
+            u64,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'static>>
         + Send
         + Sync,
 >;
@@ -407,14 +450,21 @@ pub type ColdWriterFn = Arc<
 pub async fn compaction_loop(
     head: Arc<Atomic<BatchNode>>,
     schema: SchemaRef,
-    mut rx: mpsc::UnboundedReceiver<()>,
+    mut rx: mpsc::UnboundedReceiver<CompactionSignal>,
     target_rows: usize,
     _name: String,
     cold_writer_fn: Option<ColdWriterFn>,
 ) {
     let mut ops: u64 = 0;
 
-    while rx.recv().await.is_some() {
+    while let Some(signal) = rx.recv().await {
+        // Force-flush the entire chain to cold on request (checkpoint of
+        // low-volume content-addressed chains), then acknowledge.
+        if let CompactionSignal::FlushAll(done) = signal {
+            drain_to_cold(&head, &cold_writer_fn).await;
+            let _ = done.send(());
+            continue;
+        }
         ops += 1;
 
         // --- Phase 1: identify X, Y, Z under an epoch guard ---
@@ -529,8 +579,10 @@ pub async fn compaction_loop(
                 }
             }
 
-            // Phase 4: check if we should flush to cold storage.
-            // Collect flush arguments before dropping the guard.
+            // Phase 4: detect a flush candidate — the complete successor of the
+            // (complete) merged node. We only *identify* it here; the cold write
+            // and eviction happen after the guard so a failed write leaves the
+            // node in the chain (write-then-evict, not evict-then-write).
             let mut maybe_flush: Option<(Arc<RecordBatch>, BatchMeta)> = None;
             if is_complete {
                 let merged_ptr = x_ref.next.load(Ordering::Acquire, &guard);
@@ -538,22 +590,8 @@ pub async fn compaction_loop(
                     let successor = merged_ref.next.load(Ordering::Acquire, &guard);
                     if let Some(succ_ref) = unsafe { successor.as_ref() } {
                         if succ_ref.complete.load(Ordering::Acquire) {
-                            let flush_batch = Arc::clone(&succ_ref.batch);
-                            let flush_meta = succ_ref.meta.clone();
-                            if merged_ref
-                                .next
-                                .compare_exchange(
-                                    successor,
-                                    Shared::null(),
-                                    Ordering::AcqRel,
-                                    Ordering::Acquire,
-                                    &guard,
-                                )
-                                .is_ok()
-                            {
-                                unsafe { guard.defer_destroy(successor) };
-                                maybe_flush = Some((flush_batch, flush_meta));
-                            }
+                            maybe_flush =
+                                Some((Arc::clone(&succ_ref.batch), succ_ref.meta.clone()));
                         }
                     }
                 }
@@ -568,11 +606,156 @@ pub async fn compaction_loop(
             // guard drops here if not already dropped
         };
 
-        // Await the cold flush AFTER the guard and all Shared<> pointers are gone.
-        if let Some((flush_batch, _flush_meta)) = flush_args {
-            if let Some(ref writer) = cold_writer_fn {
-                writer(flush_batch).await;
+        // Write the flush candidate to cold storage, then evict it from the
+        // chain only if the write succeeded. On failure the node stays hot (and
+        // its WAL entries stay un-checkpointed) so no data is silently lost.
+        if let Some((flush_batch, flush_meta)) = flush_args {
+            let wrote = match cold_writer_fn {
+                Some(ref writer) => writer(Arc::clone(&flush_batch), flush_meta.max_wal_seq).await,
+                None => true,
+            };
+            if wrote {
+                evict_flushed_node(&head, &merged_batch, &flush_batch);
             }
+        }
+    }
+}
+
+/// Evict the just-flushed successor node from the chain after a successful cold
+/// write.
+///
+/// Re-locates the merged node by identity (`merged_batch`), confirms its
+/// successor is still the flushed node (`flush_batch`) and complete, then
+/// CAS-detaches it. Runs in the single compaction task, so the tail is stable
+/// between the write and here — concurrent `push`es only prepend at the head and
+/// never touch this link. If the node is not found (already gone), this is a
+/// no-op.
+fn evict_flushed_node(
+    head: &Arc<Atomic<BatchNode>>,
+    merged_batch: &Arc<RecordBatch>,
+    flush_batch: &Arc<RecordBatch>,
+) {
+    let guard = epoch::pin();
+    let mut cur = head.load(Ordering::Acquire, &guard);
+    while let Some(cur_ref) = unsafe { cur.as_ref() } {
+        if Arc::ptr_eq(&cur_ref.batch, merged_batch) {
+            let succ = cur_ref.next.load(Ordering::Acquire, &guard);
+            if let Some(succ_ref) = unsafe { succ.as_ref() } {
+                if Arc::ptr_eq(&succ_ref.batch, flush_batch)
+                    && succ_ref.complete.load(Ordering::Acquire)
+                    && cur_ref
+                        .next
+                        .compare_exchange(
+                            succ,
+                            Shared::null(),
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                            &guard,
+                        )
+                        .is_ok()
+                {
+                    unsafe { guard.defer_destroy(succ) };
+                }
+            }
+            return;
+        }
+        cur = cur_ref.next.load(Ordering::Acquire, &guard);
+    }
+}
+
+/// Write every currently-reachable node to cold storage and detach the drained
+/// sub-list from the chain, reclaiming it.
+///
+/// Runs inside the single compaction task (so no concurrent merge/evict), and is
+/// safe against concurrent `push`es: those prepend new nodes at the head, which
+/// are left in place — only the sub-list starting at the snapshotted head node
+/// is detached. If any cold write fails, nothing is detached (retried on the
+/// next flush). Write-then-detach, so data is never dropped before it is durable.
+async fn drain_to_cold(head: &Arc<Atomic<BatchNode>>, cold_writer_fn: &Option<ColdWriterFn>) {
+    // Phase 1: snapshot (batch, meta) for every reachable node. Only `Arc` and
+    // plain data cross the later await — no `!Send` raw pointers.
+    let items: Vec<(Arc<RecordBatch>, BatchMeta)> = {
+        let guard = epoch::pin();
+        let mut out = Vec::new();
+        let mut cur = head.load(Ordering::Acquire, &guard);
+        while let Some(node) = unsafe { cur.as_ref() } {
+            out.push((Arc::clone(&node.batch), node.meta.clone()));
+            cur = node.next.load(Ordering::Acquire, &guard);
+        }
+        out
+    };
+    if items.is_empty() {
+        return;
+    }
+
+    // Phase 2: write every batch to cold; abort the detach if any write fails.
+    if let Some(writer) = cold_writer_fn {
+        for (batch, meta) in &items {
+            if !writer(Arc::clone(batch), meta.max_wal_seq).await {
+                return;
+            }
+        }
+    }
+
+    // Phase 3: detach the drained sub-list (the node holding the snapshotted head
+    // batch, and everything older) and reclaim it. All pointer work is inside a
+    // single guard with no await, so nothing `!Send` escapes.
+    let old_head_batch = &items[0].0;
+    let guard = epoch::pin();
+    let head_ptr = head.load(Ordering::Acquire, &guard);
+    let detached_start: Option<Shared<BatchNode>> = match unsafe { head_ptr.as_ref() } {
+        None => None,
+        Some(h) if Arc::ptr_eq(&h.batch, old_head_batch) => {
+            // No concurrent pushes since the snapshot — clear the whole chain.
+            head.compare_exchange(
+                head_ptr,
+                Shared::null(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                &guard,
+            )
+            .ok()
+            .map(|_| head_ptr)
+        }
+        Some(_) => {
+            // Concurrent pushes prepended newer nodes; find the node whose `next`
+            // is the snapshotted head node and detach from there.
+            let mut cur = head_ptr;
+            let mut start = None;
+            while let Some(cur_ref) = unsafe { cur.as_ref() } {
+                let nxt = cur_ref.next.load(Ordering::Acquire, &guard);
+                match unsafe { nxt.as_ref() } {
+                    Some(nxt_ref) if Arc::ptr_eq(&nxt_ref.batch, old_head_batch) => {
+                        if cur_ref
+                            .next
+                            .compare_exchange(
+                                nxt,
+                                Shared::null(),
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                                &guard,
+                            )
+                            .is_ok()
+                        {
+                            start = Some(nxt);
+                        }
+                        break;
+                    }
+                    Some(_) => cur = nxt,
+                    None => break,
+                }
+            }
+            start
+        }
+    };
+
+    // Reclaim the now-unreachable sub-list. Epoch reclamation defers the free
+    // until concurrent readers release their guards.
+    if let Some(mut cur) = detached_start {
+        while let Some(node) = unsafe { cur.as_ref() } {
+            let nxt = node.next.load(Ordering::Acquire, &guard);
+            unsafe { guard.defer_destroy(cur) };
+            cur = nxt;
         }
     }
 }
@@ -613,6 +796,7 @@ mod tests {
             min_timestamp: min_ts,
             max_timestamp: max_ts,
             row_count,
+            ..Default::default()
         }
     }
 
@@ -1043,5 +1227,81 @@ mod tests {
             let total: usize = results.iter().map(|b| b.num_rows()).sum();
             assert_eq!(total, 3, "chain should contain 3 rows after push");
         }
+    }
+
+    #[tokio::test]
+    async fn test_flush_all_drains_chain_to_cold() {
+        use std::sync::atomic::AtomicUsize;
+        let schema = make_schema();
+        let (chain, rx) = BatchChain::new(schema.clone());
+        let rows_flushed = Arc::new(AtomicUsize::new(0));
+        let writer: ColdWriterFn = {
+            let rows = Arc::clone(&rows_flushed);
+            Arc::new(move |batch: Arc<RecordBatch>, _seq: u64| {
+                let rows = Arc::clone(&rows);
+                Box::pin(async move {
+                    rows.fetch_add(batch.num_rows(), Ordering::Relaxed);
+                    true
+                })
+            })
+        };
+        let handle = tokio::spawn(compaction_loop(
+            chain.head_arc(),
+            schema.clone(),
+            rx,
+            1000,
+            "t".into(),
+            Some(writer),
+        ));
+
+        chain.push(
+            make_batch(schema.clone(), vec![1, 2], vec!["a", "b"]),
+            make_meta(1, 2, 2),
+        );
+        chain.push(
+            make_batch(schema.clone(), vec![3], vec!["c"]),
+            make_meta(3, 3, 1),
+        );
+
+        chain.flush_all().await;
+
+        assert_eq!(
+            rows_flushed.load(Ordering::Relaxed),
+            3,
+            "all rows should be written to cold"
+        );
+        assert_eq!(chain.row_count(), 0, "chain should be drained empty");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_flush_all_retains_on_write_failure() {
+        let schema = make_schema();
+        let (chain, rx) = BatchChain::new(schema.clone());
+        // Cold writer always fails → nothing may be detached.
+        let writer: ColdWriterFn =
+            Arc::new(move |_batch: Arc<RecordBatch>, _seq: u64| Box::pin(async move { false }));
+        let handle = tokio::spawn(compaction_loop(
+            chain.head_arc(),
+            schema.clone(),
+            rx,
+            1000,
+            "t".into(),
+            Some(writer),
+        ));
+
+        chain.push(
+            make_batch(schema.clone(), vec![1, 2], vec!["a", "b"]),
+            make_meta(1, 2, 2),
+        );
+
+        chain.flush_all().await;
+
+        assert_eq!(
+            chain.row_count(),
+            2,
+            "chain must be retained when the cold write fails"
+        );
+        handle.abort();
     }
 }

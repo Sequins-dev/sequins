@@ -22,7 +22,7 @@ use datafusion_substrait::substrait::proto::extensions::AdvancedExtension;
 use seql_ast::ast::{
     AggregateFn, AggregateStage, ArithOp, CompareOp, ComputeStage, Expr as AstExpr, FieldRef,
     FilterStage, GroupExpr, LimitStage, Literal, MergeStage, Predicate, ProjectStage, QueryAst,
-    QueryMode, ScalarFn, Signal, SortStage, Stage, TimeRange, UniqueStage,
+    QueryMode, ScalarFn, Scan, Signal, SortStage, Stage, TimeRange, UniqueStage,
 };
 use seql_ast::correlation::{merge_join_key, navigate_join_key};
 use seql_ast::schema::infer_shape;
@@ -113,6 +113,10 @@ pub async fn compile_ast(ast: QueryAst, ctx: &SessionContext) -> Result<Vec<u8>,
         auxiliary_aliases,
         auxiliary_signals,
         auxiliary_plan_bytes,
+        // Scope defaults to `All`; the distributed coordinator overrides it
+        // per-leg via `set_plan_scope`.
+        scope: crate::seql_ext::QueryScope::All as i32,
+        aggregated: ast_is_aggregated(&ast),
     };
 
     // Embed SeqlExtension in advanced_extensions.enhancement
@@ -125,6 +129,238 @@ pub async fn compile_ast(ast: QueryAst, ctx: &SessionContext) -> Result<Vec<u8>,
     });
 
     Ok(plan.encode_to_vec())
+}
+
+/// Whether a query aggregates or de-duplicates rows (an `Aggregate` or `Unique`
+/// stage in the main pipeline, any binding, **or any `merge` sub-pipeline**), and
+/// so is not row-distributive.
+///
+/// The merge case matters for distribution: a query like
+/// `metrics <- datapoints | group by … as datapoints` carries its aggregation
+/// inside the merge's inner pipeline, not the main one. Such a query cannot be
+/// correctly stream-merged across nodes (each node would produce its own partial
+/// aggregate) — it must go through the coordinator's gather-and-re-aggregate
+/// path, which requires this flag to be set.
+fn ast_is_aggregated(ast: &QueryAst) -> bool {
+    fn stage_aggregates(stage: &Stage) -> bool {
+        match stage {
+            Stage::Aggregate(_) | Stage::Unique(_) => true,
+            // Recurse into a merge's inner sub-pipeline (which may itself merge).
+            Stage::Merge(merge) => has_agg(&merge.stages),
+            _ => false,
+        }
+    }
+    fn has_agg(stages: &[Stage]) -> bool {
+        stages.iter().any(stage_aggregates)
+    }
+    has_agg(&ast.stages) || ast.bindings.iter().any(|b| has_agg(&b.stages))
+}
+
+/// Override the query scope stamped in a compiled plan's `SeqlExtension`.
+///
+/// The distributed query coordinator uses this to derive a `HotOnly` plan for
+/// peer fan-out and a `ColdOnly` plan for its own shared-cold read from a single
+/// client-supplied plan. Auxiliary plans need no change: they execute against
+/// the same (scoped) session context as the primary plan.
+pub fn set_plan_scope(
+    plan_bytes: &[u8],
+    scope: crate::seql_ext::QueryScope,
+) -> Result<Vec<u8>, QueryError> {
+    rewrite_seql_ext(plan_bytes, |ext| ext.scope = scope as i32)
+}
+
+/// Override the query mode (live vs snapshot) stamped in a compiled plan.
+///
+/// The coordinator forces its cold-tier leg to snapshot mode even for a live
+/// query — cold data is historical and never streams, and a live cold leg would
+/// otherwise re-emit the local hot broadcast (duplicating the hot leg).
+pub fn set_plan_mode(plan_bytes: &[u8], live: bool) -> Result<Vec<u8>, QueryError> {
+    let mode = if live {
+        crate::seql_ext::QueryMode::Live
+    } else {
+        crate::seql_ext::QueryMode::Snapshot
+    };
+    rewrite_seql_ext(plan_bytes, |ext| ext.mode = mode as i32)
+}
+
+/// Decode a plan, mutate its `SeqlExtension` in place via `f`, and re-encode.
+fn rewrite_seql_ext(
+    plan_bytes: &[u8],
+    f: impl FnOnce(&mut crate::seql_ext::SeqlExtension),
+) -> Result<Vec<u8>, QueryError> {
+    use datafusion_substrait::substrait::proto::Plan;
+
+    let mut plan: Plan = Message::decode(plan_bytes).map_err(|e| QueryError::Execution {
+        message: format!("rewrite_seql_ext: failed to decode plan: {e}"),
+    })?;
+    let ext_any = plan
+        .advanced_extensions
+        .as_mut()
+        .and_then(|adv| adv.enhancement.as_mut())
+        .ok_or_else(|| QueryError::Execution {
+            message: "rewrite_seql_ext: plan missing SeqlExtension enhancement".to_string(),
+        })?;
+    let mut ext = crate::seql_ext::SeqlExtension::decode(&ext_any.value[..]).map_err(|e| {
+        QueryError::Execution {
+            message: format!("rewrite_seql_ext: failed to decode SeqlExtension: {e}"),
+        }
+    })?;
+    f(&mut ext);
+    ext_any.value = ext.encode_to_vec().into();
+    Ok(plan.encode_to_vec())
+}
+
+/// Routing metadata read from a compiled plan's `SeqlExtension` — enough for the
+/// distributed query coordinator to decide fan-out strategy without a full
+/// Substrait decode.
+#[derive(Debug, Clone)]
+pub struct PlanMeta {
+    /// Which tiers the plan scans (`All` for a client query; a coordinator sets
+    /// `HotOnly`/`ColdOnly` on the legs it fans out).
+    pub scope: crate::seql_ext::QueryScope,
+    /// True for a live (streaming) query, false for a one-shot snapshot.
+    pub live: bool,
+    /// True when the query aggregates/de-duplicates (needs coordinator recompute).
+    pub aggregated: bool,
+    /// Primary signal name (e.g. `"logs"`).
+    pub signal: String,
+}
+
+/// Decode a compiled plan's [`PlanMeta`].
+pub fn decode_plan_meta(plan_bytes: &[u8]) -> Result<PlanMeta, QueryError> {
+    use datafusion_substrait::substrait::proto::Plan;
+
+    let plan: Plan = Message::decode(plan_bytes).map_err(|e| QueryError::Execution {
+        message: format!("decode_plan_meta: failed to decode plan: {e}"),
+    })?;
+    let ext_any = plan
+        .advanced_extensions
+        .as_ref()
+        .and_then(|adv| adv.enhancement.as_ref())
+        .ok_or_else(|| QueryError::Execution {
+            message: "decode_plan_meta: plan missing SeqlExtension enhancement".to_string(),
+        })?;
+    let ext = crate::seql_ext::SeqlExtension::decode(&ext_any.value[..]).map_err(|e| {
+        QueryError::Execution {
+            message: format!("decode_plan_meta: failed to decode SeqlExtension: {e}"),
+        }
+    })?;
+    Ok(PlanMeta {
+        scope: crate::seql_ext::QueryScope::try_from(ext.scope)
+            .unwrap_or(crate::seql_ext::QueryScope::All),
+        live: ext.mode == crate::seql_ext::QueryMode::Live as i32,
+        aggregated: ext.aggregated,
+        signal: ext.signal,
+    })
+}
+
+/// Decode a compiled plan's full [`SeqlExtension`](crate::seql_ext::SeqlExtension)
+/// — primary signal, time range, auxiliary plans, scope and mode.
+///
+/// The distributed query coordinator needs the signal + time range to build a
+/// raw-scan plan (via [`raw_scan_plan`]) for gathering rows to re-aggregate, and
+/// the auxiliary-plan list to decide whether an aggregating query is a simple
+/// primary aggregation (distributable) or a merge/navigate (kept node-local).
+pub fn decode_plan_ext(plan_bytes: &[u8]) -> Result<crate::seql_ext::SeqlExtension, QueryError> {
+    use datafusion_substrait::substrait::proto::Plan;
+
+    let plan: Plan = Message::decode(plan_bytes).map_err(|e| QueryError::Execution {
+        message: format!("decode_plan_ext: failed to decode plan: {e}"),
+    })?;
+    let ext_any = plan
+        .advanced_extensions
+        .as_ref()
+        .and_then(|adv| adv.enhancement.as_ref())
+        .ok_or_else(|| QueryError::Execution {
+            message: "decode_plan_ext: plan missing SeqlExtension enhancement".to_string(),
+        })?;
+    crate::seql_ext::SeqlExtension::decode(&ext_any.value[..]).map_err(|e| QueryError::Execution {
+        message: format!("decode_plan_ext: failed to decode SeqlExtension: {e}"),
+    })
+}
+
+/// Convert a primary-signal table name (as stored in `SeqlExtension.signal`)
+/// back to an AST [`Signal`]. Inverse of [`signal_to_name`].
+fn signal_from_name(name: &str) -> Option<Signal> {
+    Some(match name {
+        "spans" => Signal::Spans,
+        "logs" => Signal::Logs,
+        "datapoints" => Signal::Datapoints,
+        "histograms" => Signal::Histograms,
+        "metrics" => Signal::Metrics,
+        "samples" => Signal::Samples,
+        "traces" => Signal::Traces,
+        "profiles" => Signal::Profiles,
+        "stacks" => Signal::Stacks,
+        "frames" => Signal::Frames,
+        "mappings" => Signal::Mappings,
+        "resources" => Signal::Resources,
+        "scopes" => Signal::Scopes,
+        "span_links" => Signal::SpanLinks,
+        _ => return None,
+    })
+}
+
+/// Map a primary/auxiliary signal name (as stored in `SeqlExtension.signal` /
+/// `.auxiliary_signals`) to the registration table name that a plan's `read`
+/// relation references — e.g. `"histograms"` → `"histogram_data_points"`,
+/// `"traces"` → `"spans"`. The distributed coordinator registers gathered rows
+/// under this name so the re-run plan resolves them. Returns `None` for an
+/// unknown signal name.
+pub fn signal_table_name(signal_name: &str) -> Option<&'static str> {
+    signal_from_name(signal_name).map(signal_to_table_name)
+}
+
+/// Convert a `SeqlExtension` protobuf `TimeRange` back to an AST [`TimeRange`].
+/// Inverse of [`time_range_to_proto`].
+fn proto_to_time_range(tr: &crate::seql_ext::TimeRange) -> Option<TimeRange> {
+    match tr.range.as_ref()? {
+        crate::seql_ext::time_range::Range::SlidingWindowNs(ns) => {
+            Some(TimeRange::SlidingWindow { start_ns: *ns })
+        }
+        crate::seql_ext::time_range::Range::Absolute(a) => Some(TimeRange::Absolute {
+            start_ns: a.start_ns,
+            end_ns: a.end_ns,
+        }),
+    }
+}
+
+/// Compile a **raw-scan** plan — `<signal> <time_range>` with no pipeline stages
+/// and `aggregated = false` — for the distributed coordinator to gather the raw
+/// rows of `signal` from every node so it can re-run an aggregation over the
+/// union.
+///
+/// The coordinator stamps the returned plan with `HotOnly`/`ColdOnly` scope (via
+/// [`set_plan_scope`]) per leg. `live` selects streaming mode so peers emit
+/// `Append` deltas the coordinator can use as change signals. When `time_range`
+/// is absent a one-hour sliding window is used as a safety bound.
+pub async fn raw_scan_plan(
+    signal_name: &str,
+    time_range: Option<&crate::seql_ext::TimeRange>,
+    live: bool,
+) -> Result<Vec<u8>, QueryError> {
+    let signal = signal_from_name(signal_name).ok_or_else(|| QueryError::InvalidAst {
+        message: format!("raw_scan_plan: unknown signal '{signal_name}'"),
+    })?;
+    let time_range = time_range.and_then(proto_to_time_range).unwrap_or(
+        // Default: last hour — a safety bound so a coordinator never gathers the
+        // entire hot+cold history when the plan carries no explicit range.
+        TimeRange::SlidingWindow {
+            start_ns: 3_600_000_000_000,
+        },
+    );
+    let ast = QueryAst {
+        bindings: vec![],
+        scan: Scan { signal, time_range },
+        stages: vec![],
+        mode: if live {
+            QueryMode::Live
+        } else {
+            QueryMode::Snapshot
+        },
+    };
+    let ctx = schema_context()?;
+    compile_ast(ast, &ctx).await
 }
 
 /// Apply one pipeline stage that is common to both the primary plan and merge-aux paths.
@@ -476,9 +712,6 @@ macro_rules! overflow_stub_udf {
         struct $struct_name;
 
         impl ScalarUDFImpl for $struct_name {
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
             fn name(&self) -> &str {
                 $udf_name
             }

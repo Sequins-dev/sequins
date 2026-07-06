@@ -44,6 +44,8 @@ pub struct TestStorageBuilder {
     /// `self.base_ns()` always falls within a `last 1h` query window
     /// when the compiler uses the real system clock.
     base_ns: u64,
+    /// Optional node id (object-store prefix). Defaults to `None` → `"local"`.
+    node_id: Option<String>,
 }
 
 impl TestStorageBuilder {
@@ -63,7 +65,21 @@ impl TestStorageBuilder {
             cleanup_interval: Duration::from_hours(1),
             temp_dir: None,
             base_ns,
+            node_id: None,
         }
+    }
+
+    /// Set the node id (object-store prefix) for this storage instance.
+    pub fn node_id(mut self, node_id: impl Into<String>) -> Self {
+        self.node_id = Some(node_id.into());
+        self
+    }
+
+    /// Reuse an existing `TempDir` as the storage root (so multiple builders can
+    /// share one object-store base under distinct `node_id` prefixes).
+    pub fn temp_dir(mut self, temp_dir: TempDir) -> Self {
+        self.temp_dir = Some(temp_dir);
+        self
     }
 
     /// Set hot tier max age
@@ -100,6 +116,7 @@ impl TestStorageBuilder {
             .unwrap_or_else(|| TempDir::new().unwrap());
 
         let config = StorageConfig {
+            node_id: self.node_id.take(),
             hot_tier: HotTierConfig {
                 max_age: self.hot_tier_max_age,
                 max_entries: self.hot_tier_max_entries,

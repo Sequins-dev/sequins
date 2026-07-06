@@ -430,6 +430,7 @@ fn sim_hot_tier_concurrent_push_spans() {
                         min_timestamp: 0,
                         max_timestamp: i64::MAX,
                         row_count: batch.num_rows(),
+                        ..Default::default()
                     };
                     hot_tier
                         .chain(&SignalType::Spans)
@@ -472,6 +473,7 @@ fn sim_hot_tier_concurrent_push_and_count() {
                         min_timestamp: 0,
                         max_timestamp: i64::MAX,
                         row_count: batch.num_rows(),
+                        ..Default::default()
                     };
                     hot_tier
                         .chain(&SignalType::Spans)
@@ -536,6 +538,7 @@ fn sim_concurrent_push_and_stats() {
                     min_timestamp: 0,
                     max_timestamp: i64::MAX,
                     row_count: batch.num_rows(),
+                    ..Default::default()
                 };
                 hot_tier_ingest
                     .chain(&SignalType::Logs)

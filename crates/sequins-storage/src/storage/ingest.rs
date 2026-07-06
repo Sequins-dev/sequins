@@ -5,15 +5,17 @@ use sequins_hot_tier::BatchMeta;
 use sequins_wal::WalPayload;
 use std::sync::Arc;
 
-/// Build a simple `BatchMeta` from a batch — uses row count only for now.
+/// Build a simple `BatchMeta` from a batch, tagged with the ingesting WAL
+/// sequence number so the hot tier can track the durable cold-flush watermark.
 ///
 /// Timestamp range optimisation can be added later once we decide which
 /// column to use per signal type.
-fn simple_meta(row_count: usize) -> BatchMeta {
+fn simple_meta(row_count: usize, max_wal_seq: u64) -> BatchMeta {
     BatchMeta {
         min_timestamp: 0,
         max_timestamp: i64::MAX,
         row_count,
+        max_wal_seq,
     }
 }
 
@@ -46,6 +48,61 @@ impl Storage {
             .register_scope(&scope_model)
             .map_err(|e| sequins_traits::Error::Other(format!("Failed to register scope: {}", e)))
     }
+
+    /// Allocate (or, during replay, reuse) the WAL sequence for an ingest.
+    ///
+    /// During normal operation this appends `payload` to the WAL and returns
+    /// the assigned sequence. While replaying on startup it returns the
+    /// pre-assigned sequence from `replay_seq` without touching the WAL.
+    async fn ingest_seq(&self, payload: WalPayload) -> sequins_traits::Result<u64> {
+        let replay = self.replay_seq.load(std::sync::atomic::Ordering::Relaxed);
+        if replay != 0 {
+            return Ok(replay);
+        }
+        self.wal
+            .append(payload, self.clock.now_ns())
+            .await
+            .map_err(|e| sequins_traits::Error::Other(format!("Failed to append to WAL: {}", e)))
+    }
+
+    /// Replay WAL entries newer than the durable watermark back into the hot
+    /// tier, rebuilding the un-flushed hot window after a restart.
+    ///
+    /// Each entry is re-applied through the normal ingest path with WAL append
+    /// suppressed (via `replay_seq`) and its original sequence. Entries at or
+    /// below the watermark are already in the cold tier and are skipped, so
+    /// primary row data is re-added exactly once; content-addressed metadata
+    /// de-duplicates. Runs single-threaded during construction (no live
+    /// ingest or subscribers yet).
+    pub(crate) async fn replay_wal(&self) -> crate::error::Result<usize> {
+        use sequins_traits::OtlpIngest;
+        let watermark = self.load_watermark().await;
+        let entries = self
+            .wal
+            .read_range(watermark.saturating_add(1), u64::MAX)
+            .await?;
+        let mut applied = 0usize;
+        for entry in entries {
+            self.replay_seq
+                .store(entry.seq, std::sync::atomic::Ordering::Relaxed);
+            let result = match entry.payload {
+                WalPayload::Traces(req) => self.ingest_traces(req).await.map(|_| ()),
+                WalPayload::Logs(req) => self.ingest_logs(req).await.map(|_| ()),
+                WalPayload::Metrics(req) => self.ingest_metrics(req).await.map(|_| ()),
+                WalPayload::Profiles(req) => self.ingest_profiles(req).await.map(|_| ()),
+            };
+            self.replay_seq
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            result.map_err(|e| {
+                crate::error::Error::Storage(format!(
+                    "WAL replay failed at seq {}: {}",
+                    entry.seq, e
+                ))
+            })?;
+            applied += 1;
+        }
+        Ok(applied)
+    }
 }
 
 #[async_trait::async_trait]
@@ -59,10 +116,7 @@ impl sequins_traits::OtlpIngest for Storage {
     > {
         use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceResponse;
 
-        self.wal
-            .append(WalPayload::Traces(request.clone()), self.clock.now_ns())
-            .await
-            .map_err(|e| sequins_traits::Error::Other(format!("Failed to append to WAL: {}", e)))?;
+        let seq = self.ingest_seq(WalPayload::Traces(request.clone())).await?;
 
         let catalog = sequins_arrow_schema::arrow_schema::default_schema_catalog();
 
@@ -112,10 +166,9 @@ impl sequins_traits::OtlpIngest for Storage {
             match sequins_otlp::otlp_spans_to_batch(span_items, catalog) {
                 Ok(batch) => {
                     let batch = Arc::new(batch);
-                    let meta = simple_meta(batch.num_rows());
+                    let meta = simple_meta(batch.num_rows(), seq);
                     self.hot_tier
-                        .chain(&SignalType::Spans)
-                        .push(Arc::clone(&batch), meta);
+                        .push(SignalType::Spans, Arc::clone(&batch), meta);
                     let _ = self.live_broadcast.send((Signal::Spans, batch));
                 }
                 Err(e) => tracing::warn!(error = %e, "Failed to convert spans to batch"),
@@ -125,10 +178,9 @@ impl sequins_traits::OtlpIngest for Storage {
         if !span_events.is_empty() {
             match sequins_otlp::otlp_span_events_to_batch(span_events) {
                 Ok(batch) => {
-                    let meta = simple_meta(batch.num_rows());
+                    let meta = simple_meta(batch.num_rows(), seq);
                     self.hot_tier
-                        .chain(&SignalType::SpanEvents)
-                        .push(Arc::new(batch), meta);
+                        .push(SignalType::SpanEvents, Arc::new(batch), meta);
                 }
                 Err(e) => tracing::warn!(error = %e, "Failed to convert span events to batch"),
             }
@@ -137,10 +189,9 @@ impl sequins_traits::OtlpIngest for Storage {
         if !span_links.is_empty() {
             match sequins_otlp::otlp_span_links_to_batch(span_links) {
                 Ok(batch) => {
-                    let meta = simple_meta(batch.num_rows());
+                    let meta = simple_meta(batch.num_rows(), seq);
                     self.hot_tier
-                        .chain(&SignalType::SpanLinks)
-                        .push(Arc::new(batch), meta);
+                        .push(SignalType::SpanLinks, Arc::new(batch), meta);
                 }
                 Err(e) => tracing::warn!(error = %e, "Failed to convert span links to batch"),
             }
@@ -160,10 +211,7 @@ impl sequins_traits::OtlpIngest for Storage {
     > {
         use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceResponse;
 
-        self.wal
-            .append(WalPayload::Logs(request.clone()), self.clock.now_ns())
-            .await
-            .map_err(|e| sequins_traits::Error::Other(format!("Failed to append to WAL: {}", e)))?;
+        let seq = self.ingest_seq(WalPayload::Logs(request.clone())).await?;
 
         let catalog = sequins_arrow_schema::arrow_schema::default_schema_catalog();
 
@@ -195,10 +243,9 @@ impl sequins_traits::OtlpIngest for Storage {
             match sequins_otlp::otlp_logs_to_batch(log_items, catalog) {
                 Ok(batch) => {
                     let batch = Arc::new(batch);
-                    let meta = simple_meta(batch.num_rows());
+                    let meta = simple_meta(batch.num_rows(), seq);
                     self.hot_tier
-                        .chain(&SignalType::Logs)
-                        .push(Arc::clone(&batch), meta);
+                        .push(SignalType::Logs, Arc::clone(&batch), meta);
                     let _ = self.live_broadcast.send((Signal::Logs, batch));
                 }
                 Err(e) => tracing::warn!(error = %e, "Failed to convert logs to batch"),
@@ -219,10 +266,9 @@ impl sequins_traits::OtlpIngest for Storage {
     > {
         use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceResponse;
 
-        self.wal
-            .append(WalPayload::Metrics(request.clone()), self.clock.now_ns())
-            .await
-            .map_err(|e| sequins_traits::Error::Other(format!("Failed to append to WAL: {}", e)))?;
+        let seq = self
+            .ingest_seq(WalPayload::Metrics(request.clone()))
+            .await?;
 
         // Collect (OtlpMetric, resource_id, scope_id, service_name) tuples for direct conversion
         let mut items: Vec<(
@@ -259,10 +305,9 @@ impl sequins_traits::OtlpIngest for Storage {
         match sequins_otlp::otlp_datapoints_to_batch(&items) {
             Ok(batch) if batch.num_rows() > 0 => {
                 let batch = Arc::new(batch);
-                let meta = simple_meta(batch.num_rows());
+                let meta = simple_meta(batch.num_rows(), seq);
                 self.hot_tier
-                    .chain(&SignalType::Metrics)
-                    .push(Arc::clone(&batch), meta);
+                    .push(SignalType::Metrics, Arc::clone(&batch), meta);
                 let _ = self.live_broadcast.send((Signal::Datapoints, batch));
             }
             Ok(_) => {}
@@ -273,10 +318,9 @@ impl sequins_traits::OtlpIngest for Storage {
         match sequins_otlp::otlp_histograms_to_batch(&items) {
             Ok(batch) if batch.num_rows() > 0 => {
                 let batch = Arc::new(batch);
-                let meta = simple_meta(batch.num_rows());
+                let meta = simple_meta(batch.num_rows(), seq);
                 self.hot_tier
-                    .chain(&SignalType::Histograms)
-                    .push(Arc::clone(&batch), meta);
+                    .push(SignalType::Histograms, Arc::clone(&batch), meta);
                 let _ = self.live_broadcast.send((Signal::Histograms, batch));
             }
             Ok(_) => {}
@@ -286,10 +330,9 @@ impl sequins_traits::OtlpIngest for Storage {
         // Exponential histogram data points → hot tier
         match sequins_otlp::otlp_exp_histograms_to_batch(&items) {
             Ok(batch) if batch.num_rows() > 0 => {
-                let meta = simple_meta(batch.num_rows());
+                let meta = simple_meta(batch.num_rows(), seq);
                 self.hot_tier
-                    .chain(&SignalType::ExpHistograms)
-                    .push(Arc::new(batch), meta);
+                    .push(SignalType::ExpHistograms, Arc::new(batch), meta);
             }
             Ok(_) => {}
             Err(e) => {
@@ -321,10 +364,9 @@ impl sequins_traits::OtlpIngest for Storage {
             match sequins_otlp::otlp_metrics_to_batch(&new_metric_items) {
                 Ok(batch) if batch.num_rows() > 0 => {
                     let batch = Arc::new(batch);
-                    let meta = simple_meta(batch.num_rows());
+                    let meta = simple_meta(batch.num_rows(), seq);
                     self.hot_tier
-                        .chain(&SignalType::MetricsMetadata)
-                        .push(Arc::clone(&batch), meta);
+                        .push(SignalType::MetricsMetadata, Arc::clone(&batch), meta);
                     let _ = self.live_broadcast.send((Signal::Metrics, batch));
                 }
                 Ok(_) => {}
@@ -346,10 +388,9 @@ impl sequins_traits::OtlpIngest for Storage {
     >{
         use opentelemetry_proto::tonic::collector::profiles::v1development::ExportProfilesServiceResponse;
 
-        self.wal
-            .append(WalPayload::Profiles(request.clone()), self.clock.now_ns())
-            .await
-            .map_err(|e| sequins_traits::Error::Other(format!("Failed to append to WAL: {}", e)))?;
+        let seq = self
+            .ingest_seq(WalPayload::Profiles(request.clone()))
+            .await?;
 
         let dictionary = request.dictionary.as_ref();
 
@@ -388,48 +429,43 @@ impl sequins_traits::OtlpIngest for Storage {
             Ok(batches) => {
                 if batches.profiles.num_rows() > 0 {
                     let batch = Arc::new(batches.profiles);
-                    let meta = simple_meta(batch.num_rows());
+                    let meta = simple_meta(batch.num_rows(), seq);
                     self.hot_tier
-                        .chain(&SignalType::ProfilesMetadata)
-                        .push(Arc::clone(&batch), meta);
+                        .push(SignalType::ProfilesMetadata, Arc::clone(&batch), meta);
                     let _ = self.live_broadcast.send((Signal::Profiles, batch));
                 }
                 if batches.frames.num_rows() > 0 {
                     if let Some(new_frames) = self.hot_tier.filter_new_frames(&batches.frames) {
                         let batch = Arc::new(new_frames);
-                        let meta = simple_meta(batch.num_rows());
+                        let meta = simple_meta(batch.num_rows(), seq);
                         self.hot_tier
-                            .chain(&SignalType::ProfileFrames)
-                            .push(Arc::clone(&batch), meta);
+                            .push(SignalType::ProfileFrames, Arc::clone(&batch), meta);
                         let _ = self.live_broadcast.send((Signal::Frames, batch));
                     }
                 }
                 if batches.stacks.num_rows() > 0 {
                     if let Some(new_stacks) = self.hot_tier.filter_new_stacks(&batches.stacks) {
                         let batch = Arc::new(new_stacks);
-                        let meta = simple_meta(batch.num_rows());
+                        let meta = simple_meta(batch.num_rows(), seq);
                         self.hot_tier
-                            .chain(&SignalType::ProfileStacks)
-                            .push(Arc::clone(&batch), meta);
+                            .push(SignalType::ProfileStacks, Arc::clone(&batch), meta);
                         let _ = self.live_broadcast.send((Signal::Stacks, batch));
                     }
                 }
                 if batches.samples.num_rows() > 0 {
                     let batch = Arc::new(batches.samples);
-                    let meta = simple_meta(batch.num_rows());
+                    let meta = simple_meta(batch.num_rows(), seq);
                     self.hot_tier
-                        .chain(&SignalType::ProfileSamples)
-                        .push(Arc::clone(&batch), meta);
+                        .push(SignalType::ProfileSamples, Arc::clone(&batch), meta);
                     let _ = self.live_broadcast.send((Signal::Samples, batch));
                 }
                 if batches.mappings.num_rows() > 0 {
                     if let Some(new_mappings) = self.hot_tier.filter_new_mappings(&batches.mappings)
                     {
                         let batch = Arc::new(new_mappings);
-                        let meta = simple_meta(batch.num_rows());
+                        let meta = simple_meta(batch.num_rows(), seq);
                         self.hot_tier
-                            .chain(&SignalType::ProfileMappings)
-                            .push(Arc::clone(&batch), meta);
+                            .push(SignalType::ProfileMappings, Arc::clone(&batch), meta);
                         let _ = self.live_broadcast.send((Signal::Mappings, batch));
                     }
                 }

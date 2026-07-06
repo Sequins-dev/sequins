@@ -2,6 +2,7 @@
 
 use super::cold_tier::ColdTier;
 use crate::error::{Error, Result};
+use object_store::ObjectStoreExt;
 use sequins_types::models::Timestamp;
 
 impl ColdTier {
@@ -171,7 +172,7 @@ mod tests {
             .unwrap_or(&cold_tier.config.uri)
             .to_string();
 
-        let old_nanos: i64 = 946684800_000_000_000; // 2000-01-01
+        let old_nanos: i64 = 946_684_800_000_000_000; // 2000-01-01
         let old_path = ObjectPath::from(
             format!(
                 "{}/spans/year=2000/month=01/day=01/{}.vortex",
@@ -185,7 +186,7 @@ mod tests {
             .await
             .unwrap();
 
-        let future_nanos: i64 = 4102444800_000_000_000; // 2100-01-01
+        let future_nanos: i64 = 4_102_444_800_000_000_000; // 2100-01-01
         let new_path = ObjectPath::from(
             format!(
                 "{}/spans/year=2100/month=01/day=01/{}.vortex",

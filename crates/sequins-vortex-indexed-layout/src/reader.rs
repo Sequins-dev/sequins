@@ -5,7 +5,7 @@
 //! delegating to the inner reader. If the companion indexes prove no rows can match,
 //! it returns an all-false mask to skip the file entirely.
 
-use std::collections::BTreeSet;
+use std::any::Any;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use vortex::buffer::ByteBuffer;
 use vortex::dtype::{DType, FieldMask};
 use vortex::error::{vortex_err, VortexResult};
 use vortex::layout::segments::{SegmentId, SegmentSource};
-use vortex::layout::{ArrayFuture, LayoutReader, LayoutReaderRef};
+use vortex::layout::{ArrayFuture, LayoutReader, LayoutReaderRef, RowSplits, SplitRange};
 use vortex::mask::Mask;
 
 use sequins_companion_index::BloomFilterSet;
@@ -45,6 +45,10 @@ impl LayoutReader for IndexedLayoutReader {
         &self.name
     }
 
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn dtype(&self) -> &DType {
         &self.dtype
     }
@@ -56,11 +60,11 @@ impl LayoutReader for IndexedLayoutReader {
     fn register_splits(
         &self,
         field_mask: &[FieldMask],
-        row_range: &Range<u64>,
-        splits: &mut BTreeSet<u64>,
+        split_range: &SplitRange,
+        splits: &mut RowSplits,
     ) -> VortexResult<()> {
         self.data_reader
-            .register_splits(field_mask, row_range, splits)
+            .register_splits(field_mask, split_range, splits)
     }
 
     fn pruning_evaluation(
@@ -147,10 +151,7 @@ async fn load_bytes(
     seg: SegmentId,
 ) -> VortexResult<ByteBuffer> {
     let handle: BufferHandle = segment_source.request(seg).await?;
-    match handle {
-        BufferHandle::Host(b) => Ok(b),
-        BufferHandle::Device(d) => d.to_host(),
-    }
+    handle.try_into_host_sync()
 }
 
 /// Reconstruct a Tantivy index from a bundled segment and search for `search_text`
@@ -241,7 +242,8 @@ fn bloom_may_match_equalities(bloom: &BloomFilterSet, equalities: &[(String, Str
 }
 
 fn collect_predicates(expr: &Expression, out: &mut CompanionPredicates) {
-    use vortex::array::expr::{Binary, Operator};
+    use vortex::scalar_fn::fns::binary::Binary;
+    use vortex::scalar_fn::fns::operators::Operator;
 
     // Recurse into AND conjunctions.
     if let Some(op) = expr.as_opt::<Binary>() {
@@ -270,9 +272,8 @@ fn collect_predicates(expr: &Expression, out: &mut CompanionPredicates) {
 /// LIKE with leading and trailing wildcards). Returns the inner text with `%`
 /// markers stripped, or `None` if the expression is not of this form.
 fn extract_ilike_text(expr: &Expression) -> Option<String> {
-    use vortex::array::compute::LikeOptions;
-    use vortex::array::expr::Like;
-    use vortex::array::expr::Literal;
+    use vortex::scalar_fn::fns::like::{Like, LikeOptions};
+    use vortex::scalar_fn::fns::literal::Literal;
 
     // Check if this is a Like expression with case_insensitive=true and negated=false
     let opts: &LikeOptions = expr.as_opt::<Like>()?;
@@ -285,7 +286,7 @@ fn extract_ilike_text(expr: &Expression) -> Option<String> {
     let scalar: &vortex::scalar::Scalar = pattern_expr.as_opt::<Literal>()?;
 
     // Extract the string value
-    let text = scalar.as_utf8().value_ref()?.as_str().to_string();
+    let text = scalar.as_utf8().value()?.as_str().to_string();
 
     // Strip leading and trailing '%' wildcards and return the inner text
     let text = text.trim_matches('%');
@@ -301,7 +302,10 @@ fn extract_ilike_text(expr: &Expression) -> Option<String> {
 /// Returns `(field_name, value)` if the expression is an equality between a
 /// `GetItem` field access and a string literal, `None` otherwise.
 fn extract_equality_predicate(expr: &Expression) -> Option<(String, String)> {
-    use vortex::array::expr::{Binary, GetItem, Literal, Operator};
+    use vortex::scalar_fn::fns::binary::Binary;
+    use vortex::scalar_fn::fns::get_item::GetItem;
+    use vortex::scalar_fn::fns::literal::Literal;
+    use vortex::scalar_fn::fns::operators::Operator;
 
     let op = expr.as_opt::<Binary>()?;
     if *op != Operator::Eq {
@@ -313,14 +317,14 @@ fn extract_equality_predicate(expr: &Expression) -> Option<(String, String)> {
 
     // Try field = literal
     if let (Some(field_name), Some(scalar)) = (lhs.as_opt::<GetItem>(), rhs.as_opt::<Literal>()) {
-        if let Some(buf) = scalar.as_utf8().value_ref() {
+        if let Some(buf) = scalar.as_utf8().value() {
             return Some((field_name.to_string(), buf.as_str().to_string()));
         }
     }
 
     // Try literal = field (reversed)
     if let (Some(field_name), Some(scalar)) = (rhs.as_opt::<GetItem>(), lhs.as_opt::<Literal>()) {
-        if let Some(buf) = scalar.as_utf8().value_ref() {
+        if let Some(buf) = scalar.as_utf8().value() {
             return Some((field_name.to_string(), buf.as_str().to_string()));
         }
     }

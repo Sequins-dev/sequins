@@ -33,7 +33,9 @@ impl QueryApi for DataFusionBackend {
 #[async_trait]
 impl QueryExec for DataFusionBackend {
     async fn execute(&self, plan_bytes: Vec<u8>) -> Result<SeqlStream, QueryError> {
+        // The plan's scope selects which storage tiers to scan (hot / cold / both).
+        let scope = crate::execution::decode_plan_scope(&plan_bytes);
         let storage = self.storage.clone();
-        execute_plan(&storage, plan_bytes, self.make_session_ctx()).await
+        execute_plan(&storage, plan_bytes, self.session_ctx_for_scope(scope)).await
     }
 }

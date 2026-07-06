@@ -26,6 +26,7 @@ use std::sync::Arc;
 async fn make_storage_backend() -> (Arc<Storage>, DataFusionBackend, tempfile::TempDir) {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let config = StorageConfig {
+        node_id: None,
         hot_tier: HotTierConfig {
             max_age: Duration::from_minutes(60),
             max_entries: 10_000,
