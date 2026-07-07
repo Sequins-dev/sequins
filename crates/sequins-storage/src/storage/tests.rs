@@ -1293,7 +1293,8 @@ async fn test_per_node_prefix_isolation() {
     use crate::test_fixtures::make_test_otlp_logs;
     use std::path::Path;
 
-    // Two nodes share one object-store base but own distinct `node_id` prefixes.
+    // Two nodes share one object-store base. Cold is a single **shared** dataset
+    // (same uri, no per-node prefix); only the WAL is private to each node.
     let temp_dir = TempDir::new().unwrap();
     let base = temp_dir.path().to_path_buf();
 
@@ -1304,11 +1305,16 @@ async fn test_per_node_prefix_isolation() {
         .await
         .unwrap();
 
-    // node_id is recorded and the effective cold-tier uri is prefixed per node.
+    // node_id is recorded; the cold-tier uri is the SHARED base (not per-node),
+    // so a query on either node reads the same cold dataset.
     assert_eq!(storage_a.node_id(), "node-a");
     assert_eq!(storage_b.node_id(), "node-b");
-    assert!(storage_a.config().cold_tier.uri.ends_with("/node-a"));
-    assert!(storage_b.config().cold_tier.uri.ends_with("/node-b"));
+    assert_eq!(
+        storage_a.config().cold_tier.uri,
+        storage_b.config().cold_tier.uri,
+        "cold tier must be a single shared dataset, not per-node prefixed"
+    );
+    assert!(!storage_a.config().cold_tier.uri.ends_with("/node-a"));
 
     // Ingest a different number of logs into each node.
     storage_a
@@ -1345,7 +1351,8 @@ async fn test_default_node_id_is_local() {
     let temp_dir = TempDir::new().unwrap();
     let storage = Storage::new(create_test_config(&temp_dir)).await.unwrap();
     assert_eq!(storage.node_id(), "local");
-    assert!(storage.config().cold_tier.uri.ends_with("/local"));
+    // Cold is shared, so the uri is NOT rewritten with the node id.
+    assert!(!storage.config().cold_tier.uri.ends_with("/local"));
 }
 
 #[tokio::test]
