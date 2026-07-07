@@ -10,11 +10,14 @@ pub use sequins_hot_tier::HotTierConfig;
 pub struct StorageConfig {
     /// Stable identifier for this node.
     ///
-    /// Used as the per-node object-store prefix (`{uri}/{node_id}/…`) so that
-    /// multiple nodes can share one bucket without WAL-sequence or file
-    /// collisions. Each node owns its own prefix for writes; readers union
-    /// across all node prefixes. Defaults to `"local"` for single-node
-    /// (embedded) use — **multi-node deployments must set a unique value.**
+    /// Cold storage is a single dataset **shared** by the whole cluster (one
+    /// `cold_tier.uri`, no per-node prefix), so a query on any node sees data
+    /// flushed by any node. The node id is used to keep each node's **WAL**
+    /// private (`{uri}/{node_id}/wal`, since a WAL only ever replays its own
+    /// node's un-flushed hot window) and to stamp globally-unique cold filenames
+    /// so concurrent writers to the shared dataset never collide. Defaults to
+    /// `"local"` for single-node (embedded) use — **multi-node deployments must
+    /// set a unique, stable value per node.**
     #[serde(default)]
     pub node_id: Option<String>,
 

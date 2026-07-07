@@ -33,6 +33,12 @@ pub struct ColdTier {
     pub store: Arc<dyn ObjectStore>,
     /// Series index for metric time series (protected by RwLock for concurrent access)
     pub series_index: Arc<RwLock<SeriesIndex>>,
+    /// This node's stable id, stamped into every cold filename so concurrent
+    /// nodes writing to the one shared cold dataset never collide.
+    pub(crate) node_id: String,
+    /// Monotonic per-instance counter, also stamped into filenames, so two
+    /// flushes from this node in the same nanosecond still get distinct names.
+    write_seq: std::sync::atomic::AtomicU64,
     // Note: SessionContext removed - we create fresh contexts per query
     // to avoid state pollution. Will revisit when implementing production version.
 }
@@ -54,7 +60,37 @@ impl ColdTier {
             config,
             store,
             series_index,
+            node_id: "local".to_string(),
+            write_seq: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Set this node's id (used to stamp globally-unique cold filenames on a
+    /// shared dataset). Defaults to `"local"` for single-node use.
+    pub fn with_node_id(mut self, node_id: impl Into<String>) -> Self {
+        self.node_id = node_id.into();
+        self
+    }
+
+    /// A filename-safe token unique to this node and this write: `{node_id}-{seq}`.
+    /// Stamped into every cold filename by [`Self::write_record_batch`] so multiple
+    /// nodes sharing one cold dataset never overwrite each other's files.
+    pub(crate) fn write_token(&self) -> String {
+        let seq = self
+            .write_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let sanitized: String = self
+            .node_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        format!("{sanitized}-{seq}")
     }
 
     /// Load the series index from storage (called at startup)

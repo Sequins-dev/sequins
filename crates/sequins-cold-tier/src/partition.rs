@@ -50,8 +50,10 @@ impl ColdTier {
     /// Uses `ObjectStore::list` rather than `std::fs::read_dir` so it works on any
     /// object store backend (local filesystem, S3, GCS, Azure Blob Storage).
     ///
-    /// Files are identified by their nanosecond-timestamp filename: every Vortex file
-    /// written by `write_signal_batch` is named `{timestamp_nanos}.vortex`.
+    /// Files are identified by the nanosecond timestamp that leads their filename:
+    /// every Vortex file written by the cold-tier write path is named
+    /// `{timestamp_nanos}-{node_id}-{seq}.vortex` (the node/seq suffix keeps
+    /// concurrent writers to the shared cold dataset from colliding).
     pub async fn cleanup_old_files(
         &self,
         telemetry_type: &str,
@@ -83,9 +85,11 @@ impl ColdTier {
                 continue;
             }
 
-            // Filename is the last path component; strip `.vortex` to get the nanos timestamp.
+            // Filename is `{ts_nanos}-{node_id}-{seq}.vortex` (or legacy
+            // `{ts_nanos}.vortex`); the timestamp is the leading numeric component.
             if let Some(filename) = location.split('/').next_back() {
-                if let Some(ts_str) = filename.strip_suffix(".vortex") {
+                if let Some(stem) = filename.strip_suffix(".vortex") {
+                    let ts_str = stem.split('-').next().unwrap_or(stem);
                     if let Ok(file_nanos) = ts_str.parse::<i64>() {
                         if file_nanos < cutoff_nanos {
                             to_delete.push(meta.location);
