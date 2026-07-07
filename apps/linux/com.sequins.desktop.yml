@@ -2,6 +2,8 @@ app-id: com.sequins.desktop
 runtime: org.gnome.Platform
 runtime-version: '48'
 sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.llvm18
 command: sequins-desktop
 
 finish-args:
@@ -14,9 +16,12 @@ finish-args:
   - --talk-name=ca.desrt.dconf
 
 build-options:
+  prepend-path: /usr/lib/sdk/llvm18/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm18/lib
   env:
     CARGO_HOME: /run/build/sequins-desktop/cargo
     CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+    LIBCLANG_PATH: /usr/lib/sdk/llvm18/lib
     PROTOC_INCLUDE: /app/share/protoc/include
 
 modules:
@@ -41,6 +46,8 @@ modules:
 
   - name: rust
     buildsystem: simple
+    build-options:
+      no-debuginfo: true
     build-commands:
       - |
         case "$(uname -m)" in

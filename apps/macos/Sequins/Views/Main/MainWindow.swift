@@ -81,7 +81,6 @@ struct MainWindow: View {
                         }
                     }
                 }
-                .sharedBackgroundVisibility(.hidden)
             } else {
                 ToolbarItem(placement: .navigation) {
                     if let service = appState.selectedService {
