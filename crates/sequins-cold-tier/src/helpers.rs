@@ -2,6 +2,67 @@
 
 use sequins_types::models::Timestamp;
 
+/// The object-store-relative base prefix for a storage URI.
+///
+/// [`crate::ColdTier`]'s object store is created already scoped to the URI's
+/// bucket/root (e.g. `AmazonS3Builder::with_bucket_name`), so every path handed
+/// to it must be relative to that root — NOT the full URI:
+///
+/// - `file:///var/data`      → `/var/data`  (LocalFileSystem addresses by full path)
+/// - `/var/data`             → `/var/data`  (bare local path)
+/// - `s3://bucket/prefix`    → `prefix`
+/// - `gs://bucket/prefix`    → `prefix`
+/// - `az://container/prefix` → `prefix`
+/// - `s3://bucket`           → `` (bucket root, no prefix)
+///
+/// Returns a slice of the input so it's a drop-in for a `&str` base path.
+pub fn store_base_path(uri: &str) -> &str {
+    if let Some(local) = uri.strip_prefix("file://") {
+        return local;
+    }
+    match uri.find("://") {
+        // Object-store URL: drop the scheme and the bucket/host, keep the path.
+        Some(scheme) => {
+            let after_scheme = &uri[scheme + 3..];
+            match after_scheme.find('/') {
+                Some(slash) => after_scheme[slash + 1..].trim_end_matches('/'),
+                None => "",
+            }
+        }
+        // Bare local path.
+        None => uri,
+    }
+}
+
+#[cfg(test)]
+mod store_base_path_tests {
+    use super::store_base_path;
+
+    #[test]
+    fn local_paths_keep_full_path() {
+        assert_eq!(store_base_path("file:///var/data"), "/var/data");
+        assert_eq!(store_base_path("/var/data"), "/var/data");
+        assert_eq!(
+            store_base_path("file:///var/data/node-0"),
+            "/var/data/node-0"
+        );
+    }
+
+    #[test]
+    fn object_store_uris_drop_scheme_and_bucket() {
+        assert_eq!(store_base_path("s3://bucket/prefix"), "prefix");
+        assert_eq!(store_base_path("s3://bucket/a/b/node-0"), "a/b/node-0");
+        assert_eq!(store_base_path("gs://bucket/prefix"), "prefix");
+        assert_eq!(store_base_path("az://container/prefix"), "prefix");
+        assert_eq!(store_base_path("s3://bucket/prefix/"), "prefix");
+    }
+
+    #[test]
+    fn bucket_root_has_empty_prefix() {
+        assert_eq!(store_base_path("s3://bucket"), "");
+    }
+}
+
 pub(crate) fn generate_partition_path(telemetry_type: &str, timestamp: &Timestamp) -> String {
     // Format: {type}/year=YYYY/month=MM/day=DD/{timestamp}.vortex
 

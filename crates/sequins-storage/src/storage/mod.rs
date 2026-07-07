@@ -7,7 +7,6 @@ use sequins_live_query::LiveQueryManager;
 use sequins_types::models::RetentionPolicy;
 use sequins_types::NowTime;
 use sequins_wal::Wal;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
@@ -41,8 +40,6 @@ pub struct Storage {
     pub(super) shutdown_notify: Arc<tokio::sync::Notify>,
     /// Persisted retention policy (overrides config defaults)
     pub(super) retention_policy: Arc<RwLock<Option<RetentionPolicy>>>,
-    /// Path to health config JSON file
-    pub(super) health_config_path: PathBuf,
     /// Wall-clock time provider (injectable for deterministic testing)
     pub(crate) clock: Arc<dyn NowTime>,
     /// WAL sequence to use for the entry currently being replayed on startup.

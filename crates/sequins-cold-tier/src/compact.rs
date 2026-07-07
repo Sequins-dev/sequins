@@ -28,11 +28,7 @@ impl ColdTier {
     ///
     /// Returns the number of files that were removed (originals minus merged).
     pub async fn compact_signal(&self, signal: SignalType, schema: SchemaRef) -> Result<usize> {
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
 
         // The prefix used by write_signal_batch for this signal.
         let signal_prefix = signal_cold_path(signal);

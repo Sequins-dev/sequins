@@ -43,11 +43,7 @@ impl ColdTier {
         // Build the object-store prefix for metric data files.
         // The write path stores files at: {base_path}/metrics/data/YYYY-MM-DD/HH/ts.vortex
         // where base_path is the URI with "file://" stripped.
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
         let prefix_str = format!("{}/metrics/data", base_path.trim_end_matches('/'));
         let obj_prefix = ObjPath::from(prefix_str.as_str());
 
@@ -204,11 +200,7 @@ impl ColdTier {
             None
         };
 
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
         let prefix_str = format!("{}/metrics/histograms", base_path.trim_end_matches('/'));
         let obj_prefix = ObjPath::from(prefix_str.as_str());
 

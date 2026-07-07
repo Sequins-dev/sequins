@@ -59,11 +59,7 @@ impl ColdTier {
 
     /// Load the series index from storage (called at startup)
     pub async fn load_series_index(&self) -> Result<()> {
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
 
         let loaded_index = SeriesIndex::load(self.store.clone(), base_path).await?;
 
@@ -139,6 +135,18 @@ impl ColdTier {
             }
             if let Ok(endpoint) = std::env::var("AWS_ENDPOINT") {
                 builder = builder.with_endpoint(endpoint);
+            }
+            // S3-compatible stores reached over plain HTTP (MinIO, Ceph RGW, a
+            // local gateway) need this — object_store rejects http endpoints
+            // unless explicitly allowed.
+            if let Ok(v) = std::env::var("AWS_ALLOW_HTTP") {
+                builder = builder.with_allow_http(v.eq_ignore_ascii_case("true") || v == "1");
+            }
+            // MinIO and most S3-compatibles serve buckets path-style
+            // (`endpoint/bucket`) rather than virtual-hosted (`bucket.endpoint`).
+            if let Ok(v) = std::env::var("AWS_VIRTUAL_HOSTED_STYLE") {
+                builder = builder
+                    .with_virtual_hosted_style_request(v.eq_ignore_ascii_case("true") || v == "1");
             }
 
             let store = builder
@@ -302,11 +310,7 @@ impl ColdTier {
                 .map_err(|e| Error::Storage(format!("Failed to get current time: {}", e)))?,
         );
 
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
         let full_path = format!("{}/{}", base_path, partition_path);
 
         self.write_record_batch(batch.clone(), batch.schema(), &full_path, companion_bytes)

@@ -41,11 +41,7 @@ impl ColdTier {
 
         let partition_path = helpers::generate_partition_path("profiles", &timestamp);
 
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
         let full_path = format!("{}/{}", base_path, partition_path);
 
         self.write_record_batch(batch.clone(), batch.schema(), &full_path, None)

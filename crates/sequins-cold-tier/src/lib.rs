@@ -35,6 +35,7 @@ pub mod test_helpers;
 pub use cold_tier::ColdTier;
 pub use config::{ColdTierConfig, CompanionIndexConfig};
 pub use error::{Error, Result};
+pub use helpers::store_base_path;
 pub use rollups::{
     DurationStats, MetricExemplar, MetricRollup, PercentileStats, ProfileRollup, RollupTier,
     SpanRollup,

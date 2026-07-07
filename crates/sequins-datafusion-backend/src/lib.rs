@@ -167,20 +167,17 @@ impl DataFusionBackend {
         let hot_tier = self.storage.hot_tier_arc();
         let cold_tier = self.storage.cold_tier_arc();
 
-        let base_path = self
-            .storage
-            .config()
-            .cold_tier
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.storage.config().cold_tier.uri);
+        let cold_uri = self.storage.config().cold_tier.uri.clone();
+        // Register the cold-tier object store so DataFusion can resolve cloud
+        // (s3://, gs://, az://) cold-table URLs; file:// uses its built-in store.
+        registration::register_cold_object_store(&ctx, &cold_uri, &cold_tier).await;
 
         for def in registration::SIGNAL_TABLE_DEFS {
             registration::register_union_table(
                 &ctx,
                 def,
                 hot_tier.clone(),
-                base_path,
+                &cold_uri,
                 cold_tier.clone(),
                 scope,
             )

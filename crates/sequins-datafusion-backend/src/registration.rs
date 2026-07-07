@@ -239,6 +239,44 @@ fn register(
     Ok(())
 }
 
+/// Register the cold-tier object store with the session so DataFusion can
+/// resolve object-store (`s3://`, `gs://`, `az://`) cold-table URLs. `file://`
+/// and bare local paths use DataFusion's built-in local store, so are skipped.
+///
+/// The store is registered under the URL authority (`scheme://bucket`); the
+/// [`ColdTier`] store is already scoped to that bucket, so DataFusion's
+/// bucket-relative object paths line up with what the writers produce.
+pub(super) async fn register_cold_object_store(
+    ctx: &SessionContext,
+    uri: &str,
+    cold_tier: &Arc<tokio::sync::RwLock<ColdTier>>,
+) {
+    if uri.starts_with("file://") || uri.starts_with('/') {
+        return;
+    }
+    if let Ok(url) = url::Url::parse(uri) {
+        if let Some(host) = url.host_str() {
+            if let Ok(base) = url::Url::parse(&format!("{}://{}", url.scheme(), host)) {
+                let store = cold_tier.read().await.store.clone();
+                ctx.runtime_env().register_object_store(&base, store);
+            }
+        }
+    }
+}
+
+/// Build a cold-tier `ListingTable` URL for a signal. The cold-tier uri already
+/// carries its scheme (`file://`, `s3://`, …); a bare local path is turned into a
+/// `file://` URL. Previously this always prepended `file://`, which produced an
+/// invalid `file://s3://…` URL for cloud backends.
+fn cold_listing_url(uri: &str, cold_path: &str) -> String {
+    let base = uri.trim_end_matches('/');
+    if base.contains("://") {
+        format!("{base}/{cold_path}")
+    } else {
+        format!("file://{base}/{cold_path}")
+    }
+}
+
 /// Build the cold-tier `ListingTable` provider for a signal, or `None` when the
 /// cold tier has an incompatible (old) schema and should be skipped.
 async fn build_cold_provider(
@@ -250,7 +288,7 @@ async fn build_cold_provider(
 ) -> Result<Option<Arc<dyn TableProvider>>, QueryError> {
     let vortex_format = cold_tier.read().await.create_vortex_format();
 
-    let cold_path = format!("file://{}/{}", cold_tier_base_path, def.cold_path);
+    let cold_path = cold_listing_url(cold_tier_base_path, def.cold_path);
     let cold_url = ListingTableUrl::parse(&cold_path).map_err(|e| {
         exec_err(format!(
             "Failed to parse cold tier URL '{}': {}",

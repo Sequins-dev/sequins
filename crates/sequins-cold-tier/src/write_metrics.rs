@@ -23,11 +23,7 @@ impl ColdTier {
         );
 
         // Prepend base path since object store has no prefix
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
         let full_path = format!("{}/{}", base_path, partition_path);
 
         let schema = batch.schema();
@@ -108,11 +104,7 @@ impl ColdTier {
             .map_err(|e| Error::Storage(format!("Failed to get current time: {}", e)))?;
         let partition_path = Self::generate_metric_partition_path(&metric_name, &now);
 
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
         let full_path = format!("{}/{}", base_path, partition_path);
 
         // Step 5: Write Vortex file
@@ -290,11 +282,7 @@ impl ColdTier {
             .map_err(|e| Error::Storage(format!("Failed to get current time: {}", e)))?;
         let partition_path = Self::generate_histogram_partition_path(&metric_name, &now);
 
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
         let full_path = format!("{}/{}", base_path, partition_path);
 
         // Step 5: Write Vortex file
@@ -323,11 +311,7 @@ impl ColdTier {
             .map_err(|e| Error::Storage(format!("Failed to get current time: {}", e)))?;
         let partition_path = helpers::generate_partition_path("metrics/exp_histograms", &now);
 
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
         let full_path = format!("{}/{}", base_path, partition_path);
 
         self.write_record_batch(batch, schema, &full_path, None)
