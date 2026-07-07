@@ -5801,6 +5801,7 @@ dependencies = [
  "prost 0.14.4",
  "sequins-arrow-schema",
  "sequins-attribute-codec",
+ "sequins-series-index",
  "sequins-types",
  "serde",
  "serde_json",
