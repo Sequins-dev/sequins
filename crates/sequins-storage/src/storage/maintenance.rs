@@ -21,6 +21,47 @@ impl Storage {
         })
     }
 
+    /// Compact the small cold-tier flush files that accumulate under the shared
+    /// dataset into fewer, larger files.
+    ///
+    /// Safe to run concurrently across nodes and idempotent (see
+    /// [`sequins_cold_tier::ColdTier::compact_signal`]). Only **fixed-schema**
+    /// signals are compacted; the two dynamic-schema signals (spans, logs) are
+    /// skipped because their files can carry per-file (promoted-attribute)
+    /// schemas that must be grouped before merging — a separate follow-up. A
+    /// per-signal failure is logged and does not abort the pass.
+    ///
+    /// Returns the net number of files removed across all compacted signals.
+    pub async fn compact_cold(&self) -> Result<usize> {
+        // Fixed-schema signals only — every file for these shares one schema, so
+        // merging is lossless. Spans/Logs are intentionally excluded.
+        const COMPACTABLE: &[SignalType] = &[
+            SignalType::Metrics,
+            SignalType::Histograms,
+            SignalType::ExpHistograms,
+            SignalType::MetricsMetadata,
+            SignalType::Resources,
+            SignalType::Scopes,
+            SignalType::SpanLinks,
+            SignalType::SpanEvents,
+            SignalType::ProfilesMetadata,
+            SignalType::ProfileSamples,
+            SignalType::ProfileStacks,
+            SignalType::ProfileFrames,
+            SignalType::ProfileMappings,
+        ];
+
+        let cold = self.cold_tier.read().await;
+        let mut removed = 0usize;
+        for &signal in COMPACTABLE {
+            match cold.compact_signal(signal, signal.schema()).await {
+                Ok(n) => removed += n,
+                Err(e) => tracing::warn!(signal = ?signal, error = %e, "cold compaction failed"),
+            }
+        }
+        Ok(removed)
+    }
+
     /// Generate test data for development/debugging purposes.
     ///
     /// Creates synthetic traces with nested spans and pushes them directly into
