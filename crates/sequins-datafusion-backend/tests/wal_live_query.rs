@@ -44,6 +44,7 @@ async fn make_storage_backend() -> (Arc<Storage>, DataFusionBackend, tempfile::T
             },
             index_path: None,
             max_attribute_columns: 256,
+            object_store: Default::default(),
         },
         lifecycle: LifecycleConfig {
             retention: Duration::from_hours(24),

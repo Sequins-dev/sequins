@@ -51,6 +51,7 @@ async fn make_storage_backend(
             },
             index_path: None,
             max_attribute_columns: 256,
+            object_store: Default::default(),
         },
         lifecycle: LifecycleConfig {
             retention: Duration::from_hours(24),

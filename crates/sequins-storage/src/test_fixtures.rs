@@ -134,6 +134,7 @@ impl TestStorageBuilder {
                 },
                 index_path: None,
                 max_attribute_columns: 256,
+                object_store: Default::default(),
             },
             lifecycle: LifecycleConfig {
                 retention: self.retention,

@@ -37,6 +37,7 @@ fn create_test_config_with_node(temp_dir: &TempDir, node_id: Option<&str>) -> St
             },
             index_path: None,
             max_attribute_columns: 256,
+            object_store: Default::default(),
         },
         lifecycle: LifecycleConfig {
             retention: Duration::from_hours(24 * 7), // 7 days
@@ -529,6 +530,7 @@ async fn test_retention_cleanup_deletes_old_files() {
             },
             index_path: None,
             max_attribute_columns: 256,
+            object_store: Default::default(),
         },
         lifecycle: LifecycleConfig {
             retention: Duration::from_secs(1), // Very short retention for testing

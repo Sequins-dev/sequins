@@ -33,7 +33,7 @@ pub mod test_helpers;
 
 // Re-export primary types
 pub use cold_tier::ColdTier;
-pub use config::{ColdTierConfig, CompanionIndexConfig};
+pub use config::{ColdTierConfig, CompanionIndexConfig, ObjectStoreConfig};
 pub use error::{Error, Result};
 pub use helpers::store_base_path;
 pub use rollups::{
