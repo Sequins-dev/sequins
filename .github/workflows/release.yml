@@ -348,7 +348,6 @@ jobs:
       - name: Prepare release version
         run: |
           sed -i '/^\[workspace\.package\]/,/^\[/ s/^version = "[^"]*"/version = "${{ inputs.version }}"/' Cargo.toml
-          cargo update --workspace
 
       - name: Generate cargo sources
         run: |
@@ -393,7 +392,6 @@ jobs:
       - name: Prepare release version
         run: |
           sed -i '/^\[workspace\.package\]/,/^\[/ s/^version = "[^"]*"/version = "${{ inputs.version }}"/' Cargo.toml
-          cargo update --workspace
 
       - name: Generate cargo sources
         run: |

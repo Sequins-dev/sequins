@@ -73,6 +73,7 @@ modules:
     buildsystem: simple
     build-commands:
       - rustc --version
+      - cargo update --workspace --offline
       - cargo build --release --offline --package sequins-linux
       - install -Dm755 target/release/sequins-desktop /app/bin/sequins-desktop
       - install -Dm644 apps/linux/data/com.sequins.desktop.desktop /app/share/applications/com.sequins.desktop.desktop
