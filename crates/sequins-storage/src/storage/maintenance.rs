@@ -22,20 +22,19 @@ impl Storage {
     }
 
     /// Compact the small cold-tier flush files that accumulate under the shared
-    /// dataset into fewer, larger files.
+    /// dataset into fewer, larger files, across **all** signals.
     ///
     /// Safe to run concurrently across nodes and idempotent (see
-    /// [`sequins_cold_tier::ColdTier::compact_signal`]). Only **fixed-schema**
-    /// signals are compacted; the two dynamic-schema signals (spans, logs) are
-    /// skipped because their files can carry per-file (promoted-attribute)
-    /// schemas that must be grouped before merging — a separate follow-up. A
-    /// per-signal failure is logged and does not abort the pass.
+    /// [`sequins_cold_tier::ColdTier::compact_signal`], which reads each file with
+    /// its own schema and merges only same-schema files, so the dynamic-attribute
+    /// signals spans/logs are compacted losslessly). A per-signal failure is
+    /// logged and does not abort the pass.
     ///
     /// Returns the net number of files removed across all compacted signals.
     pub async fn compact_cold(&self) -> Result<usize> {
-        // Fixed-schema signals only — every file for these shares one schema, so
-        // merging is lossless. Spans/Logs are intentionally excluded.
-        const COMPACTABLE: &[SignalType] = &[
+        const SIGNALS: &[SignalType] = &[
+            SignalType::Spans,
+            SignalType::Logs,
             SignalType::Metrics,
             SignalType::Histograms,
             SignalType::ExpHistograms,
@@ -53,8 +52,8 @@ impl Storage {
 
         let cold = self.cold_tier.read().await;
         let mut removed = 0usize;
-        for &signal in COMPACTABLE {
-            match cold.compact_signal(signal, signal.schema()).await {
+        for &signal in SIGNALS {
+            match cold.compact_signal(signal).await {
                 Ok(n) => removed += n,
                 Err(e) => tracing::warn!(signal = ?signal, error = %e, "cold compaction failed"),
             }
