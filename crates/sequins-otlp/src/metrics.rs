@@ -13,14 +13,32 @@ use arrow::array::{
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field};
 use arrow::record_batch::RecordBatch;
+use opentelemetry_proto::tonic::common::v1::KeyValue;
 use opentelemetry_proto::tonic::metrics::v1::metric::Data;
 use opentelemetry_proto::tonic::metrics::v1::Metric as OtlpMetric;
 use sequins_arrow_schema::arrow_schema::{
     exp_histogram_data_point_schema, histogram_series_data_point_schema, metric_schema,
     series_data_point_schema,
 };
+use sequins_series_index::SeriesId;
 use sequins_types::models::MetricId;
 use std::sync::Arc;
+
+/// Content-addressed series id for a metric datapoint: a stable hash of the
+/// metric identity (`metric_{id_hex}`) and the datapoint's attributes, keyed
+/// exactly as the `SeriesIndex`. Because it is a pure function of content, the
+/// same series gets the same id on every node — which is what lets metric data
+/// points from different nodes group and aggregate correctly over shared cold.
+/// (Previously the series id was a `0` placeholder that was never resolved, so
+/// every series collapsed together.)
+fn series_id_for(metric_id_hex: &str, attrs: &[KeyValue]) -> u64 {
+    let name = format!("metric_{metric_id_hex}");
+    let btree: std::collections::BTreeMap<String, String> =
+        crate::helpers::convert_resource_attributes(attrs)
+            .into_iter()
+            .collect();
+    SeriesId::from_content(&name, &btree).as_u64()
+}
 
 /// Determine the metric type string from an OTLP metric's data variant.
 pub fn otlp_metric_type(metric: &OtlpMetric) -> &'static str {
@@ -110,7 +128,8 @@ pub fn otlp_metrics_to_batch(
 ///
 /// Extracts `NumberDataPoint`s from Gauge and Sum metrics.
 /// The output schema is `series_data_point_schema()`.
-/// `series_id` is set to 0 (placeholder; resolved at cold-tier write time).
+/// `series_id` is the content-addressed hash of the metric identity + datapoint
+/// attributes (see `series_id_for`), so it is node-stable and groups correctly.
 pub fn otlp_datapoints_to_batch(
     items: &[(OtlpMetric, u32, u32, String)],
 ) -> Result<RecordBatch, String> {
@@ -146,7 +165,7 @@ pub fn otlp_datapoints_to_batch(
                 Some(Value::AsInt(v)) => *v as f64,
                 None => continue,
             };
-            series_ids.push(0u64);
+            series_ids.push(series_id_for(&metric_id_hex, &point.attributes));
             metric_ids.push(metric_id_hex.clone());
             timestamps.push(point.time_unix_nano as i64);
             values.push(value);
@@ -179,7 +198,8 @@ pub fn otlp_datapoints_to_batch(
 ///
 /// Extracts `HistogramDataPoint`s from Histogram metrics.
 /// The output schema is `histogram_series_data_point_schema()`.
-/// `series_id` is set to 0 (placeholder; resolved at cold-tier write time).
+/// `series_id` is the content-addressed hash of the metric identity + datapoint
+/// attributes (see `series_id_for`), so it is node-stable and groups correctly.
 pub fn otlp_histograms_to_batch(
     items: &[(OtlpMetric, u32, u32, String)],
 ) -> Result<RecordBatch, String> {
@@ -215,7 +235,7 @@ pub fn otlp_histograms_to_batch(
         };
 
         for point in data_points {
-            series_ids.push(0u64);
+            series_ids.push(series_id_for(&metric_id_hex, &point.attributes));
             metric_ids.push(metric_id_hex.clone());
             timestamps.push(point.time_unix_nano as i64);
             counts.push(point.count);
@@ -274,7 +294,8 @@ pub fn otlp_histograms_to_batch(
 ///
 /// Extracts `ExponentialHistogramDataPoint`s, preserving the compact scale+offset+counts format.
 /// The output schema is `exp_histogram_data_point_schema()`.
-/// `series_id` is set to 0 (placeholder; resolved at cold-tier write time).
+/// `series_id` is the content-addressed hash of the metric identity + datapoint
+/// attributes (see `series_id_for`), so it is node-stable and groups correctly.
 pub fn otlp_exp_histograms_to_batch(
     items: &[(OtlpMetric, u32, u32, String)],
 ) -> Result<RecordBatch, String> {
@@ -313,7 +334,7 @@ pub fn otlp_exp_histograms_to_batch(
         };
 
         for point in data_points {
-            series_ids.push(0u64);
+            series_ids.push(series_id_for(&metric_id_hex, &point.attributes));
             metric_ids.push(metric_id_hex.clone());
             timestamps.push(point.time_unix_nano as i64);
             counts.push(point.count);
@@ -413,6 +434,53 @@ mod tests {
             })),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_series_id_is_content_addressed_and_distinct() {
+        use arrow::array::Array;
+        use opentelemetry_proto::tonic::common::v1::{any_value::Value as AV, AnyValue};
+        use opentelemetry_proto::tonic::metrics::v1::number_data_point::Value;
+
+        let kv = |k: &str, v: &str| KeyValue {
+            key: k.to_string(),
+            value: Some(AnyValue {
+                value: Some(AV::StringValue(v.to_string())),
+            }),
+        };
+        let dp = |ts: u64, attrs: Vec<KeyValue>| NumberDataPoint {
+            time_unix_nano: ts,
+            value: Some(Value::AsDouble(1.0)),
+            attributes: attrs,
+            ..Default::default()
+        };
+        let metric = OtlpMetric {
+            name: "http.requests".into(),
+            data: Some(Data::Gauge(Gauge {
+                data_points: vec![
+                    dp(1, vec![kv("method", "GET")]),
+                    dp(2, vec![kv("method", "POST")]),
+                    dp(3, vec![kv("method", "GET")]),
+                ],
+            })),
+            ..Default::default()
+        };
+        let batch = otlp_datapoints_to_batch(&[(metric, 1, 2, "svc".to_string())]).unwrap();
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(ids.len(), 3);
+        // Never the old `0` placeholder.
+        assert!((0..ids.len()).all(|i| ids.value(i) != 0));
+        // Same (metric, attrs) → same id; different attrs → different id.
+        assert_eq!(ids.value(0), ids.value(2), "GET datapoints share a series");
+        assert_ne!(
+            ids.value(0),
+            ids.value(1),
+            "GET vs POST are different series"
+        );
     }
 
     #[test]

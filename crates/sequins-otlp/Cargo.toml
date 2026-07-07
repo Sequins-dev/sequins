@@ -11,6 +11,7 @@ description = "OTLP protobuf → Arrow RecordBatch conversion for Sequins"
 sequins-arrow-schema   = { workspace = true }
 sequins-types          = { workspace = true }
 sequins-attribute-codec = { workspace = true }
+sequins-series-index   = { workspace = true }
 
 # Arrow
 arrow = { workspace = true }
