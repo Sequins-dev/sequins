@@ -26,6 +26,9 @@ pub struct RemoteClient {
     /// tokio reactor is always available.
     endpoint: Endpoint,
     schema_ctx: Arc<SessionContext>,
+    /// Optional bearer token sent as `authorization: Bearer <token>` on every
+    /// request. `None` = no auth header (the default; a keyless server ignores it).
+    token: Option<String>,
 }
 
 impl RemoteClient {
@@ -34,6 +37,13 @@ impl RemoteClient {
     /// Construction is synchronous and safe to call from non-async contexts
     /// (e.g. FFI).  The TCP connection is established on first use.
     pub fn new(addr: &str) -> Result<Self, ClientError> {
+        Self::with_token(addr, None)
+    }
+
+    /// Like [`Self::new`], but attaches a bearer `token` (an API key) to every
+    /// request. Pass `None` for no auth. Used to authenticate to a secured
+    /// Sequins Pro daemon, including inter-node fan-out.
+    pub fn with_token(addr: &str, token: Option<String>) -> Result<Self, ClientError> {
         let addr = addr.trim_end_matches('/').to_string();
         let endpoint = Channel::from_shared(addr)
             .map_err(|e| ClientError::Connect(format!("Invalid address: {e}")))?;
@@ -43,7 +53,23 @@ impl RemoteClient {
         Ok(Self {
             endpoint,
             schema_ctx: Arc::new(schema_ctx),
+            token,
         })
+    }
+
+    /// Wrap `msg` in a request, adding the `authorization: Bearer <token>` header
+    /// when a token is configured.
+    fn authed<T>(&self, msg: T) -> Result<tonic::Request<T>, QueryError> {
+        let mut req = tonic::Request::new(msg);
+        if let Some(token) = &self.token {
+            let value = format!("Bearer {token}")
+                .parse()
+                .map_err(|_| QueryError::Execution {
+                    message: "invalid API token (not a valid header value)".to_string(),
+                })?;
+            req.metadata_mut().insert("authorization", value);
+        }
+        Ok(req)
     }
 
     /// Execute a SeQL query in live streaming mode.
@@ -89,7 +115,7 @@ impl RemoteClient {
         };
         let descriptor = FlightDescriptor::new_cmd(cmd.as_any().encode_to_vec());
         let info = client
-            .get_flight_info(descriptor)
+            .get_flight_info(self.authed(descriptor)?)
             .await
             .map_err(|e| QueryError::Execution {
                 message: format!("GetFlightInfo failed: {e}"),
@@ -107,9 +133,9 @@ impl RemoteClient {
 
         // Step 2: DoGet → streaming FlightData
         let streaming = client
-            .do_get(Ticket {
+            .do_get(self.authed(Ticket {
                 ticket: ticket.ticket,
-            })
+            })?)
             .await
             .map_err(|e| QueryError::Execution {
                 message: format!("DoGet failed: {e}"),
