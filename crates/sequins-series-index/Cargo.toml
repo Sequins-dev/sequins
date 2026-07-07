@@ -19,3 +19,4 @@ object_store = { workspace = true }
 
 # Async
 tokio = { workspace = true }
+futures = { workspace = true }

@@ -30,6 +30,37 @@ impl SeriesId {
     pub fn as_u64(&self) -> u64 {
         self.0
     }
+
+    /// Derive a **content-addressed**, node-stable id from a series' identity
+    /// (metric name + its attributes).
+    ///
+    /// Uses FNV-1a/64 over a canonical `name\0(k\0v\0)*` encoding of the
+    /// name and the attributes in sorted-key order (a `BTreeMap` is already
+    /// sorted). Because the id is a pure function of content — the same pattern
+    /// the rest of the engine uses for resource/scope/metric ids — the same
+    /// series hashes identically on **every** node with no coordination, which
+    /// is what lets metric cold files written by different nodes share one
+    /// dataset without a per-node id counter clobbering across the cluster.
+    pub fn from_content(metric_name: &str, attributes: &BTreeMap<String, String>) -> Self {
+        const OFFSET: u64 = 0xcbf29ce484222325;
+        const PRIME: u64 = 0x100000001b3;
+        fn mix(h: &mut u64, bytes: &[u8]) {
+            for &b in bytes {
+                *h ^= b as u64;
+                *h = h.wrapping_mul(PRIME);
+            }
+        }
+        let mut h = OFFSET;
+        mix(&mut h, metric_name.as_bytes());
+        mix(&mut h, &[0]);
+        for (k, v) in attributes {
+            mix(&mut h, k.as_bytes());
+            mix(&mut h, &[0]);
+            mix(&mut h, v.as_bytes());
+            mix(&mut h, &[0]);
+        }
+        Self(h)
+    }
 }
 
 /// Series metadata: metric name and attributes
@@ -50,7 +81,6 @@ struct SeriesEntry {
 /// Serialization envelope for the series index
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SeriesIndexPayload {
-    next_id: u64,
     entries: Vec<SeriesEntry>,
 }
 
@@ -65,9 +95,6 @@ pub struct SeriesIndex {
 
     /// Label index: (label_key, label_value) -> Set<SeriesId>
     label_index: HashMap<(String, String), HashSet<SeriesId>>,
-
-    /// Next available series ID
-    next_id: u64,
 }
 
 impl SeriesIndex {
@@ -77,28 +104,27 @@ impl SeriesIndex {
             series_map: HashMap::new(),
             reverse_map: HashMap::new(),
             label_index: HashMap::new(),
-            next_id: 1, // Start from 1 (0 could be reserved for "no series")
         }
     }
 
-    /// Register a series and return its ID
+    /// Register a series and return its **content-addressed** id.
     ///
-    /// If the series already exists, returns the existing ID.
-    /// Otherwise, creates a new series and returns a new ID.
+    /// The id is a pure function of `(metric_name, attributes)`
+    /// ([`SeriesId::from_content`]), so registering the same series is
+    /// idempotent and yields the same id on every node — no counter, no
+    /// coordination. Registering only records the id→metadata and label-index
+    /// entries the first time a given series is seen.
     pub fn register(
         &mut self,
         metric_name: &str,
         attributes: BTreeMap<String, String>,
     ) -> SeriesId {
+        let series_id = SeriesId::from_content(metric_name, &attributes);
         let key = (metric_name.to_string(), attributes.clone());
 
-        if let Some(&series_id) = self.series_map.get(&key) {
+        if self.reverse_map.contains_key(&series_id) {
             return series_id;
         }
-
-        // Create new series
-        let series_id = SeriesId(self.next_id);
-        self.next_id += 1;
 
         // Forward mapping
         self.series_map.insert(key, series_id);
@@ -189,8 +215,24 @@ impl SeriesIndex {
         }
     }
 
-    /// Persist the series index to storage as a JSON file
-    pub async fn persist(&self, store: Arc<dyn ObjectStore>, base_path: &str) -> Result<()> {
+    /// Object-store directory holding the per-node index shards.
+    fn shard_dir(base_path: &str) -> String {
+        format!("{}/metrics/series_index", base_path.trim_end_matches('/'))
+    }
+
+    /// Persist this node's slice of the series index to its **own** shard
+    /// (`{base}/metrics/series_index/{node_id}.json`).
+    ///
+    /// Cold storage is shared cluster-wide, but each node writes only its own
+    /// shard, so concurrent nodes never clobber one another's metadata. Readers
+    /// ([`Self::load`]) union all shards; because ids are content-addressed, the
+    /// union is conflict-free (the same series has the same id in every shard).
+    pub async fn persist(
+        &self,
+        store: Arc<dyn ObjectStore>,
+        base_path: &str,
+        node_id: &str,
+    ) -> Result<()> {
         use object_store::PutPayload;
 
         if self.reverse_map.is_empty() {
@@ -209,18 +251,22 @@ impl SeriesIndex {
             .collect();
         entries.sort_by_key(|e| e.series_id);
 
-        let payload = SeriesIndexPayload {
-            next_id: self.next_id,
-            entries,
-        };
+        let payload = SeriesIndexPayload { entries };
 
         let json_bytes = serde_json::to_vec(&payload)
             .map_err(|e| Error::Storage(format!("Failed to serialize series index: {}", e)))?;
 
-        let path = format!(
-            "{}/metrics/series_index.json",
-            base_path.trim_end_matches('/')
-        );
+        let sanitized: String = node_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let path = format!("{}/{}.json", Self::shard_dir(base_path), sanitized);
         let object_path = ObjectPath::from(path.as_str());
 
         store
@@ -231,36 +277,43 @@ impl SeriesIndex {
         Ok(())
     }
 
-    /// Load the series index from storage
+    /// Load the series index by unioning every node's shard under
+    /// `{base}/metrics/series_index/`. Missing/unreadable shards are skipped;
+    /// an absent directory yields an empty index.
     pub async fn load(store: Arc<dyn ObjectStore>, base_path: &str) -> Result<Self> {
-        let path = format!(
-            "{}/metrics/series_index.json",
-            base_path.trim_end_matches('/')
-        );
-        let object_path = ObjectPath::from(path.as_str());
-
-        // Check if file exists
-        let bytes = match store.get(&object_path).await {
-            Ok(result) => result
-                .bytes()
-                .await
-                .map_err(|e| Error::Storage(format!("Failed to read series index: {}", e)))?,
-            Err(_) => return Ok(Self::new()),
-        };
-
-        let payload: SeriesIndexPayload = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::Storage(format!("Failed to deserialize series index: {}", e)))?;
+        use futures::StreamExt;
 
         let mut index = Self::new();
-        index.next_id = payload.next_id;
+        let prefix = ObjectPath::from(Self::shard_dir(base_path).as_str());
+        let mut list = store.list(Some(&prefix));
+        while let Some(meta) = list.next().await {
+            let Ok(meta) = meta else { continue };
+            if !meta.location.as_ref().ends_with(".json") {
+                continue;
+            }
+            let Ok(result) = store.get(&meta.location).await else {
+                continue;
+            };
+            let Ok(bytes) = result.bytes().await else {
+                continue;
+            };
+            let Ok(payload) = serde_json::from_slice::<SeriesIndexPayload>(&bytes) else {
+                continue;
+            };
+            index.ingest_entries(payload.entries);
+        }
+        Ok(index)
+    }
 
-        for entry in payload.entries {
+    /// Absorb serialized entries into this index (used when unioning shards).
+    fn ingest_entries(&mut self, entries: Vec<SeriesEntry>) {
+        for entry in entries {
             let series_id = SeriesId(entry.series_id);
-            index.series_map.insert(
+            self.series_map.insert(
                 (entry.metric_name.clone(), entry.attributes.clone()),
                 series_id,
             );
-            index.reverse_map.insert(
+            self.reverse_map.insert(
                 series_id,
                 SeriesMetadata {
                     metric_name: entry.metric_name,
@@ -268,15 +321,12 @@ impl SeriesIndex {
                 },
             );
             for (key, value) in &entry.attributes {
-                index
-                    .label_index
+                self.label_index
                     .entry((key.clone(), value.clone()))
                     .or_default()
                     .insert(series_id);
             }
         }
-
-        Ok(index)
     }
 
     /// Get the total number of series
@@ -465,14 +515,16 @@ mod tests {
         );
         original.register("cpu_usage", create_attrs(&[("host", "server1")]));
 
-        // Persist
-        original.persist(store.clone(), base_path).await.unwrap();
+        // Persist this node's shard
+        original
+            .persist(store.clone(), base_path, "node-a")
+            .await
+            .unwrap();
 
-        // Load
+        // Load (unions all node shards)
         let loaded = SeriesIndex::load(store, base_path).await.unwrap();
 
         assert_eq!(loaded.len(), 3);
-        assert_eq!(loaded.next_id, 4); // Should be ready for next ID
 
         // Verify all series are present
         for (id, metadata) in &original.reverse_map {
@@ -494,6 +546,51 @@ mod tests {
         let loaded = SeriesIndex::load(store, "/nonexistent").await.unwrap();
 
         assert!(loaded.is_empty());
-        assert_eq!(loaded.next_id, 1);
+    }
+
+    #[test]
+    fn test_series_id_is_content_addressed_and_node_stable() {
+        // The same (name, attrs) must hash identically regardless of insertion
+        // order or which "node" computes it — this is what lets metric cold files
+        // from different nodes share one dataset.
+        let a = SeriesId::from_content("http_requests", &create_attrs(&[("method", "GET")]));
+        let b = SeriesId::from_content("http_requests", &create_attrs(&[("method", "GET")]));
+        assert_eq!(a, b);
+
+        // register() must agree with from_content().
+        let mut idx = SeriesIndex::new();
+        let r = idx.register("http_requests", create_attrs(&[("method", "GET")]));
+        assert_eq!(r, a);
+
+        // Different attributes → different id.
+        let c = SeriesId::from_content("http_requests", &create_attrs(&[("method", "POST")]));
+        assert_ne!(a, c);
+    }
+
+    #[tokio::test]
+    async fn test_load_unions_multiple_node_shards() {
+        use object_store::memory::InMemory;
+
+        let store = Arc::new(InMemory::new());
+        let base_path = "/test";
+
+        // Two nodes each register a distinct series and persist their own shard.
+        let mut node_a = SeriesIndex::new();
+        node_a.register("cpu", create_attrs(&[("host", "a")]));
+        node_a
+            .persist(store.clone(), base_path, "node-a")
+            .await
+            .unwrap();
+
+        let mut node_b = SeriesIndex::new();
+        node_b.register("cpu", create_attrs(&[("host", "b")]));
+        node_b
+            .persist(store.clone(), base_path, "node-b")
+            .await
+            .unwrap();
+
+        // A reader on any node sees both nodes' series (no clobber).
+        let loaded = SeriesIndex::load(store, base_path).await.unwrap();
+        assert_eq!(loaded.len(), 2);
     }
 }

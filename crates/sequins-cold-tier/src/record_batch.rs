@@ -9,7 +9,32 @@ use object_store::path::Path as ObjectPath;
 use std::sync::Arc;
 
 impl ColdTier {
+    /// Write a `RecordBatch` as a Vortex file.
+    ///
+    /// The final filename is stamped with this node's [`ColdTier::write_token`]
+    /// (`…/{ts}-{node_id}-{seq}.vortex`) so that many nodes writing to the one
+    /// **shared** cold dataset never collide. Compaction, which needs to choose
+    /// its own (deterministic) output name, uses [`Self::write_record_batch_at`].
     pub(crate) async fn write_record_batch(
+        &self,
+        batch: RecordBatch,
+        schema: Arc<Schema>,
+        path: &str,
+        companion_bytes: Option<crate::indexed_layout::strategy::CompanionIndexBytes>,
+    ) -> Result<()> {
+        // Stamp node id + a per-write sequence into the filename (before the
+        // `.vortex` extension) so concurrent writers to shared cold are unique.
+        let stamped = match path.strip_suffix(".vortex") {
+            Some(stem) => format!("{stem}-{}.vortex", self.write_token()),
+            None => path.to_string(),
+        };
+        self.write_record_batch_at(batch, schema, &stamped, companion_bytes)
+            .await
+    }
+
+    /// Write a `RecordBatch` to an **exact** path (no filename stamping). Used by
+    /// compaction, which derives a deterministic output name from its inputs.
+    pub(crate) async fn write_record_batch_at(
         &self,
         batch: RecordBatch,
         _schema: Arc<Schema>,

@@ -26,20 +26,22 @@ impl Storage {
     ///
     /// Pass `Arc::new(MockNowTime::new(base_ns))` in tests to make
     /// time-dependent logic fully deterministic.
-    pub async fn new_with_clock(
-        mut config: StorageConfig,
-        clock: Arc<dyn NowTime>,
-    ) -> Result<Self> {
-        // Per-node object-store prefix: every node writes only under
-        // `{uri}/{node_id}/…` so multiple nodes can share one bucket without
-        // WAL-sequence or file collisions. Everything downstream (cold tier,
-        // WAL, series index, retention, health config) derives its paths from
-        // `cold_tier.uri`, so prefixing it once here threads through uniformly.
+    pub async fn new_with_clock(config: StorageConfig, clock: Arc<dyn NowTime>) -> Result<Self> {
+        // Cold storage is a single **shared** dataset across the cluster: every
+        // node reads and writes the same `cold_tier.uri` (no per-node prefix), so
+        // a query on any node observes data flushed by any node. Nodes avoid
+        // collisions by writing globally-unique immutable files (the cold-tier
+        // write path stamps the node id into each filename) and content-addressed
+        // series ids; background compaction merges them.
+        //
+        // The **WAL** stays per-node — it only exists to replay a node's own
+        // un-flushed hot window after a crash, and no node ever needs another
+        // node's WAL — so its segments and the durable watermark beside them live
+        // under a `{uri}/{node_id}/wal` sub-prefix (via `checkpoint::wal_base_path`,
+        // shared with the watermark path so the two never drift).
         let node_id = config.effective_node_id().to_string();
-        config.cold_tier.uri =
-            format!("{}/{}", config.cold_tier.uri.trim_end_matches('/'), node_id);
 
-        let cold_tier_inner = ColdTier::new(config.cold_tier.clone())?;
+        let cold_tier_inner = ColdTier::new(config.cold_tier.clone())?.with_node_id(&node_id);
         let cold_tier = Arc::new(RwLock::new(cold_tier_inner));
 
         // Build a cold-flush callback so completed hot-tier batches are durably
@@ -72,9 +74,10 @@ impl Storage {
         // Load persisted retention policy from object storage if it exists.
         let retention_policy = Self::load_retention_policy(&store, &config.cold_tier.uri).await?;
 
-        // Initialize WAL under the object-store-relative prefix of the cold-tier
-        // uri (bucket-relative for s3://gs://az://, the local path for file://).
-        let base_path = sequins_cold_tier::store_base_path(&config.cold_tier.uri).to_string();
+        // Initialize the WAL under this node's private sub-prefix of the shared
+        // cold root (bucket-relative for s3://gs://az://, the local path for
+        // file://). Mirrors the watermark path in `checkpoint`.
+        let base_path = super::checkpoint::wal_base_path(&config.cold_tier.uri, &node_id);
         let wal_config = WalConfig {
             base_path,
             segment_size: 10_000,

@@ -173,7 +173,9 @@ impl ColdTier {
 
         // Step 7: Persist updated series index
         let series_index = self.series_index.read().await;
-        series_index.persist(self.store.clone(), base_path).await?;
+        series_index
+            .persist(self.store.clone(), base_path, &self.node_id)
+            .await?;
 
         Ok(partition_path)
     }
@@ -291,7 +293,9 @@ impl ColdTier {
 
         // Step 6: Persist updated series index
         let series_index = self.series_index.read().await;
-        series_index.persist(self.store.clone(), base_path).await?;
+        series_index
+            .persist(self.store.clone(), base_path, &self.node_id)
+            .await?;
 
         Ok(partition_path)
     }

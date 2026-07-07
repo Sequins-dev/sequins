@@ -14,13 +14,30 @@ use object_store::path::Path as ObjPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use std::sync::Arc;
 
+/// The per-node WAL base path derived from the **shared** cold-tier uri and this
+/// node's id.
+///
+/// Cold storage is a single dataset shared by the whole cluster (no per-node
+/// prefix), but the WAL is private to each node — it exists only to replay a
+/// node's own un-flushed hot window after a crash — so it lives under a
+/// `{cold_base}/{node_id}` sub-prefix. Both the constructor (WAL setup) and the
+/// watermark path go through this one function so the two can never drift.
+pub(super) fn wal_base_path(cold_uri: &str, node_id: &str) -> String {
+    let base = sequins_cold_tier::store_base_path(cold_uri).trim_end_matches('/');
+    if base.is_empty() {
+        // Bucket-root cold uri (e.g. `s3://bucket`): the WAL prefix is just the
+        // node id, with no leading slash.
+        node_id.to_string()
+    } else {
+        format!("{base}/{node_id}")
+    }
+}
+
 impl Storage {
-    /// The WAL base path for this node — the object-store-relative prefix of the
-    /// cold-tier uri, under which WAL segments and the watermark file live.
+    /// The WAL base path for this node — a per-node sub-prefix of the shared cold
+    /// root, under which this node's WAL segments and durable watermark live.
     fn wal_base_path(&self) -> String {
-        sequins_cold_tier::store_base_path(&self.config.cold_tier.uri)
-            .trim_end_matches('/')
-            .to_string()
+        wal_base_path(&self.config.cold_tier.uri, &self.node_id)
     }
 
     /// Object-store path of this node's durable watermark file.
