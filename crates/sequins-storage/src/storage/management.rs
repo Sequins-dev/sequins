@@ -60,8 +60,8 @@ impl ManagementApi for Storage {
     }
 
     async fn update_retention_policy(&self, policy: RetentionPolicy) -> sequins_traits::Result<()> {
-        // Save policy to disk
-        self.save_retention_policy(&policy).map_err(|e| {
+        // Persist policy to object storage
+        self.save_retention_policy(&policy).await.map_err(|e| {
             sequins_traits::Error::Other(format!("Failed to save retention policy: {}", e))
         })?;
 

@@ -68,11 +68,7 @@ impl ColdTier {
 
         // Build the full prefix including the base path, since the LocalFileSystem store
         // is rooted at `/` and uses absolute paths (matching write_signal_batch behaviour).
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
         let prefix_str = format!("{}/{}", base_path.trim_end_matches('/'), telemetry_type);
         let prefix = ObjectPath::from(prefix_str.as_str());
         let mut list_stream = self.store.list(Some(&prefix));
@@ -165,12 +161,7 @@ mod tests {
         let (cold_tier, _temp) = create_test_cold_tier().await;
 
         // Build paths matching the absolute-path convention used by write_record_batch.
-        let base = cold_tier
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&cold_tier.config.uri)
-            .to_string();
+        let base = crate::store_base_path(&cold_tier.config.uri).to_string();
 
         let old_nanos: i64 = 946_684_800_000_000_000; // 2000-01-01
         let old_path = ObjectPath::from(

@@ -45,7 +45,7 @@ impl ColdTier {
     /// Returns an error if the object store URI is invalid
     pub fn new(config: ColdTierConfig) -> Result<Self> {
         // Parse the URI and create the appropriate object store
-        let store = Self::create_store(&config.uri)?;
+        let store = Self::create_store(&config)?;
 
         // Initialize empty series index (will be loaded on first use)
         let series_index = Arc::new(RwLock::new(SeriesIndex::new()));
@@ -59,11 +59,7 @@ impl ColdTier {
 
     /// Load the series index from storage (called at startup)
     pub async fn load_series_index(&self) -> Result<()> {
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
 
         let loaded_index = SeriesIndex::load(self.store.clone(), base_path).await?;
 
@@ -73,32 +69,24 @@ impl ColdTier {
         Ok(())
     }
 
-    /// Create an object store from a URI
+    /// Create an object store from the cold-tier config.
     ///
     /// Supports:
     /// - Local filesystem: `file:///path` or `/path`
-    /// - AWS S3: `s3://bucket/path` (requires AWS credentials in environment)
-    /// - Google Cloud Storage: `gs://bucket/path` (requires GCS credentials)
-    /// - Azure Blob Storage: `az://container/path` or `azure://container/path` (requires Azure credentials)
+    /// - AWS S3 (and S3-compatibles): `s3://bucket/path`
+    /// - Google Cloud Storage: `gs://bucket/path`
+    /// - Azure Blob Storage: `az://container/path` or `azure://container/path`
     ///
-    /// # Environment Variables for Cloud Storage
-    ///
-    /// **AWS S3:**
-    /// - `AWS_ACCESS_KEY_ID` - AWS access key
-    /// - `AWS_SECRET_ACCESS_KEY` - AWS secret key
-    /// - `AWS_REGION` - AWS region (default: us-east-1)
-    /// - `AWS_ENDPOINT` - Custom S3 endpoint (optional, for S3-compatible stores)
-    ///
-    /// **Google Cloud Storage:**
-    /// - `GOOGLE_SERVICE_ACCOUNT` - Path to service account JSON file
-    /// - Or default application credentials
-    ///
-    /// **Azure Blob Storage:**
-    /// - `AZURE_STORAGE_ACCOUNT_NAME` - Storage account name
-    /// - `AZURE_STORAGE_ACCOUNT_KEY` - Storage account key
-    /// - Or default Azure credentials
-    fn create_store(uri: &str) -> Result<Arc<dyn ObjectStore>> {
+    /// Connection settings for cloud stores (region, endpoint, HTTP, addressing,
+    /// optional static credentials) come from [`ColdTierConfig::object_store`].
+    /// Credentials default to the provider's standard chain — instance profile,
+    /// IRSA / workload identity — so a properly-configured pod needs no static
+    /// credentials in config.
+    fn create_store(config: &ColdTierConfig) -> Result<Arc<dyn ObjectStore>> {
         use object_store::local::LocalFileSystem;
+
+        let uri = config.uri.as_str();
+        let os = &config.object_store;
 
         // Local filesystem
         if uri.starts_with("file://") || uri.starts_with('/') {
@@ -125,20 +113,27 @@ impl ColdTier {
                 .host_str()
                 .ok_or_else(|| Error::Config(format!("S3 URI missing bucket name: {}", uri)))?;
 
-            let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
-
-            // Get credentials from environment
-            if let Ok(access_key) = std::env::var("AWS_ACCESS_KEY_ID") {
-                builder = builder.with_access_key_id(access_key);
-            }
-            if let Ok(secret_key) = std::env::var("AWS_SECRET_ACCESS_KEY") {
-                builder = builder.with_secret_access_key(secret_key);
-            }
-            if let Ok(region) = std::env::var("AWS_REGION") {
+            // Base on `from_env` so the default AWS credential chain (instance
+            // profile, IRSA / web-identity, the credentials injected by the
+            // platform) is picked up with no configuration. Connection settings
+            // come from the cold-tier config, not the environment.
+            let mut builder = AmazonS3Builder::from_env().with_bucket_name(bucket);
+            if let Some(region) = &os.region {
                 builder = builder.with_region(region);
             }
-            if let Ok(endpoint) = std::env::var("AWS_ENDPOINT") {
+            if let Some(endpoint) = &os.endpoint {
                 builder = builder.with_endpoint(endpoint);
+            }
+            if os.allow_http {
+                builder = builder.with_allow_http(true);
+            }
+            if let Some(vhost) = os.virtual_hosted_style {
+                builder = builder.with_virtual_hosted_style_request(vhost);
+            }
+            if let (Some(key), Some(secret)) = (&os.access_key_id, &os.secret_access_key) {
+                builder = builder
+                    .with_access_key_id(key)
+                    .with_secret_access_key(secret);
             }
 
             let store = builder
@@ -159,14 +154,10 @@ impl ColdTier {
                 .host_str()
                 .ok_or_else(|| Error::Config(format!("GCS URI missing bucket name: {}", uri)))?;
 
-            let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(bucket);
-
-            // Get credentials from environment
-            if let Ok(service_account) = std::env::var("GOOGLE_SERVICE_ACCOUNT") {
-                builder = builder.with_service_account_path(service_account);
-            }
-
-            let store = builder
+            // `from_env` picks up GOOGLE_APPLICATION_CREDENTIALS and the default
+            // workload-identity credential chain; the bucket comes from the URI.
+            let store = GoogleCloudStorageBuilder::from_env()
+                .with_bucket_name(bucket)
                 .build()
                 .map_err(|e| Error::Config(format!("Failed to create GCS store: {}", e)))?;
 
@@ -189,18 +180,12 @@ impl ColdTier {
                 Error::Config(format!("Azure URI missing container name: {}", uri))
             })?;
 
-            let mut builder = MicrosoftAzureBuilder::new().with_container_name(container);
-
-            // Get credentials from environment
-            if let Ok(account_name) = std::env::var("AZURE_STORAGE_ACCOUNT_NAME") {
-                builder = builder.with_account(account_name);
+            // `from_env` picks up AZURE_STORAGE_* and the default credential chain
+            // (managed / workload identity); the container comes from the URI.
+            let mut builder = MicrosoftAzureBuilder::from_env().with_container_name(container);
+            if os.allow_http {
+                builder = builder.with_allow_http(true);
             }
-            if let Ok(account_key) = std::env::var("AZURE_STORAGE_ACCOUNT_KEY") {
-                builder = builder.with_access_key(account_key);
-            }
-            // Note: SAS token support varies by object_store version
-            // For now, rely on account key or default credentials
-
             let store = builder
                 .build()
                 .map_err(|e| Error::Config(format!("Failed to create Azure store: {}", e)))?;
@@ -302,11 +287,7 @@ impl ColdTier {
                 .map_err(|e| Error::Storage(format!("Failed to get current time: {}", e)))?,
         );
 
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
         let full_path = format!("{}/{}", base_path, partition_path);
 
         self.write_record_batch(batch.clone(), batch.schema(), &full_path, companion_bytes)

@@ -35,6 +35,13 @@ pub struct ColdTierConfig {
     /// Companion index configuration
     #[serde(default)]
     pub companion_index: CompanionIndexConfig,
+
+    /// Connection options for cloud object stores (S3/GCS/Azure). Ignored for
+    /// `file://` URIs. Credentials are resolved from the provider's standard
+    /// credential chain (instance profile / IRSA / workload identity) unless
+    /// overridden here.
+    #[serde(default)]
+    pub object_store: ObjectStoreConfig,
 }
 
 impl ColdTierConfig {
@@ -60,8 +67,38 @@ impl Default for ColdTierConfig {
             max_attribute_columns: Self::default_max_attribute_columns(),
             index_path: None,
             companion_index: CompanionIndexConfig::default(),
+            object_store: ObjectStoreConfig::default(),
         }
     }
+}
+
+/// Connection options for cloud object stores. All fields are optional; unset
+/// values fall back to the object-store provider's defaults (including the
+/// standard credential chain — instance profile, IRSA / workload identity).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ObjectStoreConfig {
+    /// Region (e.g. `us-east-1`). Unset uses the provider default.
+    pub region: Option<String>,
+
+    /// Custom endpoint URL for S3-compatible stores (MinIO, Ceph RGW, a gateway).
+    pub endpoint: Option<String>,
+
+    /// Allow plain-HTTP endpoints. Required for a local MinIO served over http
+    /// (object stores reject non-https endpoints otherwise).
+    #[serde(default)]
+    pub allow_http: bool,
+
+    /// Force path-style addressing (`endpoint/bucket`) instead of virtual-hosted
+    /// (`bucket.endpoint`). Most S3-compatibles (MinIO) need path-style.
+    pub virtual_hosted_style: Option<bool>,
+
+    /// Static access key id. Prefer the credential chain (IRSA / instance
+    /// profile) in production; set this only for local/dev (e.g. MinIO).
+    pub access_key_id: Option<String>,
+
+    /// Static secret access key (paired with `access_key_id`).
+    pub secret_access_key: Option<String>,
 }
 
 /// Companion index configuration

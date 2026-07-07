@@ -18,11 +18,7 @@ impl ColdTier {
         let timestamp = Timestamp::now()
             .map_err(|e| Error::Storage(format!("Failed to get current time: {}", e)))?;
         let partition_path = helpers::generate_partition_path("logs", &timestamp);
-        let base_path = self
-            .config
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&self.config.uri);
+        let base_path = crate::store_base_path(&self.config.uri);
         let full_path = format!("{}/{}", base_path, partition_path);
 
         // Build companion index and embed it in the Vortex file.

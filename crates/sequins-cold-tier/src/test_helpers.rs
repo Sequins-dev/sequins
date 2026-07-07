@@ -18,6 +18,7 @@ pub async fn create_test_cold_tier() -> (super::cold_tier::ColdTier, TempDir) {
         },
         index_path: None,
         max_attribute_columns: 256,
+        object_store: Default::default(),
     };
 
     let cold_tier = super::cold_tier::ColdTier::new(config).unwrap();

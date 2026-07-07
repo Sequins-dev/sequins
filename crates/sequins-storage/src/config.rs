@@ -123,11 +123,52 @@ mod tests {
             index_path: Some("/var/lib/sequins/index".to_string()),
             max_attribute_columns: 256,
             companion_index: CompanionIndexConfig::default(),
+            object_store: Default::default(),
         };
 
         assert_eq!(config.uri, "s3://my-bucket/telemetry");
         assert_eq!(config.row_block_size, 10_000);
         assert!(config.compact_encodings);
+    }
+
+    #[test]
+    fn test_cold_tier_object_store_config_parses() {
+        // S3-compatible (MinIO) connection settings configured via YAML, not env.
+        let yaml = r#"
+hot-tier: { max-age: "5m", max-entries: 10000 }
+lifecycle: { retention: "7d", flush-interval: "5m", cleanup-interval: "1h" }
+cold-tier:
+  uri: s3://sequins/data
+  object-store:
+    region: us-east-1
+    endpoint: http://minio:9000
+    allow-http: true
+    access-key-id: minio
+    secret-access-key: minio-secret
+"#;
+        let config = StorageConfig::from_yaml(yaml).unwrap();
+        let os = &config.cold_tier.object_store;
+        assert_eq!(os.region.as_deref(), Some("us-east-1"));
+        assert_eq!(os.endpoint.as_deref(), Some("http://minio:9000"));
+        assert!(os.allow_http);
+        assert_eq!(os.access_key_id.as_deref(), Some("minio"));
+        assert_eq!(os.secret_access_key.as_deref(), Some("minio-secret"));
+    }
+
+    #[test]
+    fn test_local_mode_config_without_object_store() {
+        // Local (embedded) mode: a file:// config with no object-store block still
+        // parses, and object_store defaults to empty (ignored for local storage).
+        let yaml = r#"
+hot-tier: { max-age: "5m", max-entries: 10000 }
+lifecycle: { retention: "7d", flush-interval: "5m", cleanup-interval: "1h" }
+cold-tier:
+  uri: file:///var/lib/sequins
+"#;
+        let config = StorageConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.cold_tier.uri, "file:///var/lib/sequins");
+        assert!(config.cold_tier.object_store.endpoint.is_none());
+        assert!(!config.cold_tier.object_store.allow_http);
     }
 
     #[test]

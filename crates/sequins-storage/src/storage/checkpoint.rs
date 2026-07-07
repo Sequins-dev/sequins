@@ -15,12 +15,10 @@ use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use std::sync::Arc;
 
 impl Storage {
-    /// The WAL base path for this node (cold-tier uri with any `file://` prefix
-    /// stripped), under which WAL segments and the watermark file live.
+    /// The WAL base path for this node — the object-store-relative prefix of the
+    /// cold-tier uri, under which WAL segments and the watermark file live.
     fn wal_base_path(&self) -> String {
-        let uri = &self.config.cold_tier.uri;
-        uri.strip_prefix("file://")
-            .unwrap_or(uri)
+        sequins_cold_tier::store_base_path(&self.config.cold_tier.uri)
             .trim_end_matches('/')
             .to_string()
     }

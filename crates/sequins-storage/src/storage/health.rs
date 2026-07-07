@@ -1,33 +1,49 @@
 use super::Storage;
 use crate::error::Result;
+use object_store::{ObjectStoreExt, PutPayload};
 use sequins_types::health::{HealthMetricRule, HealthThresholdConfig};
 
 impl Storage {
+    /// Object-store path for the health-threshold config, under this node's
+    /// storage prefix. Lives in object storage (not local disk) so it works for
+    /// both `file://` and cloud backends and under a read-only root filesystem.
+    fn health_config_object_path(&self) -> object_store::path::Path {
+        let base =
+            sequins_cold_tier::store_base_path(&self.config.cold_tier.uri).trim_end_matches('/');
+        if base.is_empty() {
+            object_store::path::Path::from("health_config.json")
+        } else {
+            object_store::path::Path::from(format!("{base}/health_config.json"))
+        }
+    }
+
     /// Get the health threshold configuration
     ///
     /// # Errors
     ///
-    /// Returns an error if reading the config file fails
+    /// Returns an error if reading the config object fails
     pub async fn get_health_threshold_config(&self) -> Result<HealthThresholdConfig> {
-        use tokio::io::AsyncReadExt;
+        let store = self.cold_tier.read().await.store.clone();
+        let path = self.health_config_object_path();
 
-        // Try to read the health config file
-        match tokio::fs::File::open(&self.health_config_path).await {
-            Ok(mut file) => {
-                let mut contents = String::new();
-                file.read_to_string(&mut contents).await?;
-                serde_json::from_str(&contents).map_err(|e| {
+        match store.get(&path).await {
+            Ok(result) => {
+                let bytes = result.bytes().await.map_err(|e| {
+                    crate::error::Error::Storage(format!("Failed to read health config: {}", e))
+                })?;
+                serde_json::from_slice(&bytes).map_err(|e| {
                     crate::error::Error::Serialization(format!(
                         "Failed to parse health config JSON: {}",
                         e
                     ))
                 })
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // File doesn't exist, return default config
-                Ok(HealthThresholdConfig::default())
-            }
-            Err(e) => Err(e.into()),
+            // No config written yet — return defaults.
+            Err(object_store::Error::NotFound { .. }) => Ok(HealthThresholdConfig::default()),
+            Err(e) => Err(crate::error::Error::Storage(format!(
+                "Failed to read health config: {}",
+                e
+            ))),
         }
     }
 
@@ -35,22 +51,21 @@ impl Storage {
     ///
     /// # Errors
     ///
-    /// Returns an error if writing the config file fails
+    /// Returns an error if writing the config object fails
     pub async fn set_health_threshold_config(&self, config: HealthThresholdConfig) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
+        let store = self.cold_tier.read().await.store.clone();
+        let path = self.health_config_object_path();
 
-        // Ensure the parent directory exists
-        if let Some(parent) = self.health_config_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
-        let json = serde_json::to_string_pretty(&config).map_err(|e| {
+        let json = serde_json::to_vec_pretty(&config).map_err(|e| {
             crate::error::Error::Serialization(format!("Failed to serialize health config: {}", e))
         })?;
 
-        let mut file = tokio::fs::File::create(&self.health_config_path).await?;
-
-        file.write_all(json.as_bytes()).await?;
+        store
+            .put(&path, PutPayload::from(json))
+            .await
+            .map_err(|e| {
+                crate::error::Error::Storage(format!("Failed to write health config: {}", e))
+            })?;
 
         Ok(())
     }

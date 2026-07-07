@@ -8,6 +8,7 @@ authors.workspace = true
 description = "DataFusion-based SeQL query backend for Sequins"
 
 [dependencies]
+url         = { workspace = true }
 seql-ast             = { workspace = true }
 seql-parser          = { workspace = true }
 seql-substrait       = { workspace = true }

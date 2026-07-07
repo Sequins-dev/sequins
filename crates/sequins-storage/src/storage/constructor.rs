@@ -66,28 +66,21 @@ impl Storage {
             cold_flush,
         ));
 
-        // Load persisted retention policy if it exists
-        let retention_policy = Self::load_retention_policy(&config.cold_tier.uri)?;
+        // Object store shared by the WAL, cold tier, and persisted config files.
+        let store = cold_tier.read().await.store.clone();
 
-        // Health config path
-        let health_config_path =
-            std::path::PathBuf::from(&config.cold_tier.uri).join("health_config.json");
+        // Load persisted retention policy from object storage if it exists.
+        let retention_policy = Self::load_retention_policy(&store, &config.cold_tier.uri).await?;
 
-        // Initialize WAL
-        // Strip file:// prefix for WAL base_path
-        let base_path = config
-            .cold_tier
-            .uri
-            .strip_prefix("file://")
-            .unwrap_or(&config.cold_tier.uri)
-            .to_string();
+        // Initialize WAL under the object-store-relative prefix of the cold-tier
+        // uri (bucket-relative for s3://gs://az://, the local path for file://).
+        let base_path = sequins_cold_tier::store_base_path(&config.cold_tier.uri).to_string();
         let wal_config = WalConfig {
             base_path,
             segment_size: 10_000,
             flush_interval: 100,
             broadcast_capacity: 1000,
         };
-        let store = cold_tier.read().await.store.clone();
         let wal = Arc::new(Wal::new(store.clone(), wal_config).await?);
 
         // Create live query broadcast channel
@@ -111,7 +104,6 @@ impl Storage {
             live_query_manager,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             retention_policy: Arc::new(RwLock::new(retention_policy)),
-            health_config_path,
             clock,
             replay_seq: std::sync::atomic::AtomicU64::new(0),
         };
