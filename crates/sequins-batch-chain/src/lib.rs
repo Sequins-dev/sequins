@@ -82,8 +82,8 @@ impl BatchMeta {
 
 /// A node in the lock-free BatchChain linked list.
 ///
-/// Once created, `batch` and `meta` are immutable. Only `next` and `complete`
-/// are modified after construction (atomically).
+/// Once created, `batch` and `meta` are immutable. Only `next`, `complete`
+/// and `flushed` are modified after construction (atomically).
 // `meta` and `complete` are accessed via raw pointer dereferences inside
 // `compaction_loop`; the dead_code lint cannot see through unsafe pointer reads.
 #[allow(dead_code)]
@@ -98,6 +98,14 @@ pub struct BatchNode {
     /// Set to `true` by the compactor when the merged batch reaches the
     /// target size. Transitions false → true exactly once; never reverted.
     complete: AtomicBool,
+    /// Set to `true` by the compactor **after** this node's batch is durably
+    /// written to cold storage, before it is evicted from the chain. Hot scans
+    /// skip flushed nodes, so a node that is durable in cold is never also
+    /// returned from hot — this closes the hot∪cold double-count that would
+    /// otherwise occur in the window between the cold write and the evict (and,
+    /// crucially, permanently if the evict ever fails to detach the node).
+    /// Transitions false → true exactly once; never reverted.
+    flushed: AtomicBool,
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +223,7 @@ impl BatchChain {
             meta,
             next: Atomic::null(),
             complete: AtomicBool::new(false),
+            flushed: AtomicBool::new(false),
         });
 
         loop {
@@ -349,7 +358,13 @@ fn collect_batches(head_ptr: *const BatchNode) -> Vec<Arc<RecordBatch>> {
         // SAFETY: current is non-null and we hold an epoch guard, preventing
         // any deferred reclamation of this node.
         let node = unsafe { &*current };
-        batches.push(Arc::clone(&node.batch));
+        // Skip nodes already durably written to cold: their rows are served from
+        // the cold tier, so returning them here too would double-count in the
+        // hot∪cold union (and would do so permanently if an evict ever failed to
+        // detach the node).
+        if !node.flushed.load(Ordering::Acquire) {
+            batches.push(Arc::clone(&node.batch));
+        }
         let next = node.next.load(Ordering::Acquire, &guard);
         current = next.as_raw();
     }
@@ -559,6 +574,7 @@ pub async fn compaction_loop(
                 meta: merged_meta.clone(),
                 next: Atomic::from(z_next),
                 complete: AtomicBool::new(is_complete),
+                flushed: AtomicBool::new(false),
             });
 
             // CAS X.next: replace Y with merged.
@@ -641,20 +657,26 @@ fn evict_flushed_node(
         if Arc::ptr_eq(&cur_ref.batch, merged_batch) {
             let succ = cur_ref.next.load(Ordering::Acquire, &guard);
             if let Some(succ_ref) = unsafe { succ.as_ref() } {
-                if Arc::ptr_eq(&succ_ref.batch, flush_batch)
-                    && succ_ref.complete.load(Ordering::Acquire)
-                    && cur_ref
-                        .next
-                        .compare_exchange(
-                            succ,
-                            Shared::null(),
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                            &guard,
-                        )
-                        .is_ok()
-                {
-                    unsafe { guard.defer_destroy(succ) };
+                if Arc::ptr_eq(&succ_ref.batch, flush_batch) {
+                    // Mark the node durable *before* detaching it. Hot scans skip
+                    // flushed nodes, so from here on its rows come only from cold
+                    // — even if the CAS-detach below fails or a scan races, it is
+                    // never double-counted against the shared cold tier.
+                    succ_ref.flushed.store(true, Ordering::Release);
+                    if succ_ref.complete.load(Ordering::Acquire)
+                        && cur_ref
+                            .next
+                            .compare_exchange(
+                                succ,
+                                Shared::null(),
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                                &guard,
+                            )
+                            .is_ok()
+                    {
+                        unsafe { guard.defer_destroy(succ) };
+                    }
                 }
             }
             return;
@@ -976,6 +998,49 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, vec![3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn test_flushed_nodes_excluded_from_hot_scan() {
+        // A node marked `flushed` (as the compactor does after a durable cold
+        // write, before eviction) must not be returned by hot scans — otherwise
+        // its rows would double-count against the shared cold tier.
+        let schema = make_schema();
+        let (chain, _rx) = BatchChain::new(schema.clone());
+        chain.push(
+            make_batch(schema.clone(), vec![1, 2], vec!["a", "b"]),
+            make_meta(1, 2, 2),
+        );
+        chain.push(
+            make_batch(schema.clone(), vec![3], vec!["c"]),
+            make_meta(3, 3, 1),
+        );
+
+        let head_rows = || {
+            let guard = epoch::pin();
+            let hp = chain.head.load(Ordering::Acquire, &guard).as_raw();
+            drop(guard);
+            collect_batches(hp)
+                .iter()
+                .map(|b| b.num_rows())
+                .sum::<usize>()
+        };
+
+        // Before any flush, all 3 rows are hot.
+        assert_eq!(head_rows(), 3);
+
+        // Mark every node flushed (same store the compactor's evict path does).
+        {
+            let guard = epoch::pin();
+            let mut cur = chain.head.load(Ordering::Acquire, &guard);
+            while let Some(n) = unsafe { cur.as_ref() } {
+                n.flushed.store(true, Ordering::Release);
+                cur = n.next.load(Ordering::Acquire, &guard);
+            }
+        }
+
+        // Now hot scans skip them — their rows are served from cold instead.
+        assert_eq!(head_rows(), 0);
     }
 
     // -----------------------------------------------------------------------
