@@ -2,8 +2,6 @@ app-id: com.sequins.desktop
 runtime: org.gnome.Platform
 runtime-version: '48'
 sdk: org.gnome.Sdk
-sdk-extensions:
-  - org.freedesktop.Sdk.Extension.rust-stable
 command: sequins-desktop
 
 finish-args:
@@ -16,7 +14,6 @@ finish-args:
   - --talk-name=ca.desrt.dconf
 
 build-options:
-  append-path: /usr/lib/sdk/rust-stable/bin
   env:
     CARGO_HOME: /run/build/sequins-desktop/cargo
     CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
@@ -42,9 +39,40 @@ modules:
       - /bin/protoc
       - /share/protoc
 
+  - name: rust
+    buildsystem: simple
+    build-commands:
+      - |
+        case "$(uname -m)" in
+          x86_64)
+            target=x86_64-unknown-linux-gnu
+            archive=rust-x86_64.tar.xz
+            ;;
+          aarch64)
+            target=aarch64-unknown-linux-gnu
+            archive=rust-aarch64.tar.xz
+            ;;
+          *)
+            echo "Unsupported architecture: $(uname -m)" >&2
+            exit 1
+            ;;
+        esac
+        tar -xf "$archive"
+        "rust-1.96.1-$target/install.sh" --prefix=/app --disable-ldconfig
+    sources:
+      - type: file
+        url: https://static.rust-lang.org/dist/rust-1.96.1-x86_64-unknown-linux-gnu.tar.xz
+        sha256: d29ccb1559a177c4e72291f6e5f629de7fe8885e7521ca47802627544b121e95
+        dest-filename: rust-x86_64.tar.xz
+      - type: file
+        url: https://static.rust-lang.org/dist/rust-1.96.1-aarch64-unknown-linux-gnu.tar.xz
+        sha256: 3abcb9489d001d95f30e8cfe68118be85afb0adbf0a9b21438909719689c08fb
+        dest-filename: rust-aarch64.tar.xz
+
   - name: sequins-desktop
     buildsystem: simple
     build-commands:
+      - rustc --version
       - cargo build --release --offline --package sequins-linux
       - install -Dm755 target/release/sequins-desktop /app/bin/sequins-desktop
       - install -Dm644 apps/linux/data/com.sequins.desktop.desktop /app/share/applications/com.sequins.desktop.desktop
@@ -54,3 +82,18 @@ modules:
       - type: dir
         path: ../..
       - cargo-sources.json
+    cleanup:
+      - /bin/cargo
+      - /bin/cargo-clippy
+      - /bin/cargo-fmt
+      - /bin/clippy-driver
+      - /bin/rust-gdb
+      - /bin/rust-gdbgui
+      - /bin/rust-lldb
+      - /bin/rustc
+      - /bin/rustdoc
+      - /bin/rustfmt
+      - /lib/rustlib
+      - /share/doc/rust
+      - /share/man/man1/cargo*
+      - /share/man/man1/rust*
