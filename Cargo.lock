@@ -5462,7 +5462,7 @@ checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
 
 [[package]]
 name = "seql-ast"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5470,7 +5470,7 @@ dependencies = [
 
 [[package]]
 name = "seql-parser"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "seql-ast",
  "serde",
@@ -5480,7 +5480,7 @@ dependencies = [
 
 [[package]]
 name = "seql-substrait"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5512,7 +5512,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-arrow-schema"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "once_cell",
@@ -5522,7 +5522,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-attribute-codec"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "ciborium",
@@ -5534,7 +5534,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-batch-chain"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -5548,7 +5548,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5579,7 +5579,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-client"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5602,7 +5602,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-cold-tier"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5638,7 +5638,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-companion-index"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "bincode",
@@ -5651,7 +5651,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-datafusion-backend"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5682,7 +5682,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-ffi"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5712,7 +5712,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-flight"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5725,7 +5725,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-hot-tier"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -5746,7 +5746,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-linux"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5775,7 +5775,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-live-query"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow-flight",
  "async-stream",
@@ -5793,7 +5793,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-otlp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "hex",
@@ -5811,7 +5811,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-pprof"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "pprof",
  "prost 0.14.4",
@@ -5823,7 +5823,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-query"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "proptest",
  "seql-parser",
@@ -5832,7 +5832,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-series-index"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "futures",
  "object_store",
@@ -5844,7 +5844,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-server"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "axum 0.7.9",
@@ -5866,7 +5866,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-storage"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5900,7 +5900,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-traits"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow-flight",
  "async-trait",
@@ -5914,7 +5914,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-types"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5938,7 +5938,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-view"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "async-stream",
@@ -5953,7 +5953,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-vortex-indexed-layout"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -5969,7 +5969,7 @@ dependencies = [
 
 [[package]]
 name = "sequins-wal"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "bytes",
