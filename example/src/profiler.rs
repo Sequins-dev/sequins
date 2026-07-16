@@ -209,13 +209,29 @@ fn convert_report_to_otlp(report: &pprof::Report) -> ExportProfilesServiceReques
     }
 }
 
+/// OTLP/HTTP endpoint for profiles. Honors `OTEL_EXPORTER_OTLP_PROFILES_ENDPOINT`
+/// (a full URL), else derives the host from `OTEL_EXPORTER_OTLP_ENDPOINT` (swapping the
+/// gRPC 4317 for the HTTP 4318 profiles path), else a local daemon.
+fn profiles_endpoint() -> String {
+    if let Ok(url) = std::env::var("OTEL_EXPORTER_OTLP_PROFILES_ENDPOINT") {
+        return url;
+    }
+    if let Ok(grpc) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+        // e.g. http://192.168.65.74:4317 -> http://192.168.65.74:4318/v1development/profiles
+        if let Some(host) = grpc.rsplit_once(':').map(|(h, _)| h) {
+            return format!("{host}:4318/v1development/profiles");
+        }
+    }
+    "http://localhost:4318/v1development/profiles".to_string()
+}
+
 async fn export_report(report: &pprof::Report) {
     let request = convert_report_to_otlp(report);
     let bytes = request.encode_to_vec();
 
     let client = reqwest::Client::new();
     match client
-        .post("http://localhost:4318/v1development/profiles")
+        .post(profiles_endpoint())
         .header("Content-Type", "application/x-protobuf")
         .body(bytes)
         .send()
