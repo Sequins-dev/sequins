@@ -131,6 +131,12 @@ public final class HistogramLine: Identifiable {
     /// on every render.
     private func recomputeMaxActiveBucket() {
         let sorted = snapshots.sorted { $0.timestamp < $1.timestamp }
+        // `1..<sorted.count` traps when count == 0 (1 > 0); with 0 or 1 snapshots
+        // there are no pairwise deltas anyway, so there's nothing to scan.
+        guard sorted.count > 1 else {
+            maxActiveBucket = 0
+            return
+        }
         var maxB = 0
         for i in 1..<sorted.count {
             maxB = max(maxB, deltaMaxBucket(from: sorted[i - 1], to: sorted[i]))

@@ -63,6 +63,29 @@ final class AppStateViewModel {
         timeRangeState.setCustomRange(start: start, end: end)
     }
 
+    /// Build the assistant's LLM/daemon config from the selected environment plus the
+    /// Keychain-stored secret. Returns `nil` when the assistant is not configured for
+    /// the current environment (so the UI can prompt the user to set it up).
+    ///
+    /// - Local: needs a model + API key (base URL optional → api.openai.com).
+    /// - Remote: needs the daemon `/v1` base URL + a bearer token.
+    func assistantConfig() -> AssistantConfig? {
+        if let env = environmentManager.selectedEnvironment {
+            let secret = KeychainStore.shared.assistantSecret(environmentId: env.id)
+            let base = env.assistantBaseURL?.isEmpty == false ? env.assistantBaseURL : nil
+            let model = env.assistantModel?.isEmpty == false ? env.assistantModel : nil
+            if let secret, !secret.isEmpty {
+                if env.isLocal, let model {
+                    return AssistantConfig(baseURL: base, model: model, apiKey: secret)
+                } else if !env.isLocal, let base {
+                    return AssistantConfig(baseURL: base, model: model, apiKey: secret)
+                }
+            }
+        }
+        // Dev/CI fallback: OPENAI_* environment variables (mirrors the daemon).
+        return AssistantConfig.fromProcessEnvironment()
+    }
+
     init() {
         // Don't initialize data source in init - let it happen lazily
         // This prevents crashes during app startup
@@ -204,6 +227,8 @@ enum NavigationItem: String, CaseIterable, Identifiable {
     case logs = "Logs"
     case profiles = "Profiles"
     case explore = "Explore"
+    case assistant = "Assistant"
+    case dashboards = "Dashboards"
 
     var id: String { rawValue }
 
@@ -215,6 +240,8 @@ enum NavigationItem: String, CaseIterable, Identifiable {
         case .logs: return "doc.text"
         case .profiles: return "flame"
         case .explore: return "terminal"
+        case .assistant: return "bubble.left.and.text.bubble.right"
+        case .dashboards: return "square.grid.2x2"
         }
     }
 }

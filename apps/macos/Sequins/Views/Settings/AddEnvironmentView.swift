@@ -5,8 +5,10 @@ struct AddEnvironmentView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var name = ""
-    @State private var queryURL = "http://localhost:8080/query"
-    @State private var managementURL = "http://localhost:8080/management"
+    // The query URL is the daemon's Arrow Flight SQL origin (host:port, no path); the
+    // management URL is its HTTP API. Defaults match the daemon's default ports.
+    @State private var queryURL = "http://localhost:4319"
+    @State private var managementURL = "http://localhost:8081"
     @State private var connectAfterAdd = true
 
     private var isValid: Bool {
@@ -41,16 +43,23 @@ struct AddEnvironmentView: View {
                         .textFieldStyle(.roundedBorder)
                 }
 
-                Section("Connection") {
+                Section {
                     LabeledContent("Query URL") {
-                        TextField("URL", text: $queryURL)
+                        TextField("http://host:4319", text: $queryURL)
                             .textFieldStyle(.roundedBorder)
                     }
 
                     LabeledContent("Management URL") {
-                        TextField("URL", text: $managementURL)
+                        TextField("http://host:8081", text: $managementURL)
                             .textFieldStyle(.roundedBorder)
                     }
+                } header: {
+                    Text("Connection")
+                } footer: {
+                    Text("Query URL is the Arrow Flight SQL endpoint (host:port, no path). "
+                        + "Management URL is the HTTP API.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section {
