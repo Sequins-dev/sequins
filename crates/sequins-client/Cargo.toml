@@ -29,6 +29,8 @@ tokio       = { workspace = true }
 tokio-stream = { workspace = true }
 futures     = { workspace = true }
 async-trait = { workspace = true }
+reqwest    = { workspace = true }
+sequins-metadata = { workspace = true }
 
 # Serialization
 serde      = { workspace = true }

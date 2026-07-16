@@ -210,6 +210,16 @@ typedef enum CVisualizationType {
 } CVisualizationType;
 
 /**
+ * Opaque handle to a constructed assistant (Local or Remote).
+ */
+typedef struct CAssistant CAssistant;
+
+/**
+ * Opaque handle to a running assistant chat stream.
+ */
+typedef struct CAssistantStream CAssistantStream;
+
+/**
  * Opaque C type for DataSource - never actually defined
  * This provides type safety without exposing internals
  */
@@ -229,6 +239,69 @@ typedef struct CStreamHandle CStreamHandle;
  * Opaque handle to a running reactive view.
  */
 typedef struct CViewHandle CViewHandle;
+
+/**
+ * Connection config for the assistant.
+ *
+ * - **Local**: `base_url`/`model`/`api_key` describe the backing LLM provider
+ *   (OpenAI-compatible). `base_url` may be null for api.openai.com.
+ * - **Remote**: `base_url` is the daemon's `/v1` base (e.g. `http://host:8082/v1`),
+ *   `api_key` is the bearer token, `model` is ignored.
+ */
+typedef struct CAssistantConfig {
+  const char *base_url;
+  const char *model;
+  const char *api_key;
+} CAssistantConfig;
+
+/**
+ * A server-executed tool call and its result (for rendering activity).
+ */
+typedef struct CToolActivity {
+  const char *name;
+  /**
+   * Tool arguments as a JSON string.
+   */
+  const char *arguments;
+  /**
+   * Rendered tool output.
+   */
+  const char *output;
+} CToolActivity;
+
+/**
+ * A tool call the client should handle (e.g. `render_visualization`).
+ */
+typedef struct CToolCall {
+  const char *name;
+  /**
+   * Tool arguments as a JSON string.
+   */
+  const char *arguments;
+} CToolCall;
+
+/**
+ * Terminal event with continuation ids.
+ */
+typedef struct CAssistantDone {
+  const char *response_id;
+  /**
+   * Conversation id to continue via `previous_response_id`; null if unpersisted.
+   */
+  const char *conversation_id;
+} CAssistantDone;
+
+/**
+ * C vtable for assistant events. Callbacks may fire from a Tokio worker thread and
+ * must copy out what they need and return promptly (the pointers are freed after).
+ */
+typedef struct CAssistantEventVTable {
+  void (*on_text)(const char*, void *ctx);
+  void (*on_tool_activity)(const struct CToolActivity*, void *ctx);
+  void (*on_tool_call)(const struct CToolCall*, void *ctx);
+  void (*on_done)(const struct CAssistantDone*, void *ctx);
+  void (*on_error)(const char*, void *ctx);
+} CAssistantEventVTable;
 
 /**
  * OTLP server configuration for local mode
@@ -1427,6 +1500,99 @@ typedef struct CSpanQuery {
 } CSpanQuery;
 
 /**
+ * Construct an assistant over a data source and provider/daemon config.
+ *
+ * # Safety
+ * - `data_source` must be a valid `CDataSource*`.
+ * - `config` string pointers must be valid null-terminated UTF-8 or null.
+ * - On error returns null and, if `error_out` is non-null, writes an owned error
+ *   string the caller must free with `sequins_string_free`.
+ */
+struct CAssistant *sequins_assistant_new(struct CDataSource *data_source,
+                                         struct CAssistantConfig config,
+                                         char **error_out);
+
+/**
+ * Free an assistant handle.
+ *
+ * # Safety
+ * `assistant` must be a valid pointer from `sequins_assistant_new` (or null).
+ */
+void sequins_assistant_free(struct CAssistant *assistant);
+
+/**
+ * Start a chat turn. `request_json` is an OpenAI Responses-shaped request
+ * (`input`, `tools`, `instructions`, `conversation`/`previous_response_id`, …).
+ * Returns a stream handle; events arrive via `vtable` until `on_done`/`on_error`.
+ *
+ * # Safety
+ * - `assistant` must be valid for the stream's lifetime.
+ * - `request_json` must be valid null-terminated UTF-8.
+ * - `vtable` fn pointers and `ctx` must remain valid until the stream is freed.
+ */
+struct CAssistantStream *sequins_assistant_chat(struct CAssistant *assistant,
+                                                const char *request_json,
+                                                struct CAssistantEventVTable vtable,
+                                                void *ctx);
+
+/**
+ * Best-effort cancel a running chat stream. Still free it with
+ * `sequins_assistant_stream_free`.
+ *
+ * # Safety
+ * `handle` must be a valid `CAssistantStream*` from `sequins_assistant_chat`.
+ */
+void sequins_assistant_cancel(struct CAssistantStream *handle);
+
+/**
+ * Free a chat stream handle. Aborts the task and **blocks** until it stops, so no
+ * callback fires after the caller's context is freed.
+ *
+ * # Safety
+ * `handle` must be a valid `CAssistantStream*` (or null).
+ */
+void sequins_assistant_stream_free(struct CAssistantStream *handle);
+
+/**
+ * List all dashboards. On success writes a JSON array to `out_json`.
+ *
+ * # Safety
+ * `data_source` must be valid; `out_json`/`error_out` are out-params.
+ */
+bool sequins_dashboard_list(struct CDataSource *data_source, char **out_json, char **error_out);
+
+/**
+ * Get a dashboard by id. Writes a JSON object (or `null`) to `out_json`.
+ *
+ * # Safety
+ * `data_source`/`id` must be valid; `out_json`/`error_out` are out-params.
+ */
+bool sequins_dashboard_get(struct CDataSource *data_source,
+                           const char *id,
+                           char **out_json,
+                           char **error_out);
+
+/**
+ * Create or update a dashboard from a JSON object. Writes the stored dashboard
+ * (with id/timestamps) to `out_json`.
+ *
+ * # Safety
+ * `data_source`/`dashboard_json` must be valid; `out_json`/`error_out` are out-params.
+ */
+bool sequins_dashboard_save(struct CDataSource *data_source,
+                            const char *dashboard_json,
+                            char **out_json,
+                            char **error_out);
+
+/**
+ * Delete a dashboard by id.
+ *
+ * # Safety
+ * `data_source`/`id` must be valid; `error_out` is an out-param.
+ */
+bool sequins_dashboard_delete(struct CDataSource *data_source, const char *id, char **error_out);
+
+/**
  * Create a new local data source with embedded storage
  *
  * # Arguments
@@ -1835,6 +2001,42 @@ struct CStreamHandle *sequins_seql_query(struct CDataSource *data_source,
                                          const char *query_text,
                                          struct CFrameSinkVTable vtable,
                                          void *ctx);
+
+/**
+ * Execute a **read-only** plain SQL query (SELECT only) and stream the framed
+ * result through the same `CFrameSinkVTable` as [`sequins_seql_query`].
+ *
+ * This is how clients read the app-state tables (`conversations`, `messages`,
+ * `dashboards`) and any other registered DataFusion table that SeQL does not
+ * address. Local runs it in-process (`sql_with_options`, read-only); Remote sends
+ * it over Flight SQL's standard `CommandStatementQuery`. Results arrive as a
+ * `Table`-shaped snapshot (schema + data + complete). DDL/DML are rejected.
+ *
+ * # Safety
+ * Same contract as [`sequins_seql_query`].
+ */
+struct CStreamHandle *sequins_sql_query(struct CDataSource *data_source,
+                                        const char *sql_text,
+                                        struct CFrameSinkVTable vtable,
+                                        void *ctx);
+
+/**
+ * Execute a **read-only** plain SQL query against *only* the app-state tables
+ * (`conversations`, `messages`, `dashboards`), streaming the framed result through
+ * the same `CFrameSinkVTable` as [`sequins_sql_query`].
+ *
+ * Prefer this over [`sequins_sql_query`] for reading chat history and dashboards:
+ * it uses a telemetry-free context, so the read can't be blocked or destabilised by
+ * a signal/cold-tier problem (and it skips the cold-listing overhead). If the query
+ * task panics, an error frame is delivered rather than leaving the client hanging.
+ *
+ * # Safety
+ * Same contract as [`sequins_seql_query`].
+ */
+struct CStreamHandle *sequins_app_state_query(struct CDataSource *data_source,
+                                              const char *sql_text,
+                                              struct CFrameSinkVTable vtable,
+                                              void *ctx);
 
 /**
  * Execute a SeQL query in live streaming mode

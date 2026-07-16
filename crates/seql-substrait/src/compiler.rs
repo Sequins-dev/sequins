@@ -5,6 +5,7 @@
 //! embedded in `advanced_extensions.enhancement`.
 
 use arrow::datatypes::DataType as ArrowDataType;
+use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 use datafusion::datasource::provider_as_source;
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::FunctionRegistry;
@@ -1453,7 +1454,14 @@ fn group_expr_to_df_expr(
         // E.g., for 5-minute bins: (cast(ts, Int64) / 300_000_000_000) * 300_000_000_000
         let bin_lit = lit(bin_ns as i64);
         let int_expr = cast(expr, ArrowDataType::Int64);
-        (int_expr.clone() / bin_lit.clone()) * bin_lit
+        let binned = (int_expr.clone() / bin_lit.clone()) * bin_lit;
+        // Wrap the binned epoch-nanoseconds back into a Timestamp so the bucket column is
+        // a real temporal type: clients render a proper time axis (Arrow Timestamp →
+        // Swift `Date`) instead of a giant integer, and downstream keeps time semantics.
+        cast(
+            binned,
+            ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+        )
     } else {
         expr
     };

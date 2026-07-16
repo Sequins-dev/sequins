@@ -32,6 +32,7 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 // Submodules
+pub(crate) mod app_state;
 pub mod arrow_convert;
 pub(crate) mod execution;
 pub mod registration;
@@ -66,6 +67,12 @@ pub struct DataFusionBackend {
     /// [`QueryScope`] (indexed by `scope as usize`: All / HotOnly / ColdOnly).
     /// Each registers the appropriate tier providers and is reused across queries.
     ctx_cache: [OnceCell<SessionContext>; 3],
+    /// A context registering **only** the app-state tables
+    /// (`conversations`/`messages`/`dashboards`) — no signal/tier providers. Used by
+    /// [`execute_app_state_sql`](Self::execute_app_state_sql) so reading chat history
+    /// and dashboards never depends on (or triggers) cold-tier Vortex schema
+    /// inference, keeping those reads fast and immune to telemetry-tier issues.
+    app_state_ctx: OnceCell<SessionContext>,
 }
 
 impl DataFusionBackend {
@@ -74,6 +81,7 @@ impl DataFusionBackend {
         Self {
             storage,
             ctx_cache: std::array::from_fn(|_| OnceCell::new()),
+            app_state_ctx: OnceCell::new(),
         }
     }
 
@@ -130,6 +138,59 @@ impl DataFusionBackend {
         self.session_ctx_for_scope(QueryScope::All).await
     }
 
+    /// The `All`-scope DataFusion [`SessionContext`] with every signal table
+    /// registered (hot ∪ cold), for in-process tooling that needs direct
+    /// DataFrame/SQL access alongside the SeQL query path — e.g. the assistant's
+    /// data-exploration lane (`describe_schema`, `column_profile`, `run_sql`, …).
+    ///
+    /// The context is lazily built and cached like the query path's, so tables
+    /// reflect current data at scan time. Read-only by construction: only the
+    /// union signal-table providers are registered, so ad-hoc SQL can scan but
+    /// not mutate storage.
+    pub async fn session(&self) -> Result<SessionContext, QueryError> {
+        self.session_ctx_for_scope(QueryScope::All).await
+    }
+
+    /// Execute a **read-only** plain SQL query (SELECT only) against the `All`-scope
+    /// context and return a framed `SeqlStream` (shape `Table`). Lets clients read
+    /// the app-state tables (`conversations`/`messages`/`dashboards`) and any other
+    /// registered DataFusion table that SeQL does not address. DDL/DML/statements are
+    /// rejected by [`read_only_sql_options`](execution::read_only_sql_options).
+    pub async fn execute_sql_query(
+        &self,
+        sql: &str,
+    ) -> Result<sequins_traits::SeqlStream, QueryError> {
+        let ctx = self.session().await?;
+        let watermark = self.storage.wal().last_seq();
+        execution::execute_sql_snapshot(ctx, sql, watermark).await
+    }
+
+    /// Execute a **read-only** plain SQL query against a context that registers
+    /// *only* the durable app-state tables (`conversations`/`messages`/`dashboards`).
+    ///
+    /// Unlike [`execute_sql_query`](Self::execute_sql_query) — which uses the `All`
+    /// scope and so registers the hot+cold signal tables (triggering cold-tier Vortex
+    /// schema inference) — this path never touches the telemetry tiers. Reading chat
+    /// history therefore can't be blocked or destabilised by a cold-tier problem
+    /// (e.g. a Vortex type it can't infer), and skips the cold-listing overhead. This
+    /// is the entry point the desktop app uses for its conversation/message reads.
+    pub async fn execute_app_state_sql(
+        &self,
+        sql: &str,
+    ) -> Result<sequins_traits::SeqlStream, QueryError> {
+        let ctx = self
+            .app_state_ctx
+            .get_or_try_init(|| async {
+                let ctx = SessionContext::new();
+                app_state::register_app_state_tables(&ctx, self.storage.app_state().clone())?;
+                Ok::<_, QueryError>(ctx)
+            })
+            .await?
+            .clone();
+        let watermark = self.storage.wal().last_seq();
+        execution::execute_sql_snapshot(ctx, sql, watermark).await
+    }
+
     /// Return the cached `SessionContext` for `scope`, initialising it on first use.
     pub(crate) async fn session_ctx_for_scope(
         &self,
@@ -183,6 +244,11 @@ impl DataFusionBackend {
             )
             .await?;
         }
+
+        // Project the durable app-state store (conversations/messages/dashboards)
+        // into queryable tables alongside the signal tables, so the assistant's
+        // `run_sql` and any SQL client can read chat history and dashboards.
+        app_state::register_app_state_tables(&ctx, self.storage.app_state().clone())?;
 
         Ok(ctx)
     }

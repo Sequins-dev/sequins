@@ -1,0 +1,59 @@
+[package]
+name = "sequins-assistant"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "In-engine AI assistant for Sequins — a tool-injecting Rig CompletionModel + MCP server over DataFusion"
+
+[dependencies]
+# Sequins engine + query language
+sequins-datafusion-backend = { workspace = true }
+sequins-flight             = { workspace = true }
+sequins-traits             = { workspace = true }
+sequins-arrow-schema       = { workspace = true }
+sequins-metadata           = { workspace = true }
+seql-parser                = { workspace = true }
+seql-ast                   = { workspace = true }
+
+# Arrow / DataFusion — `prettyprint` renders RecordBatches as LLM-legible tables
+arrow      = { workspace = true, features = ["prettyprint"] }
+datafusion = { workspace = true }
+
+# Agent framework + Model Context Protocol
+rig  = { workspace = true }
+rmcp = { workspace = true }
+
+# HTTP server (OpenAI-compatible endpoint) + client (names the backing model type).
+# reqwest is pinned to rig-core 0.39's version (0.13) so the backing model's
+# HTTP-client type matches rig's `HttpClientExt` impl — the workspace's 0.12 is a
+# different `reqwest::Client` and would not satisfy the bound.
+axum    = { workspace = true }
+reqwest = "0.13"
+
+# Async
+tokio             = { workspace = true }
+tokio-stream      = { workspace = true }
+futures           = { workspace = true }
+async-stream      = { workspace = true }
+async-trait       = { workspace = true }
+# SSE framing for the remote assistant stream (already compiled transitively via rig).
+eventsource-stream = "0.2"
+
+# Serialization + JSON schema for tool parameters
+serde      = { workspace = true }
+serde_json = { workspace = true }
+schemars   = { workspace = true }
+indexmap   = { workspace = true }
+
+# Error handling + logging
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+
+[dev-dependencies]
+sequins-storage = { workspace = true, features = ["test-utils"] }
+tempfile        = { workspace = true }
+tower           = { workspace = true }
+serde_yaml      = { workspace = true }
+object_store    = { workspace = true }

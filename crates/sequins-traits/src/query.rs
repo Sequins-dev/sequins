@@ -50,6 +50,17 @@ pub type SeqlStream = Pin<Box<dyn Stream<Item = Result<FlightData, QueryError>> 
 pub trait QueryApi: Send + Sync {
     /// Execute a SeQL query string and return a FlightData stream
     async fn query(&self, seql: &str) -> Result<SeqlStream, QueryError>;
+
+    /// Execute a **read-only** plain SQL query (SELECT only) and return a framed
+    /// `FlightData` stream (shape `Table`). Used to read the app-state tables
+    /// (`conversations`/`messages`/`dashboards`) and other DataFusion tables that
+    /// SeQL does not address. The default errors; backends that support SQL override it.
+    async fn sql(&self, sql: &str) -> Result<SeqlStream, QueryError> {
+        let _ = sql;
+        Err(QueryError::UnsupportedStage {
+            stage: "raw SQL".to_string(),
+        })
+    }
 }
 
 /// Server-side query executor (executes pre-compiled Substrait plans)
@@ -57,4 +68,14 @@ pub trait QueryApi: Send + Sync {
 pub trait QueryExec: Send + Sync {
     /// Execute a Substrait Plan (with SeqlExtension) and return a FlightData stream
     async fn execute(&self, plan_bytes: Vec<u8>) -> Result<SeqlStream, QueryError>;
+
+    /// Execute a **read-only** plain SQL query and return a framed `FlightData`
+    /// stream. Backs the Flight SQL `CommandStatementQuery` path. The default
+    /// errors; executors that support SQL override it.
+    async fn execute_sql(&self, sql: String) -> Result<SeqlStream, QueryError> {
+        let _ = sql;
+        Err(QueryError::UnsupportedStage {
+            stage: "raw SQL".to_string(),
+        })
+    }
 }
