@@ -120,6 +120,9 @@ pub enum Stage {
     Merge(MergeStage),
     /// Filter by time range (sliding window)
     TimeRange(TimeRangeStage),
+    /// Window functions over the (time-ordered) result — moving averages, running
+    /// totals, period-over-period deltas.
+    Window(WindowStage),
 }
 
 // ── Filter ────────────────────────────────────────────────────────────────────
@@ -536,6 +539,35 @@ pub struct NavigateStage {
 pub struct UniqueStage {
     /// Field to deduplicate on
     pub field: FieldRef,
+}
+
+/// Window stage — compute window functions over the ordered result. Applied
+/// after aggregation, ordered by the time-bucket column (or the first temporal
+/// column), so a time series can gain moving averages / running totals / deltas.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowStage {
+    /// The window computations, each producing one new aliased column.
+    pub items: Vec<WindowItem>,
+}
+
+/// One window computation and the column name it produces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowItem {
+    /// The window function to apply.
+    pub function: WindowFn,
+    /// Output column name.
+    pub alias: String,
+}
+
+/// A window function over the ordered result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum WindowFn {
+    /// Moving average of `expr` over a trailing frame of `n` rows (inclusive).
+    MovingAvg(Expr, u64),
+    /// Running (cumulative) sum of `expr` from the first row to the current row.
+    Cumulative(Expr),
+    /// Period-over-period difference: `expr - lag(expr, 1)`.
+    Delta(Expr),
 }
 
 /// Patterns stage — detect patterns in string fields

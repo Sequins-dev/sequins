@@ -3,7 +3,7 @@ use crate::expr::{parse_expr, parse_predicate};
 use crate::lexer::{
     identifier, keyword, uint_literal, ws, ws1, KW_AS, KW_ASC, KW_BY, KW_COMPUTE, KW_DESC,
     KW_GROUP, KW_LAST, KW_MERGE, KW_NAVIGATE, KW_OFFSET, KW_PATTERNS, KW_SELECT, KW_SORT, KW_TAKE,
-    KW_UNIQ, KW_WHERE,
+    KW_UNIQ, KW_WHERE, KW_WINDOW,
 };
 use crate::time::{duration_ns, parse_time_scope_at};
 use crate::{ParseError, ParseOptions};
@@ -12,6 +12,7 @@ use seql_ast::ast::{
     ComputeStage, Derivation, Expr, FieldRef, FilterStage, GroupExpr, LimitStage, Literal,
     MergeStage, NavigateStage, PatternsStage, Predicate, ProjectField, ProjectStage, QueryAst,
     QueryMode, Scan, Signal, SortExpr, SortStage, Stage, TimeRange, TimeRangeStage, UniqueStage,
+    WindowFn, WindowItem, WindowStage,
 };
 use winnow::combinator::{alt, delimited, opt, preceded, separated};
 use winnow::token::literal;
@@ -518,6 +519,62 @@ fn parse_stage(input: &mut &str) -> ModalResult<Stage> {
         parse_unique_stage,
         parse_patterns_stage,
         parse_time_range_stage,
+        parse_window_stage,
+    ))
+    .parse_next(input)
+}
+
+/// `window { <fn> as <alias>, … }` — window functions over the ordered result.
+fn parse_window_stage(input: &mut &str) -> ModalResult<Stage> {
+    keyword(KW_WINDOW).parse_next(input)?;
+    ws.parse_next(input)?;
+    let items: Vec<WindowItem> = delimited(
+        (literal("{"), ws),
+        separated(1.., parse_window_item, (ws, literal(","), ws)),
+        (ws, literal("}")),
+    )
+    .parse_next(input)?;
+    Ok(Stage::Window(WindowStage { items }))
+}
+
+fn parse_window_item(input: &mut &str) -> ModalResult<WindowItem> {
+    let function = parse_window_fn.parse_next(input)?;
+    (ws, keyword(KW_AS), ws1).parse_next(input)?;
+    let alias = identifier.parse_next(input)?;
+    Ok(WindowItem {
+        function,
+        alias: alias.to_string(),
+    })
+}
+
+fn parse_window_fn(input: &mut &str) -> ModalResult<WindowFn> {
+    alt((
+        preceded(
+            literal("moving_avg("),
+            (
+                parse_expr,
+                ws,
+                literal(","),
+                ws,
+                uint_literal,
+                ws,
+                literal(")"),
+            )
+                .map(|(e, _, _, _, n, _, _)| WindowFn::MovingAvg(e, n)),
+        ),
+        // `cumulative(` and `running_sum(` are synonyms.
+        preceded(
+            literal("cumulative("),
+            (parse_expr, literal(")")).map(|(e, _)| WindowFn::Cumulative(e)),
+        ),
+        preceded(
+            literal("running_sum("),
+            (parse_expr, literal(")")).map(|(e, _)| WindowFn::Cumulative(e)),
+        ),
+        preceded(
+            literal("delta("),
+            (parse_expr, literal(")")).map(|(e, _)| WindowFn::Delta(e)),
+        ),
     ))
     .parse_next(input)
 }
