@@ -376,6 +376,7 @@ async fn apply_common_stage(
     mut current_signal: Signal,
     ctx: &SessionContext,
     nav_context: &str,
+    window_ns: u64,
 ) -> Result<StageOutcome, QueryError> {
     match stage {
         Stage::Filter(filter) => {
@@ -388,7 +389,7 @@ async fn apply_common_stage(
             builder = apply_compute(builder, compute, current_signal, ctx)?;
         }
         Stage::Aggregate(aggregate) => {
-            builder = apply_aggregate(builder, aggregate, current_signal, ctx)?;
+            builder = apply_aggregate(builder, aggregate, current_signal, ctx, window_ns)?;
         }
         Stage::Sort(sort) => {
             builder = apply_sort(builder, sort, current_signal, ctx)?;
@@ -497,9 +498,13 @@ pub async fn ast_to_logical_plan(
     // Apply time range filter
     builder = apply_time_range_filter(builder, current_signal, &ast.scan.time_range)?;
 
+    // The concrete window this scan covers — threaded into aggregation so
+    // time-relative features (throughput rate, `ts() bin N%`) scale to it.
+    let window_ns = effective_window_ns(&ast.scan.time_range);
+
     // Apply each stage in order
     for stage in &ast.stages {
-        match apply_common_stage(builder, stage, current_signal, ctx, "").await? {
+        match apply_common_stage(builder, stage, current_signal, ctx, "", window_ns).await? {
             StageOutcome::Updated(b, s) => {
                 builder = b;
                 current_signal = s;
@@ -613,9 +618,17 @@ fn compile_merge_aux<'a>(
         let mut current_signal = merge.target;
         let mut nested_aux_plans: Vec<(String, LogicalPlan, Signal)> = Vec::new();
 
+        let merge_window_ns = effective_window_ns(time_range);
         for stage in &merge.stages {
-            match apply_common_stage(aux_builder, stage, current_signal, ctx, "(inside merge)")
-                .await?
+            match apply_common_stage(
+                aux_builder,
+                stage,
+                current_signal,
+                ctx,
+                "(inside merge)",
+                merge_window_ns,
+            )
+            .await?
             {
                 StageOutcome::Updated(b, s) => {
                     aux_builder = b;
@@ -943,6 +956,18 @@ pub fn time_column_for_signal(signal: Signal) -> Option<&'static str> {
     }
 }
 
+/// The concrete duration (in nanoseconds) that a scan's time scope covers.
+///
+/// Used to make time-relative query features scale to the selected range:
+/// `throughput` divides by it, and `ts() bin N%` derives the bucket size from it.
+/// For an absolute range it's `end - start`; for a sliding window it's the offset.
+fn effective_window_ns(time_range: &TimeRange) -> u64 {
+    match time_range {
+        TimeRange::Absolute { start_ns, end_ns } => end_ns.saturating_sub(*start_ns),
+        TimeRange::SlidingWindow { start_ns } => *start_ns,
+    }
+}
+
 fn apply_time_range_filter(
     builder: LogicalPlanBuilder,
     signal: Signal,
@@ -1077,7 +1102,13 @@ pub fn apply_aggregate(
     aggregate: &AggregateStage,
     signal: Signal,
     ctx: &SessionContext,
+    window_ns: u64,
 ) -> Result<LogicalPlanBuilder, QueryError> {
+    // Divisor (seconds) for rate aggregates like `throughput`: a per-bucket rate
+    // when the group keys include a time bin, otherwise the whole query window.
+    let bucket_ns: Option<u64> = aggregate.group_by.iter().find_map(|ge| ge.bin_ns);
+    let rate_divisor_secs = (bucket_ns.unwrap_or(window_ns) as f64 / 1e9).max(f64::MIN_POSITIVE);
+
     // Build group expressions
     let group_exprs: Result<Vec<_>, _> = aggregate
         .group_by
@@ -1090,7 +1121,8 @@ pub fn apply_aggregate(
         .aggregations
         .iter()
         .map(|agg| {
-            let expr = aggregate_fn_to_df_expr(&agg.function, builder.schema(), signal, ctx)?;
+            let expr =
+                aggregate_fn_to_df_expr(&agg.function, builder.schema(), signal, ctx, rate_divisor_secs)?;
             let expr = if let Some(predicate) = &agg.filter {
                 let filter_expr = predicate_to_expr(predicate, builder.schema(), signal, ctx)?;
                 expr.filter(filter_expr)
@@ -1479,6 +1511,7 @@ fn aggregate_fn_to_df_expr(
     schema: &datafusion::common::DFSchemaRef,
     signal: Signal,
     ctx: &SessionContext,
+    rate_divisor_secs: f64,
 ) -> Result<DfExpr, QueryError> {
     match agg_fn {
         AggregateFn::Count => Ok(count(lit(1))),
@@ -1562,11 +1595,10 @@ fn aggregate_fn_to_df_expr(
             Ok(error_count / total_count)
         }
         AggregateFn::Throughput => {
-            // COUNT(*) / time_range_seconds
-            // This requires knowing the time range, which we don't have here
-            // For now, just return COUNT(*)
-            // TODO: Divide by time range duration in seconds
-            Ok(count(lit(1)))
+            // COUNT(*) / seconds — a per-second rate. `rate_divisor_secs` is the
+            // time-bin width when the query is bucketed by `ts()`, else the whole
+            // query window, so the rate scales with the selected time range.
+            Ok(count(lit(1)) / lit(rate_divisor_secs))
         }
         AggregateFn::Heatmap(_expr) => {
             // Heatmap requires custom post-processing
@@ -1622,6 +1654,55 @@ mod tests {
         assert_eq!(signal_to_table_name(Signal::Metrics), "metrics");
         assert_eq!(signal_to_table_name(Signal::Samples), "samples");
         assert_eq!(signal_to_table_name(Signal::Traces), "spans");
+    }
+
+    #[test]
+    fn test_effective_window_ns() {
+        assert_eq!(
+            effective_window_ns(&TimeRange::SlidingWindow {
+                start_ns: 3_600_000_000_000
+            }),
+            3_600_000_000_000
+        );
+        assert_eq!(
+            effective_window_ns(&TimeRange::Absolute {
+                start_ns: 1_000,
+                end_ns: 61_000
+            }),
+            60_000
+        );
+    }
+
+    /// A non-bucketed `throughput()` is `count(*) / window_seconds` (1h → 3600s),
+    /// not the old bare `count(*)` stub.
+    #[tokio::test]
+    async fn test_throughput_divides_by_window_seconds() {
+        let ctx = schema_context().expect("schema_context");
+        let ast = seql_parser::parse("spans last 1h | group by {} { throughput() as tps }")
+            .expect("parse");
+        let (plan, _) = ast_to_logical_plan(&ast, &ctx).await.expect("plan");
+        let text = format!("{}", plan.display_indent());
+        assert!(
+            text.contains("Float64(3600"),
+            "throughput over a 1h window should divide by 3600s; plan was:\n{text}"
+        );
+    }
+
+    /// A time-bucketed `throughput()` is a per-bucket rate: divide by the bin
+    /// width (1m → 60s), not the whole query window.
+    #[tokio::test]
+    async fn test_throughput_bucketed_divides_by_bin_seconds() {
+        let ctx = schema_context().expect("schema_context");
+        let ast = seql_parser::parse(
+            "spans last 1h | group by { ts() bin 1m as bucket } { throughput() as tps }",
+        )
+        .expect("parse");
+        let (plan, _) = ast_to_logical_plan(&ast, &ctx).await.expect("plan");
+        let text = format!("{}", plan.display_indent());
+        assert!(
+            text.contains("Float64(60") && !text.contains("Float64(3600"),
+            "bucketed throughput should divide by the 60s bin, not the window; plan was:\n{text}"
+        );
     }
 
     fn decode_seql_extension(bytes: &[u8]) -> crate::seql_ext::SeqlExtension {
