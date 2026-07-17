@@ -1225,8 +1225,13 @@ pub fn apply_aggregate(
         .aggregations
         .iter()
         .map(|agg| {
-            let expr =
-                aggregate_fn_to_df_expr(&agg.function, builder.schema(), signal, ctx, rate_divisor_secs)?;
+            let expr = aggregate_fn_to_df_expr(
+                &agg.function,
+                builder.schema(),
+                signal,
+                ctx,
+                rate_divisor_secs,
+            )?;
             let expr = if let Some(predicate) = &agg.filter {
                 let filter_expr = predicate_to_expr(predicate, builder.schema(), signal, ctx)?;
                 expr.filter(filter_expr)
@@ -1657,18 +1662,14 @@ fn aggregate_fn_to_df_expr(
             // Use median which is equivalent to P50
             Ok(datafusion_functions_aggregate::expr_fn::median(df_expr))
         }
-        AggregateFn::P95(expr) => {
-            Ok(approx_percentile_expr(
-                ast_expr_to_df_expr(expr, schema, signal, ctx)?,
-                0.95,
-            ))
-        }
-        AggregateFn::P99(expr) => {
-            Ok(approx_percentile_expr(
-                ast_expr_to_df_expr(expr, schema, signal, ctx)?,
-                0.99,
-            ))
-        }
+        AggregateFn::P95(expr) => Ok(approx_percentile_expr(
+            ast_expr_to_df_expr(expr, schema, signal, ctx)?,
+            0.95,
+        )),
+        AggregateFn::P99(expr) => Ok(approx_percentile_expr(
+            ast_expr_to_df_expr(expr, schema, signal, ctx)?,
+            0.99,
+        )),
         AggregateFn::Percentile(expr, q) => {
             // Clamp to the open interval (0,1) approx_percentile_cont accepts.
             let q = q.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
@@ -1824,7 +1825,10 @@ mod tests {
             60_000_000_000
         );
         // `bin auto` snaps to a nice ladder step (1% of 1h = 36s → 60s).
-        assert_eq!(resolve_bin_ns(&BinSpec::Auto, hour).unwrap(), 60_000_000_000);
+        assert_eq!(
+            resolve_bin_ns(&BinSpec::Auto, hour).unwrap(),
+            60_000_000_000
+        );
         // Never collapses to zero.
         assert!(resolve_bin_ns(&BinSpec::Percent(0.0), hour).unwrap() >= 1);
         // Percent/Auto without a window is a clear error, not a guess.
@@ -1837,9 +1841,10 @@ mod tests {
     #[tokio::test]
     async fn test_bin_percent_scales_with_window() {
         let ctx = schema_context().expect("schema_context");
-        let ast =
-            seql_parser::parse("spans last 1h | group by { ts() bin 10% as bucket } { count() as n }")
-                .expect("parse");
+        let ast = seql_parser::parse(
+            "spans last 1h | group by { ts() bin 10% as bucket } { count() as n }",
+        )
+        .expect("parse");
         let (plan, _) = ast_to_logical_plan(&ast, &ctx).await.expect("plan");
         let text = format!("{}", plan.display_indent());
         assert!(
@@ -1868,8 +1873,10 @@ mod tests {
     /// `percentile(col, 90)` (a 0–100 form) is normalized to the 0..1 quantile.
     #[test]
     fn test_percentile_parses_0_100_form() {
-        let ast = seql_parser::parse("spans last 1h | group by {} { percentile(duration_ns, 90) as p90 }")
-            .expect("parse");
+        let ast = seql_parser::parse(
+            "spans last 1h | group by {} { percentile(duration_ns, 90) as p90 }",
+        )
+        .expect("parse");
         let Some(Stage::Aggregate(agg)) = ast.stages.first() else {
             panic!("expected aggregate stage");
         };
@@ -1884,9 +1891,13 @@ mod tests {
     #[tokio::test]
     async fn test_template_scope_less_with_injected_range() {
         let ctx = schema_context().expect("schema_context");
-        let ast = seql_parser::parse("spans | group by { ts() bin 10% as bucket } { count() as n }")
-            .expect("scope-less template should parse");
-        assert_eq!(ast.scan.time_range, None, "template carries no inline scope");
+        let ast =
+            seql_parser::parse("spans | group by { ts() bin 10% as bucket } { count() as n }")
+                .expect("scope-less template should parse");
+        assert_eq!(
+            ast.scan.time_range, None,
+            "template carries no inline scope"
+        );
         let bytes = compile_ast_with_range(
             ast,
             Some(TimeRange::SlidingWindow {
@@ -1917,9 +1928,10 @@ mod tests {
     #[tokio::test]
     async fn test_injected_range_overrides_inline_scope() {
         let ctx = schema_context().expect("schema_context");
-        let mut ast =
-            seql_parser::parse("spans last 5m | group by { ts() bin 10% as bucket } { count() as n }")
-                .expect("parse");
+        let mut ast = seql_parser::parse(
+            "spans last 5m | group by { ts() bin 10% as bucket } { count() as n }",
+        )
+        .expect("parse");
         // Injection is `scan.time_range = Some(range)` (as compile_ast_with_range does).
         ast.scan.time_range = Some(TimeRange::SlidingWindow {
             start_ns: 3_600_000_000_000,
