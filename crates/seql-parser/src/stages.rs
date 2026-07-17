@@ -41,8 +41,14 @@ fn parse_signal(input: &mut &str) -> ModalResult<Signal> {
 
 fn parse_scan_with_options(input: &mut &str, options: ParseOptions) -> ModalResult<Scan> {
     let signal = parse_signal.parse_next(input)?;
-    ws1.parse_next(input)?;
-    let time_range = parse_time_scope_at(input, options.now_ns)?;
+    // The leading time scope is optional: when present it must be whitespace-
+    // separated; when absent the query is a template whose range is supplied at
+    // execution. `opt` over the (ws1, scope) pair backtracks the whitespace when
+    // there is no scope (e.g. `spans | group by …`), leaving stage parsing intact.
+    let time_range = opt(preceded(ws1, |i: &mut &str| {
+        parse_time_scope_at(i, options.now_ns)
+    }))
+    .parse_next(input)?;
     Ok(Scan { signal, time_range })
 }
 
@@ -103,7 +109,7 @@ fn parse_id_lookup(input: &mut &str) -> ModalResult<QueryAst> {
         bindings: vec![],
         scan: Scan {
             signal,
-            time_range: TimeRange::SlidingWindow { start_ns },
+            time_range: Some(TimeRange::SlidingWindow { start_ns }),
         },
         stages: vec![
             Stage::Filter(FilterStage {
@@ -577,9 +583,9 @@ mod tests {
         assert_eq!(ast.scan.signal, Signal::Spans);
         assert_eq!(
             ast.scan.time_range,
-            TimeRange::SlidingWindow {
+            Some(TimeRange::SlidingWindow {
                 start_ns: 3_600_000_000_000
-            }
+            })
         );
         assert!(ast.stages.is_empty());
     }
@@ -1087,9 +1093,9 @@ mod tests {
         assert_eq!(ast.scan.signal, Signal::Spans);
         assert_eq!(
             ast.scan.time_range,
-            TimeRange::SlidingWindow {
+            Some(TimeRange::SlidingWindow {
                 start_ns: 24 * 60 * 60 * 1_000_000_000
-            }
+            })
         );
         // Should have Filter + Limit
         assert_eq!(ast.stages.len(), 2);

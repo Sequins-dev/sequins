@@ -176,9 +176,9 @@ mod tests {
             bindings: vec![],
             scan: Scan {
                 signal,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000,
-                },
+                }),
             },
             stages: vec![],
             mode: QueryMode::Snapshot,

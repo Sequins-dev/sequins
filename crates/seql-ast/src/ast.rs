@@ -39,8 +39,10 @@ pub enum QueryMode {
 pub struct Scan {
     /// Which signal type to scan
     pub signal: Signal,
-    /// Time range to scan
-    pub time_range: TimeRange,
+    /// Time range to scan. `None` marks a **query template** whose range is
+    /// supplied separately at execution (e.g. the dashboard's selected range);
+    /// an inline scope fills this at parse time.
+    pub time_range: Option<TimeRange>,
 }
 
 /// Signal type to query
@@ -588,9 +590,9 @@ mod tests {
             bindings: vec![],
             scan: Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000,
-                },
+                }),
             },
             stages: vec![
                 Stage::Filter(FilterStage {
@@ -749,10 +751,10 @@ mod tests {
             name: "errors".into(),
             scan: Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::Absolute {
+                time_range: Some(TimeRange::Absolute {
                     start_ns: 1_700_000_000_000_000_000,
                     end_ns: 1_700_003_600_000_000_000,
-                },
+                }),
             },
             stages: vec![Stage::Filter(FilterStage {
                 predicate: Predicate::Compare(CompareExpr {
