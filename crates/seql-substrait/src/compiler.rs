@@ -24,6 +24,7 @@ use seql_ast::ast::{
     AggregateFn, AggregateStage, ArithOp, BinSpec, CompareOp, ComputeStage, Expr as AstExpr,
     FieldRef, FilterStage, GroupExpr, LimitStage, Literal, MergeStage, Predicate, ProjectStage,
     QueryAst, QueryMode, ScalarFn, Scan, Signal, SortStage, Stage, TimeRange, UniqueStage,
+    WindowFn, WindowStage,
 };
 use seql_ast::correlation::{merge_join_key, navigate_join_key};
 use seql_ast::schema::infer_shape;
@@ -494,6 +495,9 @@ async fn apply_common_stage(
         }
         Stage::Patterns(_) => {
             // Patterns stage is a no-op
+        }
+        Stage::Window(window) => {
+            builder = apply_window(builder, window, current_signal, ctx)?;
         }
     }
 
@@ -1253,6 +1257,110 @@ pub fn apply_aggregate(
         })
 }
 
+/// Apply a `window { … }` stage: compute window functions over the result,
+/// ordered by the first temporal column (the `ts()` bucket for a time series)
+/// or the first column otherwise. Each item appends one aliased column.
+pub fn apply_window(
+    builder: LogicalPlanBuilder,
+    window: &WindowStage,
+    signal: Signal,
+    ctx: &SessionContext,
+) -> Result<LogicalPlanBuilder, QueryError> {
+    let schema = builder.schema();
+    // Order by the first Timestamp column (the time bucket), else the first column.
+    let order_field = schema
+        .fields()
+        .iter()
+        .find(|f| matches!(f.data_type(), ArrowDataType::Timestamp(_, _)))
+        .or_else(|| schema.fields().first())
+        .ok_or_else(|| QueryError::Execution {
+            message: "window stage requires at least one column to order by".to_string(),
+        })?;
+    let order_by = vec![col(order_field.name()).sort(true, false)];
+
+    let window_exprs: Vec<DfExpr> = window
+        .items
+        .iter()
+        .map(|item| {
+            let e = window_fn_to_df_expr(&item.function, &order_by, schema, signal, ctx)?;
+            Ok(e.alias(&item.alias))
+        })
+        .collect::<Result<_, QueryError>>()?;
+
+    builder
+        .window(window_exprs)
+        .map_err(|e| QueryError::Execution {
+            message: format!("Failed to apply window stage: {}", e),
+        })
+}
+
+/// Build a DataFusion window expression for one [`WindowFn`], ordered by
+/// `order_by`. Uses only `avg`/`sum` aggregate UDFs over row frames — including
+/// `delta`, which reads the previous row via a `[1 preceding, 1 preceding]`
+/// frame — so no separate lag window UDF dependency is needed.
+fn window_fn_to_df_expr(
+    fun: &WindowFn,
+    order_by: &[datafusion_expr::SortExpr],
+    schema: &datafusion::common::DFSchemaRef,
+    signal: Signal,
+    ctx: &SessionContext,
+) -> Result<DfExpr, QueryError> {
+    use datafusion::scalar::ScalarValue;
+    use datafusion_expr::expr::WindowFunction;
+    use datafusion_expr::window_frame::{WindowFrame, WindowFrameBound, WindowFrameUnits};
+    use datafusion_expr::{ExprFunctionExt, WindowFunctionDefinition};
+    use datafusion_functions_aggregate::average::avg_udaf;
+    use datafusion_functions_aggregate::sum::sum_udaf;
+
+    let build = |udaf, arg: DfExpr, frame: WindowFrame| -> Result<DfExpr, QueryError> {
+        Expr::WindowFunction(Box::new(WindowFunction::new(
+            WindowFunctionDefinition::AggregateUDF(udaf),
+            vec![arg],
+        )))
+        .order_by(order_by.to_vec())
+        .window_frame(frame)
+        .build()
+        .map_err(|e| QueryError::Execution {
+            message: format!("Failed to build window function: {}", e),
+        })
+    };
+
+    match fun {
+        WindowFn::MovingAvg(expr, n) => {
+            let arg = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
+            // Trailing frame of n rows: [n-1 preceding, current].
+            let frame = WindowFrame::new_bounds(
+                WindowFrameUnits::Rows,
+                WindowFrameBound::Preceding(ScalarValue::UInt64(Some(n.saturating_sub(1)))),
+                WindowFrameBound::CurrentRow,
+            );
+            build(avg_udaf(), arg, frame)
+        }
+        WindowFn::Cumulative(expr) => {
+            let arg = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
+            // Running total: [unbounded preceding, current] (null bound = unbounded).
+            let frame = WindowFrame::new_bounds(
+                WindowFrameUnits::Rows,
+                WindowFrameBound::Preceding(ScalarValue::UInt64(None)),
+                WindowFrameBound::CurrentRow,
+            );
+            build(sum_udaf(), arg, frame)
+        }
+        WindowFn::Delta(expr) => {
+            let arg = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
+            // Previous row's value via sum over a single-row [1 preceding, 1 preceding]
+            // frame; delta = current - previous.
+            let prev_frame = WindowFrame::new_bounds(
+                WindowFrameUnits::Rows,
+                WindowFrameBound::Preceding(ScalarValue::UInt64(Some(1))),
+                WindowFrameBound::Preceding(ScalarValue::UInt64(Some(1))),
+            );
+            let prev = build(sum_udaf(), arg.clone(), prev_frame)?;
+            Ok(arg - prev)
+        }
+    }
+}
+
 pub fn apply_sort(
     builder: LogicalPlanBuilder,
     sort: &SortStage,
@@ -1853,8 +1961,106 @@ mod tests {
         );
     }
 
+    /// A `window { … }` stage on a time series compiles AND round-trips through
+    /// the backend's custom Substrait consumer (so the daemon can execute it).
+    #[tokio::test]
+    async fn test_window_stage_compiles_and_consumes() {
+        use datafusion_substrait::extensions::Extensions;
+        use datafusion_substrait::logical_plan::consumer::{
+            DefaultSubstraitConsumer, SubstraitConsumer,
+        };
+        use datafusion_substrait::substrait::proto::{plan_rel, Plan};
+
+        let ctx = schema_context().expect("schema_context");
+        let bytes = compile(
+            "spans last 1h | group by { ts() bin 5m as bucket } { count() as n } \
+             | window { moving_avg(n, 3) as ma, cumulative(n) as run, delta(n) as d }",
+            &ctx,
+        )
+        .await
+        .expect("window query should compile");
+        assert!(!bytes.is_empty());
+
+        // Consume the primary relation back, exactly as the backend does.
+        let plan: Plan = prost::Message::decode(&bytes[..]).expect("decode");
+        let extensions = Extensions::try_from(&plan.extensions).expect("extensions");
+        let state = ctx.state();
+        let consumer = DefaultSubstraitConsumer::new(&extensions, &state);
+        let rel = match plan.relations[0].rel_type.as_ref().expect("rel_type") {
+            plan_rel::RelType::Root(root) => root.input.as_ref().expect("root input"),
+            plan_rel::RelType::Rel(rel) => rel,
+        };
+        let consumed = consumer.consume_rel(rel).await;
+        assert!(
+            consumed.is_ok(),
+            "backend consumer rejected the window plan: {:?}",
+            consumed.err()
+        );
+    }
+
     /// The new statistical aggregates (stddev/variance/arbitrary percentile)
     /// parse and compile.
+    /// SPIKE (Phase 4): does DataFusion's Substrait producer serialize a window
+    /// function at all? If this errors, the `window { … }` stage must carry its
+    /// spec in the SeqlExtension and apply it on the backend instead.
+    #[tokio::test]
+    async fn spike_window_fn_substrait_producer() {
+        let ctx = schema_context().expect("schema_context");
+        let sql = "SELECT trace_id, \
+                   avg(duration_ns) OVER (ORDER BY start_time_unix_nano \
+                   ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS ma \
+                   FROM spans";
+        let df = ctx.sql(sql).await.expect("window SQL should plan");
+        let plan = df.into_optimized_plan().expect("optimize");
+        let produced = to_substrait_plan(&plan, &ctx.state());
+        // Intentional: surfaces the producer's verdict in the test log.
+        assert!(
+            produced.is_ok(),
+            "Substrait producer rejected a window function: {:?}",
+            produced.err()
+        );
+    }
+
+    /// SPIKE (Phase 4): full round-trip — does the backend's *custom* consumer
+    /// (`DefaultSubstraitConsumer`) accept a window function back? If yes, the
+    /// `window { … }` stage can go through the normal compile→Substrait→consume
+    /// path with no fallback.
+    #[tokio::test]
+    async fn spike_window_fn_substrait_round_trip() {
+        use datafusion_substrait::extensions::Extensions;
+        use datafusion_substrait::logical_plan::consumer::{
+            DefaultSubstraitConsumer, SubstraitConsumer,
+        };
+        use datafusion_substrait::substrait::proto::plan_rel;
+
+        let ctx = schema_context().expect("schema_context");
+        let sql = "SELECT trace_id, \
+                   avg(duration_ns) OVER (ORDER BY start_time_unix_nano \
+                   ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS ma \
+                   FROM spans";
+        let plan = ctx
+            .sql(sql)
+            .await
+            .expect("plan")
+            .into_optimized_plan()
+            .expect("optimize");
+        let substrait = *to_substrait_plan(&plan, &ctx.state()).expect("produce");
+
+        let extensions = Extensions::try_from(&substrait.extensions).expect("extensions");
+        let state = ctx.state();
+        let consumer = DefaultSubstraitConsumer::new(&extensions, &state);
+        let rel = match substrait.relations[0].rel_type.as_ref().expect("rel_type") {
+            plan_rel::RelType::Root(root) => root.input.as_ref().expect("root input"),
+            plan_rel::RelType::Rel(rel) => rel,
+        };
+        let consumed = consumer.consume_rel(rel).await;
+        assert!(
+            consumed.is_ok(),
+            "custom consumer rejected a window function: {:?}",
+            consumed.err()
+        );
+    }
+
     #[tokio::test]
     async fn test_new_statistical_aggregates_compile() {
         let ctx = schema_context().expect("schema_context");
