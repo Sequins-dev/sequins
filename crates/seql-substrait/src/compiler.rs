@@ -21,9 +21,9 @@ use datafusion_functions_aggregate::expr_fn::{
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
 use datafusion_substrait::substrait::proto::extensions::AdvancedExtension;
 use seql_ast::ast::{
-    AggregateFn, AggregateStage, ArithOp, CompareOp, ComputeStage, Expr as AstExpr, FieldRef,
-    FilterStage, GroupExpr, LimitStage, Literal, MergeStage, Predicate, ProjectStage, QueryAst,
-    QueryMode, ScalarFn, Scan, Signal, SortStage, Stage, TimeRange, UniqueStage,
+    AggregateFn, AggregateStage, ArithOp, BinSpec, CompareOp, ComputeStage, Expr as AstExpr,
+    FieldRef, FilterStage, GroupExpr, LimitStage, Literal, MergeStage, Predicate, ProjectStage,
+    QueryAst, QueryMode, ScalarFn, Scan, Signal, SortStage, Stage, TimeRange, UniqueStage,
 };
 use seql_ast::correlation::{merge_join_key, navigate_join_key};
 use seql_ast::schema::infer_shape;
@@ -968,6 +968,50 @@ fn effective_window_ns(time_range: &TimeRange) -> u64 {
     }
 }
 
+/// Resolve a [`BinSpec`] to a concrete bucket width in nanoseconds, given the
+/// query's effective window. `Percent`/`Auto` scale with `window_ns` so a saved
+/// time-series re-buckets sensibly as the selected range changes. Always ≥ 1ns.
+fn resolve_bin_ns(bin: &BinSpec, window_ns: u64) -> u64 {
+    let ns = match bin {
+        BinSpec::Fixed(ns) => *ns,
+        // `bin 10%` → 10 buckets: width = window * 10/100. `max(0.0001)` guards a
+        // degenerate/zero percentage from collapsing the divisor.
+        BinSpec::Percent(pct) => ((window_ns as f64) * (pct.max(0.0001) / 100.0)) as u64,
+        BinSpec::Auto => nice_bin_ns(window_ns),
+    };
+    ns.max(1)
+}
+
+/// Pick a "nice" bucket width (~100 buckets) for `bin auto`, snapped to a human
+/// duration ladder so time axes land on round intervals. Mirrors the client's
+/// `MetricsViewModel.binSeconds(for:)` ladder.
+fn nice_bin_ns(window_ns: u64) -> u64 {
+    const S: u64 = 1_000_000_000;
+    const LADDER: &[u64] = &[
+        S,        // 1s
+        5 * S,    // 5s
+        10 * S,   // 10s
+        15 * S,   // 15s
+        30 * S,   // 30s
+        60 * S,   // 1m
+        300 * S,  // 5m
+        600 * S,  // 10m
+        900 * S,  // 15m
+        1800 * S, // 30m
+        3600 * S, // 1h
+        3 * 3600 * S,
+        6 * 3600 * S,
+        12 * 3600 * S,
+        86_400 * S, // 1d
+    ];
+    let target = (window_ns / 100).max(1);
+    LADDER
+        .iter()
+        .copied()
+        .find(|&step| step >= target)
+        .unwrap_or_else(|| *LADDER.last().unwrap())
+}
+
 fn apply_time_range_filter(
     builder: LogicalPlanBuilder,
     signal: Signal,
@@ -1106,14 +1150,17 @@ pub fn apply_aggregate(
 ) -> Result<LogicalPlanBuilder, QueryError> {
     // Divisor (seconds) for rate aggregates like `throughput`: a per-bucket rate
     // when the group keys include a time bin, otherwise the whole query window.
-    let bucket_ns: Option<u64> = aggregate.group_by.iter().find_map(|ge| ge.bin_ns);
+    let bucket_ns: Option<u64> = aggregate
+        .group_by
+        .iter()
+        .find_map(|ge| ge.bin.as_ref().map(|b| resolve_bin_ns(b, window_ns)));
     let rate_divisor_secs = (bucket_ns.unwrap_or(window_ns) as f64 / 1e9).max(f64::MIN_POSITIVE);
 
     // Build group expressions
     let group_exprs: Result<Vec<_>, _> = aggregate
         .group_by
         .iter()
-        .map(|ge| group_expr_to_df_expr(ge, builder.schema(), signal, ctx))
+        .map(|ge| group_expr_to_df_expr(ge, builder.schema(), signal, ctx, window_ns))
         .collect();
 
     // Build aggregation expressions
@@ -1475,11 +1522,13 @@ fn group_expr_to_df_expr(
     schema: &datafusion::common::DFSchemaRef,
     signal: Signal,
     ctx: &SessionContext,
+    window_ns: u64,
 ) -> Result<DfExpr, QueryError> {
     let expr = ast_expr_to_df_expr(&group_expr.expr, schema, signal, ctx)?;
 
     // Handle time binning
-    let expr = if let Some(bin_ns) = group_expr.bin_ns {
+    let expr = if let Some(bin) = &group_expr.bin {
+        let bin_ns = resolve_bin_ns(bin, window_ns);
         // Bin by dividing timestamp by bin size, then multiplying back.
         // Time columns are stored as Timestamp(ns) — cast to Int64 first so
         // integer arithmetic works correctly.
@@ -1685,6 +1734,38 @@ mod tests {
         assert!(
             text.contains("Float64(3600"),
             "throughput over a 1h window should divide by 3600s; plan was:\n{text}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_bin_ns() {
+        let hour = 3_600_000_000_000u64;
+        // `bin 10%` of a 1h window → 6-minute buckets.
+        assert_eq!(resolve_bin_ns(&BinSpec::Percent(10.0), hour), 360_000_000_000);
+        // Fixed passes through unchanged.
+        assert_eq!(
+            resolve_bin_ns(&BinSpec::Fixed(60_000_000_000), hour),
+            60_000_000_000
+        );
+        // `bin auto` snaps to a nice ladder step (1% of 1h = 36s → 60s).
+        assert_eq!(resolve_bin_ns(&BinSpec::Auto, hour), 60_000_000_000);
+        // Never collapses to zero.
+        assert!(resolve_bin_ns(&BinSpec::Percent(0.0), hour) >= 1);
+    }
+
+    /// `ts() bin 10%` derives the bucket width from the query window so a saved
+    /// time-series re-buckets when the range changes (10% of 1h = 6m).
+    #[tokio::test]
+    async fn test_bin_percent_scales_with_window() {
+        let ctx = schema_context().expect("schema_context");
+        let ast =
+            seql_parser::parse("spans last 1h | group by { ts() bin 10% as bucket } { count() as n }")
+                .expect("parse");
+        let (plan, _) = ast_to_logical_plan(&ast, &ctx).await.expect("plan");
+        let text = format!("{}", plan.display_indent());
+        assert!(
+            text.contains("360000000000"),
+            "10% of a 1h window should bin at 6m (360000000000ns); plan was:\n{text}"
         );
     }
 

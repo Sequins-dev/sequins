@@ -8,10 +8,10 @@ use crate::lexer::{
 use crate::time::{duration_ns, parse_time_scope_at};
 use crate::{ParseError, ParseOptions};
 use seql_ast::ast::{
-    AggregateFn, AggregateStage, Aggregation, AttrScope, CompareExpr, CompareOp, ComputeStage,
-    Derivation, Expr, FieldRef, FilterStage, GroupExpr, LimitStage, Literal, MergeStage,
-    NavigateStage, PatternsStage, Predicate, ProjectField, ProjectStage, QueryAst, QueryMode, Scan,
-    Signal, SortExpr, SortStage, Stage, TimeRange, TimeRangeStage, UniqueStage,
+    AggregateFn, AggregateStage, Aggregation, AttrScope, BinSpec, CompareExpr, CompareOp,
+    ComputeStage, Derivation, Expr, FieldRef, FilterStage, GroupExpr, LimitStage, Literal,
+    MergeStage, NavigateStage, PatternsStage, Predicate, ProjectField, ProjectStage, QueryAst,
+    QueryMode, Scan, Signal, SortExpr, SortStage, Stage, TimeRange, TimeRangeStage, UniqueStage,
 };
 use winnow::combinator::{alt, delimited, opt, preceded, separated};
 use winnow::token::literal;
@@ -230,6 +230,21 @@ fn parse_compute_stage(input: &mut &str) -> ModalResult<Stage> {
     Ok(Stage::Compute(ComputeStage { derivations }))
 }
 
+/// Parse a `ts() bin …` width: `auto`, `<N>%` (a percentage of the query
+/// window), or a fixed `<duration>` like `5m`. Percentage/`auto` are resolved
+/// to a concrete width at compile time so bucketing scales with the range.
+fn parse_bin_spec(input: &mut &str) -> ModalResult<BinSpec> {
+    use winnow::ascii::float;
+    alt((
+        literal("auto").map(|_| BinSpec::Auto),
+        // `<number>%` must be tried before a bare duration: `float` parses the
+        // leading digits and the `%` distinguishes it from `5m`/`30s`.
+        (float::<_, f64, _>, ws, literal("%")).map(|(pct, _, _)| BinSpec::Percent(pct)),
+        duration_ns.map(BinSpec::Fixed),
+    ))
+    .parse_next(input)
+}
+
 fn parse_aggregate_stage(input: &mut &str) -> ModalResult<Stage> {
     literal(KW_GROUP).parse_next(input)?;
     ws1.parse_next(input)?;
@@ -245,14 +260,14 @@ fn parse_aggregate_stage(input: &mut &str) -> ModalResult<Stage> {
                 parse_expr,
                 // ws (not ws1): parse_expr's loops consume trailing whitespace,
                 // so there may be 0 spaces left before "bin" / "as".
-                opt(preceded((ws, literal("bin"), ws1), duration_ns)),
+                opt(preceded((ws, literal("bin"), ws1), parse_bin_spec)),
                 opt(preceded((ws, literal(KW_AS), ws1), identifier)),
                 ws,
             )
-                .map(|(_, expr, bin_ns, alias, _)| GroupExpr {
+                .map(|(_, expr, bin, alias, _)| GroupExpr {
                     expr,
                     alias: alias.map(str::to_string),
-                    bin_ns,
+                    bin,
                 }),
             (ws, literal(","), ws),
         ),
@@ -644,7 +659,7 @@ mod tests {
         .unwrap();
         if let Stage::Aggregate(agg) = &ast.stages[0] {
             assert_eq!(agg.group_by.len(), 1);
-            assert!(agg.group_by[0].bin_ns.is_some());
+            assert!(agg.group_by[0].bin.is_some());
             assert_eq!(agg.group_by[0].alias.as_deref(), Some("bucket"));
         } else {
             panic!("expected aggregate stage");
