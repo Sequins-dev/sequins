@@ -476,6 +476,13 @@ pub enum AggregateFn {
     P95(Expr),
     /// 99th percentile of a field
     P99(Expr),
+    /// Arbitrary percentile of a field. The `f64` is the quantile in `0.0..=1.0`
+    /// (e.g. `0.90` for p90).
+    Percentile(Expr, f64),
+    /// Standard deviation of a field
+    Stddev(Expr),
+    /// Variance of a field
+    Variance(Expr),
     /// Error rate (fraction of rows with status=Error)
     ErrorRate,
     /// Request throughput (rows per second)

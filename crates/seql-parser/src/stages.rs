@@ -167,6 +167,38 @@ fn parse_agg_fn(input: &mut &str) -> ModalResult<AggregateFn> {
             (parse_expr, literal(")")).map(|(e, _)| AggregateFn::P99(e)),
         ),
         preceded(
+            literal("stddev("),
+            (parse_expr, literal(")")).map(|(e, _)| AggregateFn::Stddev(e)),
+        ),
+        // `variance(` before `var(` — the trailing `(` already disambiguates,
+        // but keep the longer literal first for clarity.
+        preceded(
+            literal("variance("),
+            (parse_expr, literal(")")).map(|(e, _)| AggregateFn::Variance(e)),
+        ),
+        preceded(
+            literal("var("),
+            (parse_expr, literal(")")).map(|(e, _)| AggregateFn::Variance(e)),
+        ),
+        // `percentile(<col>, <q>)` — q is a quantile in 0..=1 (e.g. 0.90). A value
+        // > 1 is treated as a 0–100 percentile and divided by 100.
+        preceded(
+            literal("percentile("),
+            (
+                parse_expr,
+                ws,
+                literal(","),
+                ws,
+                winnow::ascii::float::<_, f64, _>,
+                ws,
+                literal(")"),
+            )
+                .map(|(e, _, _, _, q, _, _)| {
+                    let q = if q > 1.0 { q / 100.0 } else { q };
+                    AggregateFn::Percentile(e, q)
+                }),
+        ),
+        preceded(
             literal("distinct("),
             (parse_expr, literal(")")).map(|(e, _)| AggregateFn::Distinct(e)),
         ),

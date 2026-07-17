@@ -1612,6 +1612,21 @@ fn group_expr_to_df_expr(
     })
 }
 
+/// `approx_percentile_cont(expr, q)` for a quantile `q` in (0,1). Shared by
+/// `p95`/`p99` and the general `percentile(col, q)` aggregate.
+fn approx_percentile_expr(df_expr: DfExpr, q: f64) -> DfExpr {
+    let udaf =
+        datafusion_functions_aggregate::approx_percentile_cont::approx_percentile_cont_udaf();
+    Expr::AggregateFunction(datafusion_expr::expr::AggregateFunction::new_udf(
+        udaf,
+        vec![df_expr, lit(q)],
+        false,  // distinct
+        None,   // filter
+        vec![], // order_by
+        None,   // null_treatment
+    ))
+}
+
 fn aggregate_fn_to_df_expr(
     agg_fn: &AggregateFn,
     schema: &datafusion::common::DFSchemaRef,
@@ -1643,38 +1658,32 @@ fn aggregate_fn_to_df_expr(
             Ok(datafusion_functions_aggregate::expr_fn::median(df_expr))
         }
         AggregateFn::P95(expr) => {
-            let df_expr = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
-            // Use approx_percentile_cont UDAF with percentile parameter
-            let udaf =
-                datafusion_functions_aggregate::approx_percentile_cont::approx_percentile_cont_udaf(
-                );
-            Ok(Expr::AggregateFunction(
-                datafusion_expr::expr::AggregateFunction::new_udf(
-                    udaf,
-                    vec![df_expr, lit(0.95)],
-                    false,  // distinct
-                    None,   // filter
-                    vec![], // order_by
-                    None,   // null_treatment
-                ),
+            Ok(approx_percentile_expr(
+                ast_expr_to_df_expr(expr, schema, signal, ctx)?,
+                0.95,
             ))
         }
         AggregateFn::P99(expr) => {
-            let df_expr = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
-            // Use approx_percentile_cont UDAF with percentile parameter
-            let udaf =
-                datafusion_functions_aggregate::approx_percentile_cont::approx_percentile_cont_udaf(
-                );
-            Ok(Expr::AggregateFunction(
-                datafusion_expr::expr::AggregateFunction::new_udf(
-                    udaf,
-                    vec![df_expr, lit(0.99)],
-                    false,  // distinct
-                    None,   // filter
-                    vec![], // order_by
-                    None,   // null_treatment
-                ),
+            Ok(approx_percentile_expr(
+                ast_expr_to_df_expr(expr, schema, signal, ctx)?,
+                0.99,
             ))
+        }
+        AggregateFn::Percentile(expr, q) => {
+            // Clamp to the open interval (0,1) approx_percentile_cont accepts.
+            let q = q.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
+            Ok(approx_percentile_expr(
+                ast_expr_to_df_expr(expr, schema, signal, ctx)?,
+                q,
+            ))
+        }
+        AggregateFn::Stddev(expr) => {
+            let df_expr = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
+            Ok(datafusion_functions_aggregate::expr_fn::stddev(df_expr))
+        }
+        AggregateFn::Variance(expr) => {
+            let df_expr = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
+            Ok(datafusion_functions_aggregate::expr_fn::var_sample(df_expr))
         }
         AggregateFn::Distinct(expr) => {
             let df_expr = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
@@ -1837,6 +1846,37 @@ mod tests {
             text.contains("360000000000"),
             "10% of a 1h window should bin at 6m (360000000000ns); plan was:\n{text}"
         );
+    }
+
+    /// The new statistical aggregates (stddev/variance/arbitrary percentile)
+    /// parse and compile.
+    #[tokio::test]
+    async fn test_new_statistical_aggregates_compile() {
+        let ctx = schema_context().expect("schema_context");
+        let bytes = compile(
+            "spans last 1h | group by {} { \
+             stddev(duration_ns) as sd, \
+             variance(duration_ns) as v, \
+             percentile(duration_ns, 0.9) as p90 }",
+            &ctx,
+        )
+        .await
+        .expect("stddev/variance/percentile should compile");
+        assert!(!bytes.is_empty());
+    }
+
+    /// `percentile(col, 90)` (a 0–100 form) is normalized to the 0..1 quantile.
+    #[test]
+    fn test_percentile_parses_0_100_form() {
+        let ast = seql_parser::parse("spans last 1h | group by {} { percentile(duration_ns, 90) as p90 }")
+            .expect("parse");
+        let Some(Stage::Aggregate(agg)) = ast.stages.first() else {
+            panic!("expected aggregate stage");
+        };
+        match &agg.aggregations[0].function {
+            AggregateFn::Percentile(_, q) => assert!((*q - 0.90).abs() < 1e-9, "q={q}"),
+            other => panic!("expected Percentile, got {other:?}"),
+        }
     }
 
     /// A scope-less template parses (no inline time scope) and, when a range is
