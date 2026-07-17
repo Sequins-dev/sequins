@@ -143,7 +143,7 @@ pub fn infer_shape(ast: &QueryAst) -> ResponseShape {
             }
             // Time-bucketed group by → time series
             for group in &agg.group_by {
-                if group.bin_ns.is_some() {
+                if group.bin.is_some() {
                     return ResponseShape::TimeSeries;
                 }
             }
@@ -167,8 +167,8 @@ pub fn infer_shape(ast: &QueryAst) -> ResponseShape {
 mod tests {
     use super::*;
     use crate::ast::{
-        AggregateFn, AggregateStage, Aggregation, AttrScope, Expr, FieldRef, GroupExpr, LimitStage,
-        NavigateStage, PatternsStage, QueryMode, Scan, Stage, TimeRange,
+        AggregateFn, AggregateStage, Aggregation, AttrScope, BinSpec, Expr, FieldRef, GroupExpr,
+        LimitStage, NavigateStage, PatternsStage, QueryMode, Scan, Stage, TimeRange,
     };
 
     fn base_ast(signal: Signal) -> QueryAst {
@@ -237,7 +237,7 @@ mod tests {
                     name: "start_time".into(),
                 }),
                 alias: Some("bucket".into()),
-                bin_ns: Some(60_000_000_000), // 1-minute buckets
+                bin: Some(BinSpec::Fixed(60_000_000_000)), // 1-minute buckets
             }],
             aggregations: vec![Aggregation {
                 function: AggregateFn::Count,

@@ -417,6 +417,21 @@ pub struct AggregateStage {
     pub aggregations: Vec<Aggregation>,
 }
 
+/// How a time-bucketing `ts() bin …` width is specified.
+///
+/// `Percent`/`Auto` are resolved to a concrete nanosecond width at compile time
+/// from the query's effective time window, so bucketing scales with the selected
+/// range instead of being pinned to a fixed duration.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum BinSpec {
+    /// Fixed width in nanoseconds (`bin 5m`).
+    Fixed(u64),
+    /// Percentage of the query time window (`bin 10%` → ~10 buckets).
+    Percent(f64),
+    /// A "nice"-rounded width derived from the query window (`bin auto`).
+    Auto,
+}
+
 /// An expression used for grouping
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupExpr {
@@ -424,8 +439,9 @@ pub struct GroupExpr {
     pub expr: Expr,
     /// Optional alias for the group key column
     pub alias: Option<String>,
-    /// Optional time bin width in nanoseconds (for time bucketing)
-    pub bin_ns: Option<u64>,
+    /// Optional time bucketing spec (for time series). Resolved to a concrete
+    /// nanosecond width at compile time (see [`BinSpec`]).
+    pub bin: Option<BinSpec>,
 }
 
 /// An aggregation computation
@@ -669,7 +685,7 @@ mod tests {
                     name: "service_name".into(),
                 }),
                 alias: Some("service".into()),
-                bin_ns: None,
+                bin: None,
             }],
             aggregations: vec![
                 Aggregation {
