@@ -251,11 +251,35 @@ impl QueryExecutor {
         }
     }
 
+    async fn query_with_range(
+        &self,
+        seql: &str,
+        tr: Option<seql_ast::ast::TimeRange>,
+    ) -> Result<sequins_traits::SeqlStream, QueryError> {
+        match self {
+            #[cfg(feature = "local")]
+            QueryExecutor::Local(b) => b.query_with_range(seql, tr).await,
+            QueryExecutor::Remote(c) => c.query_with_range(seql, tr).await,
+        }
+    }
+
     async fn query_live(&self, seql: &str) -> Result<sequins_traits::SeqlStream, QueryError> {
         match self {
             #[cfg(feature = "local")]
             QueryExecutor::Local(b) => b.query_live(seql).await,
             QueryExecutor::Remote(c) => c.query_live(seql).await,
+        }
+    }
+
+    async fn query_live_with_range(
+        &self,
+        seql: &str,
+        tr: Option<seql_ast::ast::TimeRange>,
+    ) -> Result<sequins_traits::SeqlStream, QueryError> {
+        match self {
+            #[cfg(feature = "local")]
+            QueryExecutor::Local(b) => b.query_live_with_range(seql, tr).await,
+            QueryExecutor::Remote(c) => c.query_live_with_range(seql, tr).await,
         }
     }
 
@@ -280,6 +304,21 @@ impl QueryExecutor {
                 c.sql(sql).await
             }
         }
+    }
+}
+
+/// Build an optional structured time range from the FFI scalar triple.
+/// `kind`: 0 = none (use the query's inline scope), 1 = relative sliding window
+/// (`a` = duration ns), 2 = absolute (`a` = start ns, `b` = end ns). A supplied
+/// range overrides any inline scope in the query.
+fn ffi_time_range(kind: u32, a: u64, b: u64) -> Option<seql_ast::ast::TimeRange> {
+    match kind {
+        1 => Some(seql_ast::ast::TimeRange::SlidingWindow { start_ns: a }),
+        2 => Some(seql_ast::ast::TimeRange::Absolute {
+            start_ns: a,
+            end_ns: b,
+        }),
+        _ => None,
     }
 }
 
@@ -329,6 +368,9 @@ pub unsafe extern "C" fn sequins_seql_cancel(handle: *mut CStreamHandle) {
 pub unsafe extern "C" fn sequins_seql_query(
     data_source: *mut CDataSource,
     query_text: *const c_char,
+    range_kind: u32,
+    range_a_ns: u64,
+    range_b_ns: u64,
     vtable: CFrameSinkVTable,
     ctx: *mut c_void,
 ) -> *mut CStreamHandle {
@@ -336,6 +378,7 @@ pub unsafe extern "C" fn sequins_seql_query(
     if data_source.is_null() || query_text.is_null() {
         return std::ptr::null_mut();
     }
+    let time_range = ffi_time_range(range_kind, range_a_ns, range_b_ns);
 
     // Convert C string to Rust str
     let query_cstr = CStr::from_ptr(query_text);
@@ -377,8 +420,8 @@ pub unsafe extern "C" fn sequins_seql_query(
     // SAFETY: SinkCtx wraps raw C pointers that the caller guarantees are
     // valid and thread-safe for the lifetime of the stream.
     let task = RUNTIME.spawn(AssertSend(async move {
-        // Use QueryApi to compile and execute in one call
-        let mut stream = match executor.query(&query_str).await {
+        // Use QueryApi to compile and execute in one call (range overrides scope)
+        let mut stream = match executor.query_with_range(&query_str, time_range).await {
             Ok(s) => s,
             Err(e) => {
                 let c_err = CQueryError::from_error(&e);
@@ -628,12 +671,16 @@ pub unsafe extern "C" fn sequins_app_state_query(
 pub unsafe extern "C" fn sequins_seql_query_live(
     data_source: *mut CDataSource,
     query_text: *const c_char,
+    range_kind: u32,
+    range_a_ns: u64,
+    range_b_ns: u64,
     vtable: CFrameSinkVTable,
     ctx: *mut c_void,
 ) -> *mut CStreamHandle {
     if data_source.is_null() || query_text.is_null() {
         return std::ptr::null_mut();
     }
+    let time_range = ffi_time_range(range_kind, range_a_ns, range_b_ns);
 
     let query_cstr = CStr::from_ptr(query_text);
     let query_str = match query_cstr.to_str() {
@@ -671,7 +718,7 @@ pub unsafe extern "C" fn sequins_seql_query_live(
     };
 
     let task = RUNTIME.spawn(AssertSend(async move {
-        let mut stream = match executor.query_live(&query_str).await {
+        let mut stream = match executor.query_live_with_range(&query_str, time_range).await {
             Ok(s) => s,
             Err(e) => {
                 let c_err = CQueryError::from_error(&e);

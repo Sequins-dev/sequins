@@ -1999,6 +1999,9 @@ void sequins_seql_cancel(struct CStreamHandle *handle);
  */
 struct CStreamHandle *sequins_seql_query(struct CDataSource *data_source,
                                          const char *query_text,
+                                         uint32_t range_kind,
+                                         uint64_t range_a_ns,
+                                         uint64_t range_b_ns,
                                          struct CFrameSinkVTable vtable,
                                          void *ctx);
 
@@ -2055,6 +2058,9 @@ struct CStreamHandle *sequins_app_state_query(struct CDataSource *data_source,
  */
 struct CStreamHandle *sequins_seql_query_live(struct CDataSource *data_source,
                                               const char *query_text,
+                                              uint32_t range_kind,
+                                              uint64_t range_a_ns,
+                                              uint64_t range_b_ns,
                                               struct CFrameSinkVTable vtable,
                                               void *ctx);
 

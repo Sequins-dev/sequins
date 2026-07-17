@@ -14,7 +14,7 @@ use datafusion::execution::context::SessionContext;
 use futures::StreamExt;
 use prost::Message as _;
 use seql_ast::ast::QueryMode;
-use seql_substrait::{compile, compile_ast, schema_context};
+use seql_substrait::{compile_ast_with_range, compile_with_range, schema_context};
 use sequins_traits::QueryError;
 use sequins_traits::{QueryApi, QueryExec, SeqlStream};
 use std::sync::Arc;
@@ -93,11 +93,31 @@ impl RemoteClient {
     /// Forces `QueryMode::Live` before compiling — the server will push
     /// incremental Append/Update/Expire/Replace/Heartbeat frames.
     pub async fn query_live(&self, seql: &str) -> Result<SeqlStream, QueryError> {
+        self.query_live_with_range(seql, None).await
+    }
+
+    /// Live streaming with an optional structured time range that overrides the
+    /// query's inline scope (for scope-less templates run against a picker range).
+    pub async fn query_live_with_range(
+        &self,
+        seql: &str,
+        time_range: Option<seql_ast::ast::TimeRange>,
+    ) -> Result<SeqlStream, QueryError> {
         let mut ast = seql_parser::parse(seql).map_err(|e| QueryError::InvalidAst {
             message: format!("Parse error at offset {}: {}", e.offset, e.message),
         })?;
         ast.mode = QueryMode::Live;
-        let plan_bytes = compile_ast(ast, &self.schema_ctx).await?;
+        let plan_bytes = compile_ast_with_range(ast, time_range, &self.schema_ctx).await?;
+        self.execute_plan(plan_bytes).await
+    }
+
+    /// Snapshot query with an optional structured time range (see above).
+    pub async fn query_with_range(
+        &self,
+        seql: &str,
+        time_range: Option<seql_ast::ast::TimeRange>,
+    ) -> Result<SeqlStream, QueryError> {
+        let plan_bytes = compile_with_range(seql, time_range, &self.schema_ctx).await?;
         self.execute_plan(plan_bytes).await
     }
 
@@ -190,8 +210,7 @@ impl RemoteClient {
 #[async_trait]
 impl QueryApi for RemoteClient {
     async fn query(&self, seql: &str) -> Result<SeqlStream, QueryError> {
-        let plan_bytes = compile(seql, &self.schema_ctx).await?;
-        self.execute_plan(plan_bytes).await
+        self.query_with_range(seql, None).await
     }
 
     async fn sql(&self, sql: &str) -> Result<SeqlStream, QueryError> {
