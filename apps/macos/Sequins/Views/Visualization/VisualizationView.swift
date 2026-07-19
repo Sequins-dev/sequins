@@ -32,10 +32,14 @@ struct VisualizationView: View {
         prevRunner.rows.first?.compactMap { VizFormat.numeric($0) }.first
     }
 
-    /// The query to execute — time-scope rewritten when `applyTimeRange` is set.
-    private var effectiveQuery: String {
-        applyTimeRange ? timeRange.applied(to: visualization.seql) : visualization.seql
-    }
+    /// The query to execute — run verbatim; when `applyTimeRange` is set the
+    /// selected range is passed *structurally* (see `appliedTimeRange`), which
+    /// overrides the query's inline scope without rewriting the string.
+    private var effectiveQuery: String { visualization.seql }
+
+    /// The range to inject structurally, or nil to honor the query's inline scope
+    /// (the chat/one-off path passes nil; dashboards pass the picker's range).
+    private var appliedTimeRange: TimeRange? { applyTimeRange ? timeRange : nil }
 
     /// Restart key — re-runs the query when the query, live flag, or time window change.
     ///
@@ -75,7 +79,10 @@ struct VisualizationView: View {
         }
         .task(id: reloadKey) {
             guard let dataSource else { return }
-            runner.start(dataSource: dataSource, query: effectiveQuery, isLive: isLive)
+            runner.start(
+                dataSource: dataSource, query: effectiveQuery, isLive: isLive,
+                timeRange: appliedTimeRange
+            )
         }
         .task(id: "\(reloadKey)|stat=\(effectiveVizType == .stat)") {
             // For a stat, run the same query one window earlier for the delta.
@@ -88,7 +95,9 @@ struct VisualizationView: View {
                 start: bounds.start.addingTimeInterval(-duration),
                 end: bounds.start
             )
-            prevRunner.start(dataSource: dataSource, query: prior.applied(to: visualization.seql), isLive: false)
+            prevRunner.start(
+                dataSource: dataSource, query: visualization.seql, isLive: false, timeRange: prior
+            )
         }
         .onDisappear {
             runner.stop()
