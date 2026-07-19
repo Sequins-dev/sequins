@@ -25,7 +25,6 @@ use seql_ast::ast::QueryAst;
 use seql_parser::{parse, ParseError};
 use sequins_flight::{decode_metadata, SeqlMetadata};
 use sequins_flight::{ipc_to_batch, SchemaFrame};
-use sequins_traits::QueryApi;
 use sequins_traits::QueryError;
 use std::ffi::CStr;
 use std::ffi::CString;
@@ -243,14 +242,6 @@ enum QueryExecutor {
 }
 
 impl QueryExecutor {
-    async fn query(&self, seql: &str) -> Result<sequins_traits::SeqlStream, QueryError> {
-        match self {
-            #[cfg(feature = "local")]
-            QueryExecutor::Local(b) => b.query(seql).await,
-            QueryExecutor::Remote(c) => c.query(seql).await,
-        }
-    }
-
     async fn query_with_range(
         &self,
         seql: &str,
