@@ -21,9 +21,10 @@ use datafusion_functions_aggregate::expr_fn::{
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
 use datafusion_substrait::substrait::proto::extensions::AdvancedExtension;
 use seql_ast::ast::{
-    AggregateFn, AggregateStage, ArithOp, CompareOp, ComputeStage, Expr as AstExpr, FieldRef,
-    FilterStage, GroupExpr, LimitStage, Literal, MergeStage, Predicate, ProjectStage, QueryAst,
-    QueryMode, ScalarFn, Scan, Signal, SortStage, Stage, TimeRange, UniqueStage,
+    AggregateFn, AggregateStage, ArithOp, BinSpec, CompareOp, ComputeStage, Expr as AstExpr,
+    FieldRef, FilterStage, GroupExpr, LimitStage, Literal, MergeStage, Predicate, ProjectStage,
+    QueryAst, QueryMode, ScalarFn, Scan, Signal, SortStage, Stage, TimeRange, UniqueStage,
+    WindowFn, WindowStage,
 };
 use seql_ast::correlation::{merge_join_key, navigate_join_key};
 use seql_ast::schema::infer_shape;
@@ -59,10 +60,22 @@ use prost::Message;
 /// - `relations[1..N]`: auxiliary tables from Merge stages
 /// - `advanced_extensions.enhancement`: `SeqlExtension` protobuf Any
 pub async fn compile(seql: &str, ctx: &SessionContext) -> Result<Vec<u8>, QueryError> {
+    compile_with_range(seql, None, ctx).await
+}
+
+/// Like [`compile`], but with an optional structured time range supplied
+/// out-of-band. When present it **overrides** any inline scope, so a saved
+/// query template (`spans | group by { ts() bin 10% } { count() }`) can be run
+/// against the dashboard's selected range. See [`compile_ast_with_range`].
+pub async fn compile_with_range(
+    seql: &str,
+    time_range: Option<TimeRange>,
+    ctx: &SessionContext,
+) -> Result<Vec<u8>, QueryError> {
     let ast = seql_parser::parse(seql).map_err(|e| QueryError::InvalidAst {
         message: format!("Parse error at offset {}: {}", e.offset, e.message),
     })?;
-    compile_ast(ast, ctx).await
+    compile_ast_with_range(ast, time_range, ctx).await
 }
 
 /// Compile a parsed `QueryAst` into a multi-root Substrait plan with `SeqlExtension` metadata.
@@ -70,6 +83,22 @@ pub async fn compile(seql: &str, ctx: &SessionContext) -> Result<Vec<u8>, QueryE
 /// Unlike `compile()`, this accepts a pre-parsed AST, allowing the caller to
 /// modify the AST before compilation (e.g., set `mode = QueryMode::Live`).
 pub async fn compile_ast(ast: QueryAst, ctx: &SessionContext) -> Result<Vec<u8>, QueryError> {
+    compile_ast_with_range(ast, None, ctx).await
+}
+
+/// Compile an AST with an optional structured time range that **overrides** the
+/// scan's inline scope (if any). This is how the range becomes a separable input:
+/// a scope-less template carries `scan.time_range == None` and gets its range
+/// here at execution; an injected range also replaces an inline one so the
+/// dashboard's selected range always wins.
+pub async fn compile_ast_with_range(
+    mut ast: QueryAst,
+    time_range: Option<TimeRange>,
+    ctx: &SessionContext,
+) -> Result<Vec<u8>, QueryError> {
+    if time_range.is_some() {
+        ast.scan.time_range = time_range;
+    }
     let (primary_plan, auxiliary_plans) = ast_to_logical_plan(&ast, ctx).await?;
 
     // Serialize primary plan to Substrait
@@ -100,7 +129,7 @@ pub async fn compile_ast(ast: QueryAst, ctx: &SessionContext) -> Result<Vec<u8>,
 
     // Build SeqlExtension
     let response_shape = infer_shape(&ast);
-    let time_range_proto = time_range_to_proto(&ast.scan.time_range);
+    let time_range_proto = ast.scan.time_range.as_ref().map(time_range_to_proto);
     let mode_val = match ast.mode {
         QueryMode::Snapshot => crate::seql_ext::QueryMode::Snapshot as i32,
         QueryMode::Live => crate::seql_ext::QueryMode::Live as i32,
@@ -108,7 +137,7 @@ pub async fn compile_ast(ast: QueryAst, ctx: &SessionContext) -> Result<Vec<u8>,
     let seql_ext = crate::seql_ext::SeqlExtension {
         response_shape: response_shape.as_str().to_string(),
         signal: signal_to_name(ast.scan.signal).to_string(),
-        time_range: Some(time_range_proto),
+        time_range: time_range_proto,
         mode: mode_val,
         cursor: None,
         auxiliary_aliases,
@@ -352,7 +381,10 @@ pub async fn raw_scan_plan(
     );
     let ast = QueryAst {
         bindings: vec![],
-        scan: Scan { signal, time_range },
+        scan: Scan {
+            signal,
+            time_range: Some(time_range),
+        },
         stages: vec![],
         mode: if live {
             QueryMode::Live
@@ -376,6 +408,7 @@ async fn apply_common_stage(
     mut current_signal: Signal,
     ctx: &SessionContext,
     nav_context: &str,
+    window_ns: Option<u64>,
 ) -> Result<StageOutcome, QueryError> {
     match stage {
         Stage::Filter(filter) => {
@@ -388,7 +421,7 @@ async fn apply_common_stage(
             builder = apply_compute(builder, compute, current_signal, ctx)?;
         }
         Stage::Aggregate(aggregate) => {
-            builder = apply_aggregate(builder, aggregate, current_signal, ctx)?;
+            builder = apply_aggregate(builder, aggregate, current_signal, ctx, window_ns)?;
         }
         Stage::Sort(sort) => {
             builder = apply_sort(builder, sort, current_signal, ctx)?;
@@ -463,6 +496,9 @@ async fn apply_common_stage(
         Stage::Patterns(_) => {
             // Patterns stage is a no-op
         }
+        Stage::Window(window) => {
+            builder = apply_window(builder, window, current_signal, ctx)?;
+        }
     }
 
     Ok(StageOutcome::Updated(builder, current_signal))
@@ -495,11 +531,16 @@ pub async fn ast_to_logical_plan(
     })?;
 
     // Apply time range filter
-    builder = apply_time_range_filter(builder, current_signal, &ast.scan.time_range)?;
+    builder = apply_time_range_filter(builder, current_signal, ast.scan.time_range.as_ref())?;
+
+    // The concrete window this scan covers — threaded into aggregation so
+    // time-relative features (throughput rate, `ts() bin N%`) scale to it.
+    // `None` for a scope-less template with no injected range.
+    let window_ns = effective_window_ns(ast.scan.time_range.as_ref());
 
     // Apply each stage in order
     for stage in &ast.stages {
-        match apply_common_stage(builder, stage, current_signal, ctx, "").await? {
+        match apply_common_stage(builder, stage, current_signal, ctx, "", window_ns).await? {
             StageOutcome::Updated(b, s) => {
                 builder = b;
                 current_signal = s;
@@ -518,7 +559,7 @@ pub async fn ast_to_logical_plan(
                     merge,
                     &primary_plan,
                     current_signal,
-                    &ast.scan.time_range,
+                    ast.scan.time_range.as_ref(),
                     ctx,
                 )
                 .await?;
@@ -546,7 +587,7 @@ fn compile_merge_aux<'a>(
     merge: &'a MergeStage,
     parent_plan: &'a LogicalPlan,
     parent_signal: Signal,
-    time_range: &'a TimeRange,
+    time_range: Option<&'a TimeRange>,
     ctx: &'a SessionContext,
 ) -> MergeAuxFuture<'a> {
     Box::pin(async move {
@@ -613,9 +654,17 @@ fn compile_merge_aux<'a>(
         let mut current_signal = merge.target;
         let mut nested_aux_plans: Vec<(String, LogicalPlan, Signal)> = Vec::new();
 
+        let merge_window_ns = effective_window_ns(time_range);
         for stage in &merge.stages {
-            match apply_common_stage(aux_builder, stage, current_signal, ctx, "(inside merge)")
-                .await?
+            match apply_common_stage(
+                aux_builder,
+                stage,
+                current_signal,
+                ctx,
+                "(inside merge)",
+                merge_window_ns,
+            )
+            .await?
             {
                 StageOutcome::Updated(b, s) => {
                     aux_builder = b;
@@ -943,15 +992,93 @@ pub fn time_column_for_signal(signal: Signal) -> Option<&'static str> {
     }
 }
 
+/// The concrete duration (in nanoseconds) that a scan's time scope covers.
+///
+/// Used to make time-relative query features scale to the selected range:
+/// `throughput` divides by it, and `ts() bin N%` derives the bucket size from it.
+/// For an absolute range it's `end - start`; for a sliding window it's the offset.
+fn effective_window_ns(time_range: Option<&TimeRange>) -> Option<u64> {
+    time_range.map(|tr| match tr {
+        TimeRange::Absolute { start_ns, end_ns } => end_ns.saturating_sub(*start_ns),
+        TimeRange::SlidingWindow { start_ns } => *start_ns,
+    })
+}
+
+/// Resolve a [`BinSpec`] to a concrete bucket width in nanoseconds, given the
+/// query's effective window. `Percent`/`Auto` scale with `window_ns` so a saved
+/// time-series re-buckets sensibly as the selected range changes. Always ≥ 1ns.
+///
+/// `Percent`/`Auto` require a known window; on a scope-less template with no
+/// range supplied they error rather than guess.
+fn resolve_bin_ns(bin: &BinSpec, window_ns: Option<u64>) -> Result<u64, QueryError> {
+    let need_window = || {
+        window_ns.ok_or_else(|| QueryError::InvalidAst {
+            message: "`ts() bin N%`/`bin auto` needs a time range: add a scope \
+                      (e.g. `last 1h`) or supply one at execution"
+                .to_string(),
+        })
+    };
+    let ns = match bin {
+        BinSpec::Fixed(ns) => *ns,
+        // `bin 10%` → 10 buckets: width = window * 10/100. `max(0.0001)` guards a
+        // degenerate/zero percentage from collapsing the divisor.
+        BinSpec::Percent(pct) => ((need_window()? as f64) * (pct.max(0.0001) / 100.0)) as u64,
+        BinSpec::Auto => nice_bin_ns(need_window()?),
+    };
+    Ok(ns.max(1))
+}
+
+/// Pick a "nice" bucket width (~100 buckets) for `bin auto`, snapped to a human
+/// duration ladder so time axes land on round intervals. Mirrors the client's
+/// `MetricsViewModel.binSeconds(for:)` ladder.
+fn nice_bin_ns(window_ns: u64) -> u64 {
+    const S: u64 = 1_000_000_000;
+    const LADDER: &[u64] = &[
+        S,        // 1s
+        5 * S,    // 5s
+        10 * S,   // 10s
+        15 * S,   // 15s
+        30 * S,   // 30s
+        60 * S,   // 1m
+        300 * S,  // 5m
+        600 * S,  // 10m
+        900 * S,  // 15m
+        1800 * S, // 30m
+        3600 * S, // 1h
+        3 * 3600 * S,
+        6 * 3600 * S,
+        12 * 3600 * S,
+        86_400 * S, // 1d
+    ];
+    let target = (window_ns / 100).max(1);
+    LADDER
+        .iter()
+        .copied()
+        .find(|&step| step >= target)
+        .unwrap_or_else(|| *LADDER.last().unwrap())
+}
+
 fn apply_time_range_filter(
     builder: LogicalPlanBuilder,
     signal: Signal,
-    time_range: &TimeRange,
+    time_range: Option<&TimeRange>,
 ) -> Result<LogicalPlanBuilder, QueryError> {
     let time_col = match time_column_for_signal(signal) {
         Some(col) => col,
+        // Signals with no time column (e.g. resources/scopes) are never
+        // time-filtered, so a missing range is fine.
         None => return Ok(builder),
     };
+
+    // A time-scoped signal with no inline scope and no injected range is a
+    // template that was executed without a range — reject it clearly.
+    let time_range = time_range.ok_or_else(|| QueryError::InvalidAst {
+        message: format!(
+            "query on `{}` has no time range: add a scope (e.g. `last 1h`) \
+             or supply one at execution",
+            signal_to_name(signal)
+        ),
+    })?;
 
     match time_range {
         TimeRange::Absolute { start_ns, end_ns } => {
@@ -1077,12 +1204,24 @@ pub fn apply_aggregate(
     aggregate: &AggregateStage,
     signal: Signal,
     ctx: &SessionContext,
+    window_ns: Option<u64>,
 ) -> Result<LogicalPlanBuilder, QueryError> {
+    // Divisor (seconds) for rate aggregates like `throughput`: a per-bucket rate
+    // when the group keys include a time bin, otherwise the whole query window.
+    // `None` when neither is known (scope-less template, no injected range).
+    let bucket_ns: Option<u64> = match aggregate.group_by.iter().find_map(|ge| ge.bin.as_ref()) {
+        Some(bin) => Some(resolve_bin_ns(bin, window_ns)?),
+        None => None,
+    };
+    let rate_divisor_secs: Option<f64> = bucket_ns
+        .or(window_ns)
+        .map(|ns| (ns as f64 / 1e9).max(f64::MIN_POSITIVE));
+
     // Build group expressions
     let group_exprs: Result<Vec<_>, _> = aggregate
         .group_by
         .iter()
-        .map(|ge| group_expr_to_df_expr(ge, builder.schema(), signal, ctx))
+        .map(|ge| group_expr_to_df_expr(ge, builder.schema(), signal, ctx, window_ns))
         .collect();
 
     // Build aggregation expressions
@@ -1090,7 +1229,13 @@ pub fn apply_aggregate(
         .aggregations
         .iter()
         .map(|agg| {
-            let expr = aggregate_fn_to_df_expr(&agg.function, builder.schema(), signal, ctx)?;
+            let expr = aggregate_fn_to_df_expr(
+                &agg.function,
+                builder.schema(),
+                signal,
+                ctx,
+                rate_divisor_secs,
+            )?;
             let expr = if let Some(predicate) = &agg.filter {
                 let filter_expr = predicate_to_expr(predicate, builder.schema(), signal, ctx)?;
                 expr.filter(filter_expr)
@@ -1110,6 +1255,110 @@ pub fn apply_aggregate(
         .map_err(|e| QueryError::Execution {
             message: format!("Failed to apply aggregate: {}", e),
         })
+}
+
+/// Apply a `window { … }` stage: compute window functions over the result,
+/// ordered by the first temporal column (the `ts()` bucket for a time series)
+/// or the first column otherwise. Each item appends one aliased column.
+pub fn apply_window(
+    builder: LogicalPlanBuilder,
+    window: &WindowStage,
+    signal: Signal,
+    ctx: &SessionContext,
+) -> Result<LogicalPlanBuilder, QueryError> {
+    let schema = builder.schema();
+    // Order by the first Timestamp column (the time bucket), else the first column.
+    let order_field = schema
+        .fields()
+        .iter()
+        .find(|f| matches!(f.data_type(), ArrowDataType::Timestamp(_, _)))
+        .or_else(|| schema.fields().first())
+        .ok_or_else(|| QueryError::Execution {
+            message: "window stage requires at least one column to order by".to_string(),
+        })?;
+    let order_by = vec![col(order_field.name()).sort(true, false)];
+
+    let window_exprs: Vec<DfExpr> = window
+        .items
+        .iter()
+        .map(|item| {
+            let e = window_fn_to_df_expr(&item.function, &order_by, schema, signal, ctx)?;
+            Ok(e.alias(&item.alias))
+        })
+        .collect::<Result<_, QueryError>>()?;
+
+    builder
+        .window(window_exprs)
+        .map_err(|e| QueryError::Execution {
+            message: format!("Failed to apply window stage: {}", e),
+        })
+}
+
+/// Build a DataFusion window expression for one [`WindowFn`], ordered by
+/// `order_by`. Uses only `avg`/`sum` aggregate UDFs over row frames — including
+/// `delta`, which reads the previous row via a `[1 preceding, 1 preceding]`
+/// frame — so no separate lag window UDF dependency is needed.
+fn window_fn_to_df_expr(
+    fun: &WindowFn,
+    order_by: &[datafusion_expr::SortExpr],
+    schema: &datafusion::common::DFSchemaRef,
+    signal: Signal,
+    ctx: &SessionContext,
+) -> Result<DfExpr, QueryError> {
+    use datafusion::scalar::ScalarValue;
+    use datafusion_expr::expr::WindowFunction;
+    use datafusion_expr::window_frame::{WindowFrame, WindowFrameBound, WindowFrameUnits};
+    use datafusion_expr::{ExprFunctionExt, WindowFunctionDefinition};
+    use datafusion_functions_aggregate::average::avg_udaf;
+    use datafusion_functions_aggregate::sum::sum_udaf;
+
+    let build = |udaf, arg: DfExpr, frame: WindowFrame| -> Result<DfExpr, QueryError> {
+        Expr::WindowFunction(Box::new(WindowFunction::new(
+            WindowFunctionDefinition::AggregateUDF(udaf),
+            vec![arg],
+        )))
+        .order_by(order_by.to_vec())
+        .window_frame(frame)
+        .build()
+        .map_err(|e| QueryError::Execution {
+            message: format!("Failed to build window function: {}", e),
+        })
+    };
+
+    match fun {
+        WindowFn::MovingAvg(expr, n) => {
+            let arg = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
+            // Trailing frame of n rows: [n-1 preceding, current].
+            let frame = WindowFrame::new_bounds(
+                WindowFrameUnits::Rows,
+                WindowFrameBound::Preceding(ScalarValue::UInt64(Some(n.saturating_sub(1)))),
+                WindowFrameBound::CurrentRow,
+            );
+            build(avg_udaf(), arg, frame)
+        }
+        WindowFn::Cumulative(expr) => {
+            let arg = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
+            // Running total: [unbounded preceding, current] (null bound = unbounded).
+            let frame = WindowFrame::new_bounds(
+                WindowFrameUnits::Rows,
+                WindowFrameBound::Preceding(ScalarValue::UInt64(None)),
+                WindowFrameBound::CurrentRow,
+            );
+            build(sum_udaf(), arg, frame)
+        }
+        WindowFn::Delta(expr) => {
+            let arg = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
+            // Previous row's value via sum over a single-row [1 preceding, 1 preceding]
+            // frame; delta = current - previous.
+            let prev_frame = WindowFrame::new_bounds(
+                WindowFrameUnits::Rows,
+                WindowFrameBound::Preceding(ScalarValue::UInt64(Some(1))),
+                WindowFrameBound::Preceding(ScalarValue::UInt64(Some(1))),
+            );
+            let prev = build(sum_udaf(), arg.clone(), prev_frame)?;
+            Ok(arg - prev)
+        }
+    }
 }
 
 pub fn apply_sort(
@@ -1443,11 +1692,13 @@ fn group_expr_to_df_expr(
     schema: &datafusion::common::DFSchemaRef,
     signal: Signal,
     ctx: &SessionContext,
+    window_ns: Option<u64>,
 ) -> Result<DfExpr, QueryError> {
     let expr = ast_expr_to_df_expr(&group_expr.expr, schema, signal, ctx)?;
 
     // Handle time binning
-    let expr = if let Some(bin_ns) = group_expr.bin_ns {
+    let expr = if let Some(bin) = &group_expr.bin {
+        let bin_ns = resolve_bin_ns(bin, window_ns)?;
         // Bin by dividing timestamp by bin size, then multiplying back.
         // Time columns are stored as Timestamp(ns) — cast to Int64 first so
         // integer arithmetic works correctly.
@@ -1474,11 +1725,27 @@ fn group_expr_to_df_expr(
     })
 }
 
+/// `approx_percentile_cont(expr, q)` for a quantile `q` in (0,1). Shared by
+/// `p95`/`p99` and the general `percentile(col, q)` aggregate.
+fn approx_percentile_expr(df_expr: DfExpr, q: f64) -> DfExpr {
+    let udaf =
+        datafusion_functions_aggregate::approx_percentile_cont::approx_percentile_cont_udaf();
+    Expr::AggregateFunction(datafusion_expr::expr::AggregateFunction::new_udf(
+        udaf,
+        vec![df_expr, lit(q)],
+        false,  // distinct
+        None,   // filter
+        vec![], // order_by
+        None,   // null_treatment
+    ))
+}
+
 fn aggregate_fn_to_df_expr(
     agg_fn: &AggregateFn,
     schema: &datafusion::common::DFSchemaRef,
     signal: Signal,
     ctx: &SessionContext,
+    rate_divisor_secs: Option<f64>,
 ) -> Result<DfExpr, QueryError> {
     match agg_fn {
         AggregateFn::Count => Ok(count(lit(1))),
@@ -1503,39 +1770,29 @@ fn aggregate_fn_to_df_expr(
             // Use median which is equivalent to P50
             Ok(datafusion_functions_aggregate::expr_fn::median(df_expr))
         }
-        AggregateFn::P95(expr) => {
-            let df_expr = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
-            // Use approx_percentile_cont UDAF with percentile parameter
-            let udaf =
-                datafusion_functions_aggregate::approx_percentile_cont::approx_percentile_cont_udaf(
-                );
-            Ok(Expr::AggregateFunction(
-                datafusion_expr::expr::AggregateFunction::new_udf(
-                    udaf,
-                    vec![df_expr, lit(0.95)],
-                    false,  // distinct
-                    None,   // filter
-                    vec![], // order_by
-                    None,   // null_treatment
-                ),
+        AggregateFn::P95(expr) => Ok(approx_percentile_expr(
+            ast_expr_to_df_expr(expr, schema, signal, ctx)?,
+            0.95,
+        )),
+        AggregateFn::P99(expr) => Ok(approx_percentile_expr(
+            ast_expr_to_df_expr(expr, schema, signal, ctx)?,
+            0.99,
+        )),
+        AggregateFn::Percentile(expr, q) => {
+            // Clamp to the open interval (0,1) approx_percentile_cont accepts.
+            let q = q.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
+            Ok(approx_percentile_expr(
+                ast_expr_to_df_expr(expr, schema, signal, ctx)?,
+                q,
             ))
         }
-        AggregateFn::P99(expr) => {
+        AggregateFn::Stddev(expr) => {
             let df_expr = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
-            // Use approx_percentile_cont UDAF with percentile parameter
-            let udaf =
-                datafusion_functions_aggregate::approx_percentile_cont::approx_percentile_cont_udaf(
-                );
-            Ok(Expr::AggregateFunction(
-                datafusion_expr::expr::AggregateFunction::new_udf(
-                    udaf,
-                    vec![df_expr, lit(0.99)],
-                    false,  // distinct
-                    None,   // filter
-                    vec![], // order_by
-                    None,   // null_treatment
-                ),
-            ))
+            Ok(datafusion_functions_aggregate::expr_fn::stddev(df_expr))
+        }
+        AggregateFn::Variance(expr) => {
+            let df_expr = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
+            Ok(datafusion_functions_aggregate::expr_fn::var_sample(df_expr))
         }
         AggregateFn::Distinct(expr) => {
             let df_expr = ast_expr_to_df_expr(expr, schema, signal, ctx)?;
@@ -1562,11 +1819,15 @@ fn aggregate_fn_to_df_expr(
             Ok(error_count / total_count)
         }
         AggregateFn::Throughput => {
-            // COUNT(*) / time_range_seconds
-            // This requires knowing the time range, which we don't have here
-            // For now, just return COUNT(*)
-            // TODO: Divide by time range duration in seconds
-            Ok(count(lit(1)))
+            // COUNT(*) / seconds — a per-second rate. `rate_divisor_secs` is the
+            // time-bin width when the query is bucketed by `ts()`, else the whole
+            // query window, so the rate scales with the selected time range.
+            let secs = rate_divisor_secs.ok_or_else(|| QueryError::InvalidAst {
+                message: "`throughput()` needs a time range: add a scope \
+                          (e.g. `last 1h`) or supply one at execution"
+                    .to_string(),
+            })?;
+            Ok(count(lit(1)) / lit(secs))
         }
         AggregateFn::Heatmap(_expr) => {
             // Heatmap requires custom post-processing
@@ -1622,6 +1883,288 @@ mod tests {
         assert_eq!(signal_to_table_name(Signal::Metrics), "metrics");
         assert_eq!(signal_to_table_name(Signal::Samples), "samples");
         assert_eq!(signal_to_table_name(Signal::Traces), "spans");
+    }
+
+    #[test]
+    fn test_effective_window_ns() {
+        assert_eq!(
+            effective_window_ns(Some(&TimeRange::SlidingWindow {
+                start_ns: 3_600_000_000_000
+            })),
+            Some(3_600_000_000_000)
+        );
+        assert_eq!(
+            effective_window_ns(Some(&TimeRange::Absolute {
+                start_ns: 1_000,
+                end_ns: 61_000
+            })),
+            Some(60_000)
+        );
+        // No range → no window (a scope-less template).
+        assert_eq!(effective_window_ns(None), None);
+    }
+
+    /// A non-bucketed `throughput()` is `count(*) / window_seconds` (1h → 3600s),
+    /// not the old bare `count(*)` stub.
+    #[tokio::test]
+    async fn test_throughput_divides_by_window_seconds() {
+        let ctx = schema_context().expect("schema_context");
+        let ast = seql_parser::parse("spans last 1h | group by {} { throughput() as tps }")
+            .expect("parse");
+        let (plan, _) = ast_to_logical_plan(&ast, &ctx).await.expect("plan");
+        let text = format!("{}", plan.display_indent());
+        assert!(
+            text.contains("Float64(3600"),
+            "throughput over a 1h window should divide by 3600s; plan was:\n{text}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_bin_ns() {
+        let hour = Some(3_600_000_000_000u64);
+        // `bin 10%` of a 1h window → 6-minute buckets.
+        assert_eq!(
+            resolve_bin_ns(&BinSpec::Percent(10.0), hour).unwrap(),
+            360_000_000_000
+        );
+        // Fixed passes through unchanged — and needs no window.
+        assert_eq!(
+            resolve_bin_ns(&BinSpec::Fixed(60_000_000_000), None).unwrap(),
+            60_000_000_000
+        );
+        // `bin auto` snaps to a nice ladder step (1% of 1h = 36s → 60s).
+        assert_eq!(
+            resolve_bin_ns(&BinSpec::Auto, hour).unwrap(),
+            60_000_000_000
+        );
+        // Never collapses to zero.
+        assert!(resolve_bin_ns(&BinSpec::Percent(0.0), hour).unwrap() >= 1);
+        // Percent/Auto without a window is a clear error, not a guess.
+        assert!(resolve_bin_ns(&BinSpec::Percent(10.0), None).is_err());
+        assert!(resolve_bin_ns(&BinSpec::Auto, None).is_err());
+    }
+
+    /// `ts() bin 10%` derives the bucket width from the query window so a saved
+    /// time-series re-buckets when the range changes (10% of 1h = 6m).
+    #[tokio::test]
+    async fn test_bin_percent_scales_with_window() {
+        let ctx = schema_context().expect("schema_context");
+        let ast = seql_parser::parse(
+            "spans last 1h | group by { ts() bin 10% as bucket } { count() as n }",
+        )
+        .expect("parse");
+        let (plan, _) = ast_to_logical_plan(&ast, &ctx).await.expect("plan");
+        let text = format!("{}", plan.display_indent());
+        assert!(
+            text.contains("360000000000"),
+            "10% of a 1h window should bin at 6m (360000000000ns); plan was:\n{text}"
+        );
+    }
+
+    /// A `window { … }` stage on a time series compiles AND round-trips through
+    /// the backend's custom Substrait consumer (so the daemon can execute it).
+    #[tokio::test]
+    async fn test_window_stage_compiles_and_consumes() {
+        use datafusion_substrait::extensions::Extensions;
+        use datafusion_substrait::logical_plan::consumer::{
+            DefaultSubstraitConsumer, SubstraitConsumer,
+        };
+        use datafusion_substrait::substrait::proto::{plan_rel, Plan};
+
+        let ctx = schema_context().expect("schema_context");
+        let bytes = compile(
+            "spans last 1h | group by { ts() bin 5m as bucket } { count() as n } \
+             | window { moving_avg(n, 3) as ma, cumulative(n) as run, delta(n) as d }",
+            &ctx,
+        )
+        .await
+        .expect("window query should compile");
+        assert!(!bytes.is_empty());
+
+        // Consume the primary relation back, exactly as the backend does.
+        let plan: Plan = prost::Message::decode(&bytes[..]).expect("decode");
+        let extensions = Extensions::try_from(&plan.extensions).expect("extensions");
+        let state = ctx.state();
+        let consumer = DefaultSubstraitConsumer::new(&extensions, &state);
+        let rel = match plan.relations[0].rel_type.as_ref().expect("rel_type") {
+            plan_rel::RelType::Root(root) => root.input.as_ref().expect("root input"),
+            plan_rel::RelType::Rel(rel) => rel,
+        };
+        let consumed = consumer.consume_rel(rel).await;
+        assert!(
+            consumed.is_ok(),
+            "backend consumer rejected the window plan: {:?}",
+            consumed.err()
+        );
+    }
+
+    /// The new statistical aggregates (stddev/variance/arbitrary percentile)
+    /// parse and compile.
+    /// SPIKE (Phase 4): does DataFusion's Substrait producer serialize a window
+    /// function at all? If this errors, the `window { … }` stage must carry its
+    /// spec in the SeqlExtension and apply it on the backend instead.
+    #[tokio::test]
+    async fn spike_window_fn_substrait_producer() {
+        let ctx = schema_context().expect("schema_context");
+        let sql = "SELECT trace_id, \
+                   avg(duration_ns) OVER (ORDER BY start_time_unix_nano \
+                   ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS ma \
+                   FROM spans";
+        let df = ctx.sql(sql).await.expect("window SQL should plan");
+        let plan = df.into_optimized_plan().expect("optimize");
+        let produced = to_substrait_plan(&plan, &ctx.state());
+        // Intentional: surfaces the producer's verdict in the test log.
+        assert!(
+            produced.is_ok(),
+            "Substrait producer rejected a window function: {:?}",
+            produced.err()
+        );
+    }
+
+    /// SPIKE (Phase 4): full round-trip — does the backend's *custom* consumer
+    /// (`DefaultSubstraitConsumer`) accept a window function back? If yes, the
+    /// `window { … }` stage can go through the normal compile→Substrait→consume
+    /// path with no fallback.
+    #[tokio::test]
+    async fn spike_window_fn_substrait_round_trip() {
+        use datafusion_substrait::extensions::Extensions;
+        use datafusion_substrait::logical_plan::consumer::{
+            DefaultSubstraitConsumer, SubstraitConsumer,
+        };
+        use datafusion_substrait::substrait::proto::plan_rel;
+
+        let ctx = schema_context().expect("schema_context");
+        let sql = "SELECT trace_id, \
+                   avg(duration_ns) OVER (ORDER BY start_time_unix_nano \
+                   ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS ma \
+                   FROM spans";
+        let plan = ctx
+            .sql(sql)
+            .await
+            .expect("plan")
+            .into_optimized_plan()
+            .expect("optimize");
+        let substrait = *to_substrait_plan(&plan, &ctx.state()).expect("produce");
+
+        let extensions = Extensions::try_from(&substrait.extensions).expect("extensions");
+        let state = ctx.state();
+        let consumer = DefaultSubstraitConsumer::new(&extensions, &state);
+        let rel = match substrait.relations[0].rel_type.as_ref().expect("rel_type") {
+            plan_rel::RelType::Root(root) => root.input.as_ref().expect("root input"),
+            plan_rel::RelType::Rel(rel) => rel,
+        };
+        let consumed = consumer.consume_rel(rel).await;
+        assert!(
+            consumed.is_ok(),
+            "custom consumer rejected a window function: {:?}",
+            consumed.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_statistical_aggregates_compile() {
+        let ctx = schema_context().expect("schema_context");
+        let bytes = compile(
+            "spans last 1h | group by {} { \
+             stddev(duration_ns) as sd, \
+             variance(duration_ns) as v, \
+             percentile(duration_ns, 0.9) as p90 }",
+            &ctx,
+        )
+        .await
+        .expect("stddev/variance/percentile should compile");
+        assert!(!bytes.is_empty());
+    }
+
+    /// `percentile(col, 90)` (a 0–100 form) is normalized to the 0..1 quantile.
+    #[test]
+    fn test_percentile_parses_0_100_form() {
+        let ast = seql_parser::parse(
+            "spans last 1h | group by {} { percentile(duration_ns, 90) as p90 }",
+        )
+        .expect("parse");
+        let Some(Stage::Aggregate(agg)) = ast.stages.first() else {
+            panic!("expected aggregate stage");
+        };
+        match &agg.aggregations[0].function {
+            AggregateFn::Percentile(_, q) => assert!((*q - 0.90).abs() < 1e-9, "q={q}"),
+            other => panic!("expected Percentile, got {other:?}"),
+        }
+    }
+
+    /// A scope-less template parses (no inline time scope) and, when a range is
+    /// injected at compile time, compiles successfully.
+    #[tokio::test]
+    async fn test_template_scope_less_with_injected_range() {
+        let ctx = schema_context().expect("schema_context");
+        let ast =
+            seql_parser::parse("spans | group by { ts() bin 10% as bucket } { count() as n }")
+                .expect("scope-less template should parse");
+        assert_eq!(
+            ast.scan.time_range, None,
+            "template carries no inline scope"
+        );
+        let bytes = compile_ast_with_range(
+            ast,
+            Some(TimeRange::SlidingWindow {
+                start_ns: 3_600_000_000_000,
+            }),
+            &ctx,
+        )
+        .await
+        .expect("template + injected range should compile");
+        assert!(!bytes.is_empty());
+    }
+
+    /// A scope-less template on a time-scoped signal errors if executed without a
+    /// range (rather than silently scanning everything).
+    #[tokio::test]
+    async fn test_template_without_range_errors() {
+        let ctx = schema_context().expect("schema_context");
+        let ast = seql_parser::parse("spans | group by {} { count() as n }").expect("parse");
+        assert!(
+            compile_ast(ast, &ctx).await.is_err(),
+            "a scope-less spans query with no injected range must error"
+        );
+    }
+
+    /// An injected range overrides an inline scope — the dashboard's selected
+    /// range wins. Injecting 1h into a `last 5m` query makes `bin 10%` = 6m
+    /// (360000000000ns), proving the 1h window, not the inline 5m, was used.
+    #[tokio::test]
+    async fn test_injected_range_overrides_inline_scope() {
+        let ctx = schema_context().expect("schema_context");
+        let mut ast = seql_parser::parse(
+            "spans last 5m | group by { ts() bin 10% as bucket } { count() as n }",
+        )
+        .expect("parse");
+        // Injection is `scan.time_range = Some(range)` (as compile_ast_with_range does).
+        ast.scan.time_range = Some(TimeRange::SlidingWindow {
+            start_ns: 3_600_000_000_000,
+        });
+        let (plan, _) = ast_to_logical_plan(&ast, &ctx).await.expect("plan");
+        let text = format!("{}", plan.display_indent());
+        assert!(
+            text.contains("360000000000") && !text.contains("30000000000"),
+            "injected 1h window should drive bin 10% to 6m, not the inline 5m; plan:\n{text}"
+        );
+    }
+
+    /// A time-bucketed `throughput()` is a per-bucket rate: divide by the bin
+    /// width (1m → 60s), not the whole query window.
+    #[tokio::test]
+    async fn test_throughput_bucketed_divides_by_bin_seconds() {
+        let ctx = schema_context().expect("schema_context");
+        let ast = seql_parser::parse(
+            "spans last 1h | group by { ts() bin 1m as bucket } { throughput() as tps }",
+        )
+        .expect("parse");
+        let (plan, _) = ast_to_logical_plan(&ast, &ctx).await.expect("plan");
+        let text = format!("{}", plan.display_indent());
+        assert!(
+            text.contains("Float64(60") && !text.contains("Float64(3600"),
+            "bucketed throughput should divide by the 60s bin, not the window; plan was:\n{text}"
+        );
     }
 
     fn decode_seql_extension(bytes: &[u8]) -> crate::seql_ext::SeqlExtension {
@@ -1682,9 +2225,9 @@ mod tests {
             bindings: vec![],
             scan: Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000,
-                },
+                }),
             },
             stages: vec![],
             mode: QueryMode::Snapshot,
@@ -1702,9 +2245,9 @@ mod tests {
             bindings: vec![],
             scan: Scan {
                 signal: Signal::Logs,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000,
-                },
+                }),
             },
             stages: vec![Stage::Patterns(PatternsStage { field: None })],
             mode: QueryMode::Snapshot,
@@ -1773,9 +2316,9 @@ mod tests {
                 bindings: vec![],
                 scan: seql_ast::ast::Scan {
                     signal: Signal::Spans,
-                    time_range: TimeRange::SlidingWindow {
+                    time_range: Some(TimeRange::SlidingWindow {
                         start_ns: 3_600_000_000_000,
-                    },
+                    }),
                 },
                 stages: vec![Stage::Filter(filter)],
                 mode: QueryMode::Snapshot,
@@ -1833,9 +2376,9 @@ mod tests {
                 bindings: vec![],
                 scan: seql_ast::ast::Scan {
                     signal: Signal::Spans,
-                    time_range: TimeRange::SlidingWindow {
+                    time_range: Some(TimeRange::SlidingWindow {
                         start_ns: 3_600_000_000_000,
-                    },
+                    }),
                 },
                 stages: vec![Stage::Aggregate(agg_stage)],
                 mode: QueryMode::Snapshot,
@@ -1887,9 +2430,9 @@ mod tests {
             bindings: vec![],
             scan: seql_ast::ast::Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000,
-                },
+                }),
             },
             stages: vec![Stage::Project(project)],
             mode: QueryMode::Snapshot,
@@ -1914,10 +2457,10 @@ mod tests {
             bindings: vec![],
             scan: seql_ast::ast::Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::Absolute {
+                time_range: Some(TimeRange::Absolute {
                     start_ns: 1_000_000_000_000,
                     end_ns: 2_000_000_000_000,
-                },
+                }),
             },
             stages: vec![],
             mode: QueryMode::Snapshot,
@@ -1935,9 +2478,9 @@ mod tests {
             bindings: vec![],
             scan: seql_ast::ast::Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000, // 1 hour
-                },
+                }),
             },
             stages: vec![],
             mode: QueryMode::Snapshot,
@@ -1955,9 +2498,9 @@ mod tests {
             bindings: vec![],
             scan: seql_ast::ast::Scan {
                 signal: Signal::Logs,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000,
-                },
+                }),
             },
             stages: vec![Stage::TimeRange(seql_ast::ast::TimeRangeStage {
                 duration_ns: 1_800_000_000_000, // 30 minutes
@@ -2020,9 +2563,9 @@ mod tests {
             bindings: vec![],
             scan: seql_ast::ast::Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000,
-                },
+                }),
             },
             stages: vec![Stage::Filter(filter)],
             mode: QueryMode::Snapshot,
@@ -2053,9 +2596,9 @@ mod tests {
             bindings: vec![],
             scan: seql_ast::ast::Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000,
-                },
+                }),
             },
             stages: vec![Stage::Filter(filter_not)],
             mode: QueryMode::Snapshot,
@@ -2089,9 +2632,9 @@ mod tests {
             bindings: vec![],
             scan: seql_ast::ast::Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000,
-                },
+                }),
             },
             stages: vec![Stage::Sort(sort)],
             mode: QueryMode::Snapshot,
@@ -2134,9 +2677,9 @@ mod tests {
             bindings: vec![],
             scan: seql_ast::ast::Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000,
-                },
+                }),
             },
             stages: vec![Stage::Project(project)],
             mode: QueryMode::Snapshot,
@@ -2167,9 +2710,9 @@ mod tests {
             bindings: vec![],
             scan: seql_ast::ast::Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000,
-                },
+                }),
             },
             stages: vec![Stage::Unique(unique)],
             mode: QueryMode::Snapshot,
@@ -2219,9 +2762,9 @@ mod tests {
                 bindings: vec![],
                 scan: seql_ast::ast::Scan {
                     signal: Signal::Spans,
-                    time_range: TimeRange::SlidingWindow {
+                    time_range: Some(TimeRange::SlidingWindow {
                         start_ns: 3_600_000_000_000,
-                    },
+                    }),
                 },
                 stages: vec![Stage::Filter(filter)],
                 mode: QueryMode::Snapshot,
@@ -2327,9 +2870,9 @@ mod tests {
             bindings: vec![],
             scan: seql_ast::ast::Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000,
-                },
+                }),
             },
             stages: vec![Stage::Aggregate(agg_stage)],
             mode: QueryMode::Snapshot,

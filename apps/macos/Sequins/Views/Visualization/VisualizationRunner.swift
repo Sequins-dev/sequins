@@ -24,8 +24,10 @@ final class VisualizationRunner: SeQLSink {
     var columns: [String] { schema?.columnNames ?? [] }
     var shape: ResponseShape { schema?.shape ?? .table }
 
-    /// (Re)start the query. Cancels any prior stream first.
-    func start(dataSource: DataSource, query: String, isLive: Bool) {
+    /// (Re)start the query. Cancels any prior stream first. A non-nil `timeRange`
+    /// is passed structurally and overrides the query's inline scope (dashboards
+    /// pass the picker's range so a saved query honors the selected window).
+    func start(dataSource: DataSource, query: String, isLive: Bool, timeRange: TimeRange? = nil) {
         stop()
         errorMessage = nil
         rows = []
@@ -41,7 +43,7 @@ final class VisualizationRunner: SeQLSink {
 
         do {
             if isLive {
-                let stream = try dataSource.executeLiveSeQL(query)
+                let stream = try dataSource.executeLiveSeQL(query, timeRange: timeRange)
                 stream.onSchemaCallback = { [weak self] s in
                     Task { @MainActor in self?.schema = s }
                 }
@@ -56,7 +58,7 @@ final class VisualizationRunner: SeQLSink {
                 rebuildFromLive()
                 isLoading = false
             } else {
-                snapshotStream = try dataSource.executeSeQL(query, sink: self)
+                snapshotStream = try dataSource.executeSeQL(query, timeRange: timeRange, sink: self)
             }
         } catch {
             errorMessage = error.localizedDescription

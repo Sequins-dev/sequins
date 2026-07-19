@@ -29,6 +29,7 @@ pub const KW_UNIQ: &str = "uniq";
 pub const KW_PATTERNS: &str = "patterns";
 pub const KW_NAVIGATE: &str = "navigate";
 pub const KW_MERGE: &str = "merge";
+pub const KW_WINDOW: &str = "window";
 pub const KW_LET: &str = "let";
 pub const KW_AS: &str = "as";
 pub const KW_ASC: &str = "asc";

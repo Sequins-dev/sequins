@@ -342,26 +342,41 @@ Every query begins with a signal and a mandatory time scope, then optional `|` s
   - `where <predicate>` — e.g. `where status == 2`, `where severity_number >= 9`,
     `where attr.http_status_code >= 500`. Combine with `and`/`or`.
   - `group by { <keys> } { <aggregations> }` — aggregation. Empty keys `{}` = one scalar
-    row. Aggregations: `count()`, `avg(<col>)`, `sum(<col>)`, `min`, `max`, `p50/p90/p99(<col>)`,
-    each aliased `as <name>`; a conditional count is `count() where <pred> as <name>`.
-  - For a **time series** (line chart over time), bucket time in the group keys with
-    `ts() bin <dur> as bucket`.
+    row. Aggregations: `count()`, `avg`, `sum`, `min`, `max`, `p50/p95/p99(<col>)`,
+    `percentile(<col>, <q>)` (q in 0..1, e.g. 0.90), `stddev(<col>)`, `variance(<col>)`,
+    `distinct(<col>)`, `error_rate()`, `throughput()` (a per-second rate, scaled to the
+    window/bucket), each aliased `as <name>`; a conditional count is
+    `count() where <pred> as <name>`.
+  - For a **time series** (line chart over time), bucket time in the group keys. Prefer a
+    RANGE-RELATIVE bucket so the chart scales to whatever window is selected:
+    `ts() bin 10% as bucket` (≈10 buckets) or `ts() bin auto as bucket`. A fixed
+    `ts() bin 5m` also works but won't adapt to the range.
+  - `window { <fn> as <name>, … }` — window functions over the time-ordered result (use
+    AFTER a time-bucketed `group by`): `moving_avg(<col>, <n>)`, `cumulative(<col>)`,
+    `delta(<col>)` (period-over-period change).
   - `take <n>` — limit rows. `select <cols>` — project columns.
+
+Time note: on a **dashboard**, the panel's selected range and live toggle are applied for
+you (they override the query's `last <dur>`), so always include a sensible leading scope
+like `last 1h` and use `ts() bin 10%` — the chart then follows the dashboard's range.
 
 ## Examples
 
 - Recent errored spans:        `spans last 1h | where status == 2 | take 100`
 - Total + error count (scalar): `spans last 1h | group by {} { count() as total, count() where status == 2 as errors }`
 - Count by service:            `spans last 1h | group by { service_name } { count() as n }`
-- Spans per minute (timeseries):`spans last 15m | group by { ts() bin 1m as bucket } { count() as span_count }`
-- Avg latency over time:       `spans last 1h | group by { ts() bin 1m as bucket } { avg(duration_ns) as avg_ns }`
-- Error logs per minute:       `logs last 1h | where severity_number >= 17 | group by { ts() bin 1m as bucket } { count() as errors }`
+- Spans per bucket (timeseries):`spans last 15m | group by { ts() bin 10% as bucket } { count() as span_count }`
+- Latency percentiles:         `spans last 1h | group by {} { p95(duration_ns) as p95, percentile(duration_ns, 0.9) as p90, stddev(duration_ns) as sd }`
+- Throughput by service:       `spans last 1h | group by { service_name } { throughput() as rps }`
+- Error-rate moving average:   `spans last 1h | group by { ts() bin auto as bucket } { error_rate() as er } | window { moving_avg(er, 5) as er_ma }`
 
 ## Workflow
 
-Ground names with `list_tables` / `describe_schema` only if unsure. Write ONE SeQL query
-using the rules above. If `validate_seql` fails, read `error.message`/`offset`, FIX the
-query per the syntax above, and validate AT MOST once or twice more — do not loop.
+Ground names/values with `list_tables` / `describe_schema` / `column_profile` when unsure
+rather than guessing. Write ONE SeQL query using the rules above. If the request is
+ambiguous, state the interpretation you chose in one line and offer a refinement. If
+`validate_seql` fails, read `error.message`/`offset`, FIX the query per the syntax above,
+and validate AT MOST once or twice more — do not loop.
 
 Client tools for showing results (call with the final SeQL `query`, a short `title`, and
 an optional `chart_type` like `line`/`bar`/`stat`/`table`):
@@ -384,9 +399,10 @@ mod grounding_tests {
             "spans last 1h | where status == 2 | take 100",
             "spans last 1h | group by {} { count() as total, count() where status == 2 as errors }",
             "spans last 1h | group by { service_name } { count() as n }",
-            "spans last 15m | group by { ts() bin 1m as bucket } { count() as span_count }",
-            "spans last 1h | group by { ts() bin 1m as bucket } { avg(duration_ns) as avg_ns }",
-            "logs last 1h | where severity_number >= 17 | group by { ts() bin 1m as bucket } { count() as errors }",
+            "spans last 15m | group by { ts() bin 10% as bucket } { count() as span_count }",
+            "spans last 1h | group by {} { p95(duration_ns) as p95, percentile(duration_ns, 0.9) as p90, stddev(duration_ns) as sd }",
+            "spans last 1h | group by { service_name } { throughput() as rps }",
+            "spans last 1h | group by { ts() bin auto as bucket } { error_rate() as er } | window { moving_avg(er, 5) as er_ma }",
         ];
         for q in examples {
             assert!(

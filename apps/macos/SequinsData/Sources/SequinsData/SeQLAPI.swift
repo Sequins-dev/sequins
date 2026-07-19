@@ -378,7 +378,9 @@ extension DataSource {
     /// - Returns: A `SeQLStream` that can be cancelled
     /// - Throws: `SequinsError` on failures (parse errors are reported via sink.onError)
     @discardableResult
-    public func executeSeQL(_ query: String, sink: any SeQLSink) throws -> SeQLStream {
+    public func executeSeQL(
+        _ query: String, timeRange: TimeRange? = nil, sink: any SeQLSink
+    ) throws -> SeQLStream {
         return try withSpan("DataSource.executeSeQL") { _ in
         let context = SeQLContext(sink: sink)
         let ctxRaw = Unmanaged.passUnretained(context).toOpaque()
@@ -481,9 +483,11 @@ extension DataSource {
             ctx.sink?.onError(code: code, message: message)
         }
 
-        // Convert Swift String to C string explicitly
+        // Convert Swift String to C string explicitly. A supplied `timeRange`
+        // overrides the query's inline scope (kind 0 = use the inline scope).
+        let r = timeRange?.ffiScalars ?? (kind: 0, a: 0, b: 0)
         let streamHandle = query.withCString { queryPtr in
-            sequins_seql_query(rawPointer, queryPtr, vtable, ctxRaw)
+            sequins_seql_query(rawPointer, queryPtr, r.kind, r.a, r.b, vtable, ctxRaw)
         }
 
         guard let streamHandle else {
@@ -503,7 +507,7 @@ extension DataSource {
     /// - Parameter query: SeQL query text (time range is used as initial window only)
     /// - Returns: A `LiveSeQLStream` with `@Observable` properties (`batches`, `schema`, etc.)
     /// - Throws: `SequinsError` if the stream handle cannot be created
-    public func executeLiveSeQL(_ query: String) throws -> LiveSeQLStream {
+    public func executeLiveSeQL(_ query: String, timeRange: TimeRange? = nil) throws -> LiveSeQLStream {
         return try withSpan("DataSource.executeLiveSeQL") { _ in
         let stream = LiveSeQLStream()
         let context = LiveSeQLContext(stream: stream)
@@ -636,8 +640,9 @@ extension DataSource {
             DispatchQueue.main.async { ctx.stream?.applyError(code: code, message: message) }
         }
 
+        let r = timeRange?.ffiScalars ?? (kind: 0, a: 0, b: 0)
         let handle = query.withCString { queryPtr in
-            sequins_seql_query_live(rawPointer, queryPtr, vtable, ctxRaw)
+            sequins_seql_query_live(rawPointer, queryPtr, r.kind, r.a, r.b, vtable, ctxRaw)
         }
 
         guard let handle else {
