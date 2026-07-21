@@ -30,8 +30,10 @@ use sequins_flight::{decode_metadata, ipc_to_batch, SeqlMetadata};
 use sequins_metadata::{
     Dashboard, DashboardApi, DashboardRow, RowPanel, SavedVisualization, DEFAULT_ROW_HEIGHT,
 };
+use sequins_series_index::SeriesIndex;
 use sequins_traits::QueryApi;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 /// Default number of rows returned by `sample` and rendered by `run_sql`/`run_seql`.
 const DEFAULT_ROWS: usize = 10;
@@ -56,6 +58,8 @@ pub enum OpError {
     Arrow(#[from] arrow::error::ArrowError),
     #[error("dashboard editing is not available for this connection")]
     DashboardsUnavailable,
+    #[error("metric label enumeration is not available for this connection")]
+    MetricLabelsUnavailable,
     #[error("no dashboard matching '{key}' — use list_dashboards to see ids/titles")]
     UnknownDashboard { key: String },
     #[error("no chart at [row {row}, column {column}] — use get_dashboard to see indices")]
@@ -89,6 +93,9 @@ pub struct ColumnProfileArgs {
     /// How many most-frequent values to list (default 10).
     #[serde(default)]
     pub top_k: Option<usize>,
+    /// Optional SQL predicate to scope the profile (e.g. `http_status_code >= 500`).
+    #[serde(default)]
+    pub filter: Option<String>,
 }
 
 /// Arguments for `time_range`.
@@ -106,6 +113,15 @@ pub struct SampleArgs {
     /// Number of rows to return (default 10, max 100).
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Optional columns to project (default: all). Narrow wide tables to what matters.
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
+    /// Optional SQL predicate to filter rows (e.g. `status == 2`).
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Optional `ORDER BY` clause (e.g. `start_time_unix_nano DESC` for the latest rows).
+    #[serde(default)]
+    pub order_by: Option<String>,
 }
 
 /// Arguments for `explain`.
@@ -140,6 +156,24 @@ pub struct RunSeqlArgs {
     /// How many sample result rows to include (default 10, max 100).
     #[serde(default)]
     pub sample_rows: Option<usize>,
+}
+
+/// Arguments for `metric_labels`.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MetricLabelsArgs {
+    /// Restrict to one metric name (default: all metrics).
+    #[serde(default)]
+    pub metric: Option<String>,
+}
+
+/// Arguments for `metric_label_values`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MetricLabelValuesArgs {
+    /// The label key whose values to list (e.g. `http.route`).
+    pub key: String,
+    /// Restrict to one metric name (default: all metrics).
+    #[serde(default)]
+    pub metric: Option<String>,
 }
 
 /// Arguments for `overview` (none).
@@ -298,6 +332,9 @@ pub struct Tools {
     /// Pro daemon both have a `DashboardApi`). Absent ⇒ dashboard tools report they're
     /// unavailable rather than failing opaquely.
     dashboards: Option<Arc<dyn DashboardApi>>,
+    /// The metric series index, for enumerating per-series labels (metric attributes
+    /// aren't in the SQL tables). Absent ⇒ metric-label tools report unavailable.
+    series_index: Option<Arc<RwLock<SeriesIndex>>>,
 }
 
 impl Tools {
@@ -306,6 +343,7 @@ impl Tools {
         Self {
             backend,
             dashboards: None,
+            series_index: None,
         }
     }
 
@@ -315,10 +353,22 @@ impl Tools {
         self
     }
 
+    /// Attach the metric series index so the assistant can enumerate metric labels.
+    pub fn with_series_index(mut self, series_index: Arc<RwLock<SeriesIndex>>) -> Self {
+        self.series_index = Some(series_index);
+        self
+    }
+
     fn dashboard_api(&self) -> Result<&Arc<dyn DashboardApi>, OpError> {
         self.dashboards
             .as_ref()
             .ok_or(OpError::DashboardsUnavailable)
+    }
+
+    fn series_index(&self) -> Result<&Arc<RwLock<SeriesIndex>>, OpError> {
+        self.series_index
+            .as_ref()
+            .ok_or(OpError::MetricLabelsUnavailable)
     }
 
     async fn ctx(&self) -> Result<SessionContext, OpError> {
@@ -350,7 +400,11 @@ impl Tools {
             args.table,
             schema.fields().len()
         );
+        let mut has_overflow = false;
         for f in schema.fields() {
+            if f.name() == "_overflow_attrs" {
+                has_overflow = true;
+            }
             out.push_str(&format!(
                 "- {}: {}{}\n",
                 f.name(),
@@ -358,10 +412,18 @@ impl Tools {
                 if f.is_nullable() { " (nullable)" } else { "" }
             ));
         }
+        if has_overflow {
+            out.push_str(
+                "\nPromoted attributes (e.g. http_route, http_status_code) are typed columns; \
+                 custom attributes live in `_overflow_attrs` — use list_attributes / \
+                 attribute_values to discover keys and values.\n",
+            );
+        }
         Ok(out)
     }
 
-    /// Profile a column: total/non-null/approx-distinct, min/max, and top-k values.
+    /// Profile a column: total/non-null/approx-distinct, min/max, numeric quantiles, and
+    /// top-k values — optionally scoped by a `filter` predicate.
     pub async fn column_profile(&self, args: ColumnProfileArgs) -> Result<String, OpError> {
         validate_table(&args.table)?;
         let ctx = self.ctx().await?;
@@ -371,20 +433,33 @@ impl Tools {
         let t = quote_ident(&args.table);
         let c = quote_ident(&args.column);
         let top_k = args.top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_ROWS);
+        let where_clause = args
+            .filter
+            .as_ref()
+            .map(|f| format!(" WHERE {f}"))
+            .unwrap_or_default();
+        let is_numeric = self
+            .column_is_numeric(&ctx, &args.table, &args.column)
+            .await;
 
         let mut out = format!("Profile of `{}`.`{}`:\n", args.table, args.column);
+        if !where_clause.is_empty() {
+            out.push_str(&format!("(scope:{where_clause})\n"));
+        }
 
         // Row counts always work for any column type — kept separate from
         // approx_distinct so an unsupported type (e.g. Float64, which DataFusion's
         // HyperLogLog can't hash) doesn't hide the counts too.
-        let counts_sql = format!("SELECT count(*) AS total_rows, count({c}) AS non_null FROM {t}");
+        let counts_sql =
+            format!("SELECT count(*) AS total_rows, count({c}) AS non_null FROM {t}{where_clause}");
         match self.query_readonly(&ctx, &counts_sql, MAX_ROWS).await {
             Ok(batches) => out.push_str(&render_batches(&batches)?),
             Err(e) => out.push_str(&format!("(counts unavailable: {e})\n")),
         }
 
         // Approximate distinct cardinality — best effort; unsupported for some types.
-        let distinct_sql = format!("SELECT approx_distinct({c}) AS approx_distinct FROM {t}");
+        let distinct_sql =
+            format!("SELECT approx_distinct({c}) AS approx_distinct FROM {t}{where_clause}");
         match self.query_readonly(&ctx, &distinct_sql, MAX_ROWS).await {
             Ok(batches) => {
                 out.push_str("\nApprox distinct:\n");
@@ -393,14 +468,29 @@ impl Tools {
             Err(_) => out.push_str("\nApprox distinct: unavailable for this column type.\n"),
         }
 
-        let minmax_sql = format!("SELECT min({c}) AS min, max({c}) AS max FROM {t}");
+        let minmax_sql = format!("SELECT min({c}) AS min, max({c}) AS max FROM {t}{where_clause}");
         if let Ok(batches) = self.query_readonly(&ctx, &minmax_sql, MAX_ROWS).await {
             out.push_str("\nRange:\n");
             out.push_str(&render_batches(&batches)?);
         }
 
+        // Numeric distribution — quantiles + mean/stddev — for number-typed columns.
+        if is_numeric {
+            let quant_sql = format!(
+                "SELECT avg({c}) AS mean, stddev({c}) AS stddev, \
+                 approx_percentile_cont({c}, 0.5) AS p50, approx_percentile_cont({c}, 0.9) AS p90, \
+                 approx_percentile_cont({c}, 0.95) AS p95, approx_percentile_cont({c}, 0.99) AS p99 \
+                 FROM {t}{where_clause}"
+            );
+            if let Ok(batches) = self.query_readonly(&ctx, &quant_sql, MAX_ROWS).await {
+                out.push_str("\nDistribution:\n");
+                out.push_str(&render_batches(&batches)?);
+            }
+        }
+
         let topk_sql = format!(
-            "SELECT {c} AS value, count(*) AS n FROM {t} GROUP BY {c} ORDER BY n DESC LIMIT {top_k}"
+            "SELECT {c} AS value, count(*) AS n FROM {t}{where_clause} \
+             GROUP BY {c} ORDER BY n DESC LIMIT {top_k}"
         );
         match self.query_readonly(&ctx, &topk_sql, top_k).await {
             Ok(batches) => {
@@ -410,6 +500,18 @@ impl Tools {
             Err(e) => out.push_str(&format!("\n(top values unavailable: {e})\n")),
         }
         Ok(out)
+    }
+
+    /// Whether a column's Arrow type is numeric (so quantiles/mean apply).
+    async fn column_is_numeric(&self, ctx: &SessionContext, table: &str, column: &str) -> bool {
+        let Ok(df) = ctx.table(table).await else {
+            return false;
+        };
+        df.schema()
+            .as_arrow()
+            .field_with_name(column)
+            .map(|f| f.data_type().is_numeric())
+            .unwrap_or(false)
     }
 
     /// Report the min/max of a table's time column (nanoseconds since epoch).
@@ -432,12 +534,39 @@ impl Tools {
         ))
     }
 
-    /// Return up to `limit` sample rows from a table.
+    /// Return up to `limit` sample rows from a table, optionally projected to specific
+    /// `columns`, filtered by a predicate, and ordered.
     pub async fn sample(&self, args: SampleArgs) -> Result<String, OpError> {
         validate_table(&args.table)?;
         let limit = args.limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS);
         let ctx = self.ctx().await?;
-        let sql = format!("SELECT * FROM {} LIMIT {limit}", quote_ident(&args.table));
+
+        let projection = match &args.columns {
+            Some(cols) if !cols.is_empty() => {
+                for col in cols {
+                    self.validate_column(&ctx, &args.table, col).await?;
+                }
+                cols.iter()
+                    .map(|c| quote_ident(c))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+            _ => "*".to_string(),
+        };
+        let where_clause = args
+            .filter
+            .as_ref()
+            .map(|f| format!(" WHERE {f}"))
+            .unwrap_or_default();
+        let order_clause = args
+            .order_by
+            .as_ref()
+            .map(|o| format!(" ORDER BY {o}"))
+            .unwrap_or_default();
+        let sql = format!(
+            "SELECT {projection} FROM {}{where_clause}{order_clause} LIMIT {limit}",
+            quote_ident(&args.table)
+        );
         let batches = self.query_readonly(&ctx, &sql, limit).await?;
         Ok(format!(
             "Up to {limit} rows from `{}`:\n{}",
@@ -613,6 +742,50 @@ impl Tools {
             "Metrics (name, type, unit, series cardinality, datapoints):\n{}\n\
              Chart a metric by name via a `datapoints` SeQL query; use metric_labels for its label keys.",
             render_batches(&batches)?
+        ))
+    }
+
+    /// The label (per-series attribute) keys carried by metrics — e.g. which dimensions a
+    /// request-count metric is broken down by. From the series index, optionally per metric.
+    pub async fn metric_labels(&self, args: MetricLabelsArgs) -> Result<String, OpError> {
+        let index = self.series_index()?.read().await;
+        let keys = index.label_keys(args.metric.as_deref());
+        let scope = args
+            .metric
+            .as_deref()
+            .map(|m| format!(" for metric `{m}`"))
+            .unwrap_or_default();
+        if keys.is_empty() {
+            return Ok(format!("No metric labels found{scope}."));
+        }
+        Ok(format!(
+            "Metric label keys{scope}:\n{}\nUse metric_label_values(key) for their values.",
+            keys.iter()
+                .map(|k| format!("- {k}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))
+    }
+
+    /// The distinct values a metric label key takes (optionally within one metric).
+    pub async fn metric_label_values(
+        &self,
+        args: MetricLabelValuesArgs,
+    ) -> Result<String, OpError> {
+        let index = self.series_index()?.read().await;
+        let values = index.label_values(&args.key, args.metric.as_deref());
+        if values.is_empty() {
+            return Ok(format!("No values found for metric label `{}`.", args.key));
+        }
+        Ok(format!(
+            "Values of metric label `{}`:\n{}",
+            args.key,
+            values
+                .iter()
+                .take(MAX_ROWS)
+                .map(|v| format!("- {v}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         ))
     }
 
@@ -1152,6 +1325,7 @@ mod tests {
                 table: "datapoints".into(),
                 column: "value".into(),
                 top_k: Some(3),
+                filter: None,
             })
             .await
             .unwrap();
@@ -1203,6 +1377,9 @@ mod tests {
             .sample(SampleArgs {
                 table: "spans".into(),
                 limit: Some(3),
+                columns: None,
+                filter: None,
+                order_by: None,
             })
             .await
             .unwrap();
@@ -1231,6 +1408,7 @@ mod tests {
                 table: "spans".into(),
                 column: "name".into(),
                 top_k: Some(3),
+                filter: None,
             })
             .await
             .unwrap();
@@ -1246,6 +1424,7 @@ mod tests {
                 table: "spans".into(),
                 column: "not_a_col".into(),
                 top_k: None,
+                filter: None,
             })
             .await
             .unwrap_err();

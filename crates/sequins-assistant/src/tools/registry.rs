@@ -16,8 +16,9 @@ use serde::de::DeserializeOwned;
 use super::ops::{
     AddChartArgs, ArrangeDashboardArgs, AttributeValuesArgs, ColumnProfileArgs,
     CreateDashboardArgs, DescribeSchemaArgs, ExplainArgs, GetDashboardArgs, ListAttributesArgs,
-    ListDashboardsArgs, ListMetricsArgs, ListTablesArgs, OverviewArgs, RenameDashboardArgs,
-    RunSeqlArgs, RunSqlArgs, SampleArgs, TimeRangeArgs, UpdateChartArgs, ValidateSeqlArgs,
+    ListDashboardsArgs, ListMetricsArgs, ListTablesArgs, MetricLabelValuesArgs, MetricLabelsArgs,
+    OverviewArgs, RenameDashboardArgs, RunSeqlArgs, RunSqlArgs, SampleArgs, TimeRangeArgs,
+    UpdateChartArgs, ValidateSeqlArgs,
 };
 use super::{OpError, Tools};
 
@@ -40,6 +41,8 @@ pub const TOOL_NAMES: &[&str] = &[
     "list_attributes",
     "attribute_values",
     "list_metrics",
+    "metric_labels",
+    "metric_label_values",
     "column_profile",
     "time_range",
     "sample",
@@ -97,6 +100,16 @@ pub fn specs() -> Vec<ToolSpec> {
             name: "list_metrics",
             description: "List available metrics with their type, unit, and series cardinality. Use before charting a metric.",
             parameters: schema::<ListMetricsArgs>(),
+        },
+        ToolSpec {
+            name: "metric_labels",
+            description: "The per-series label keys a metric is broken down by (metric attributes aren't in the SQL tables). Optionally scope to one metric.",
+            parameters: schema::<MetricLabelsArgs>(),
+        },
+        ToolSpec {
+            name: "metric_label_values",
+            description: "The distinct values a metric label key takes (optionally within one metric).",
+            parameters: schema::<MetricLabelValuesArgs>(),
         },
         ToolSpec {
             name: "column_profile",
@@ -204,6 +217,8 @@ pub async fn invoke(tools: &Tools, name: &str, args: serde_json::Value) -> Resul
         "list_attributes" => tools.list_attributes(parse(args)?).await,
         "attribute_values" => tools.attribute_values(parse(args)?).await,
         "list_metrics" => tools.list_metrics(parse(args)?).await,
+        "metric_labels" => tools.metric_labels(parse(args)?).await,
+        "metric_label_values" => tools.metric_label_values(parse(args)?).await,
         "column_profile" => tools.column_profile(parse(args)?).await,
         "time_range" => tools.time_range(parse(args)?).await,
         "sample" => tools.sample(parse(args)?).await,

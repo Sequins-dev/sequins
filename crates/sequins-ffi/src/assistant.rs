@@ -153,11 +153,15 @@ pub unsafe extern "C" fn sequins_assistant_new(
                         return std::ptr::null_mut();
                     }
                 };
-            // Give the tool layer the local dashboard store so the assistant can read and
-            // edit dashboards (`Storage` implements `DashboardApi`).
+            // Give the tool layer the local dashboard store (Storage implements
+            // DashboardApi) and the metric series index, so the assistant can edit
+            // dashboards and enumerate metric labels.
             let dashboards: Arc<dyn sequins_metadata::DashboardApi> = storage.clone();
-            let tools =
-                sequins_assistant::Tools::new(Arc::clone(backend)).with_dashboards(dashboards);
+            let series_index = RUNTIME
+                .block_on(async { storage.cold_tier_arc().read().await.series_index.clone() });
+            let tools = sequins_assistant::Tools::new(Arc::clone(backend))
+                .with_dashboards(dashboards)
+                .with_series_index(series_index);
             let model = sequins_assistant::SequinsAssistantModel::new(backing, tools);
             Assistant::local(model, Some(Arc::clone(storage.app_state())))
         }

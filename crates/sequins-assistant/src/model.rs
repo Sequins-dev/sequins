@@ -438,7 +438,9 @@ Prefer discovery tools over guessing — observability data is dominated by attr
 - `list_attributes(table)` — the real attribute keys present (promoted + custom). Call this
   before filtering on `attr.<key>`; don't guess key names.
 - `attribute_values(table, key)` — the actual values of a key (e.g. which `http.route`s exist).
-- `list_metrics` — metric names/types/units; `describe_schema(table)` for columns.
+- `list_metrics` — metric names/types/units; `metric_labels(metric?)` /
+  `metric_label_values(key, metric?)` — the label dimensions a metric is split by
+  (not in the SQL tables). `describe_schema(table)` for columns.
 - To keep rows where a field is present, write `where http_route != null` (it means IS NOT
   NULL). Bare promoted attrs (e.g. `http_route`, `http_status_code`) are real columns.
 

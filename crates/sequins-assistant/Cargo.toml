@@ -14,6 +14,7 @@ sequins-flight             = { workspace = true }
 sequins-traits             = { workspace = true }
 sequins-arrow-schema       = { workspace = true }
 sequins-metadata           = { workspace = true }
+sequins-series-index       = { workspace = true }
 seql-parser                = { workspace = true }
 seql-ast                   = { workspace = true }
 
