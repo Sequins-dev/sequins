@@ -1600,6 +1600,31 @@ bool sequins_dashboard_save(struct CDataSource *data_source,
 bool sequins_dashboard_delete(struct CDataSource *data_source, const char *id, char **error_out);
 
 /**
+ * List the built-in dashboard templates as a JSON array of `{id, title, description}`.
+ * Templates are compiled in, so this is identical for Local and Remote; the data
+ * source is accepted for ABI consistency but unused.
+ *
+ * # Safety
+ * `out_json`/`error_out` are out-params.
+ */
+bool sequins_dashboard_templates_list(struct CDataSource *_data_source,
+                                      char **out_json,
+                                      char **error_out);
+
+/**
+ * Instantiate a built-in template by id: build a **fresh** dashboard (a new id, so the
+ * gallery always creates a new copy) and persist it via the data source (Local or
+ * Remote). Writes the stored dashboard to `out_json`.
+ *
+ * # Safety
+ * `data_source`/`template_id` must be valid; `out_json`/`error_out` are out-params.
+ */
+bool sequins_dashboard_instantiate_template(struct CDataSource *data_source,
+                                            const char *template_id,
+                                            char **out_json,
+                                            char **error_out);
+
+/**
  * Delete a persisted conversation by id (in-memory + durable). Local only; remote
  * connections report an error until the daemon exposes conversation deletion.
  *

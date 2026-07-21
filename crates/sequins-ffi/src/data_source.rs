@@ -127,6 +127,13 @@ pub extern "C" fn sequins_data_source_new_local(
         }
     };
 
+    // Seed built-in dashboards (System Health) into a fresh store so first-run users
+    // land on a useful dashboard. Best-effort — a failure must not block startup.
+    if let Err(e) = crate::runtime::RUNTIME.block_on(storage.app_state().seed_builtin_dashboards())
+    {
+        tracing::warn!(error = %e, "failed to seed built-in dashboards");
+    }
+
     // Create the shared DataFusion backend once. The SessionContext inside it is
     // initialised lazily on the first query and then reused for all subsequent
     // queries, so the expensive infer_schema call over all cold-tier Vortex files

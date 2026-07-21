@@ -8,7 +8,7 @@
 
 use std::ffi::{c_char, CStr, CString};
 
-use sequins_metadata::{Dashboard, DashboardApi};
+use sequins_metadata::{builtin_templates, template_by_id, Dashboard, DashboardApi};
 
 use crate::data_source::{CDataSource, DataSourceImpl};
 use crate::runtime::RUNTIME;
@@ -165,6 +165,84 @@ pub unsafe extern "C" fn sequins_dashboard_delete(
     }
 }
 
+/// Serializable view of a [`sequins_metadata::DashboardTemplate`] for the gallery.
+#[derive(serde::Serialize)]
+struct CTemplateInfo {
+    id: &'static str,
+    title: &'static str,
+    description: &'static str,
+}
+
+/// List the built-in dashboard templates as a JSON array of `{id, title, description}`.
+/// Templates are compiled in, so this is identical for Local and Remote; the data
+/// source is accepted for ABI consistency but unused.
+///
+/// # Safety
+/// `out_json`/`error_out` are out-params.
+#[no_mangle]
+pub unsafe extern "C" fn sequins_dashboard_templates_list(
+    _data_source: *mut CDataSource,
+    out_json: *mut *mut c_char,
+    error_out: *mut *mut c_char,
+) -> bool {
+    let infos: Vec<CTemplateInfo> = builtin_templates()
+        .iter()
+        .map(|t| CTemplateInfo {
+            id: t.id,
+            title: t.title,
+            description: t.description,
+        })
+        .collect();
+    if write_json(out_json, &infos) {
+        true
+    } else {
+        set_error(error_out, "failed to serialize templates");
+        false
+    }
+}
+
+/// Instantiate a built-in template by id: build a **fresh** dashboard (a new id, so the
+/// gallery always creates a new copy) and persist it via the data source (Local or
+/// Remote). Writes the stored dashboard to `out_json`.
+///
+/// # Safety
+/// `data_source`/`template_id` must be valid; `out_json`/`error_out` are out-params.
+#[no_mangle]
+pub unsafe extern "C" fn sequins_dashboard_instantiate_template(
+    data_source: *mut CDataSource,
+    template_id: *const c_char,
+    out_json: *mut *mut c_char,
+    error_out: *mut *mut c_char,
+) -> bool {
+    if data_source.is_null() || template_id.is_null() {
+        set_error(error_out, "data source or template id is null");
+        return false;
+    }
+    let tid = match CStr::from_ptr(template_id).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_error(error_out, "template id is not valid UTF-8");
+            return false;
+        }
+    };
+    let Some(template) = template_by_id(tid) else {
+        set_error(error_out, &format!("unknown dashboard template `{tid}`"));
+        return false;
+    };
+    let mut dashboard = template.build();
+    // Clear the built-in id so save mints a fresh one (a distinct new dashboard),
+    // rather than overwriting the seeded copy.
+    dashboard.id.clear();
+    let api = dashboard_api(&*(data_source as *const DataSourceImpl));
+    match RUNTIME.block_on(api.save_dashboard(dashboard)) {
+        Ok(stored) => write_json(out_json, &stored),
+        Err(e) => {
+            set_error(error_out, &e.to_string());
+            false
+        }
+    }
+}
+
 /// Delete a persisted conversation by id (in-memory + durable). Local only; remote
 /// connections report an error until the daemon exposes conversation deletion.
 ///
@@ -254,17 +332,66 @@ mod tests {
         let id = saved["id"].as_str().unwrap().to_string();
         assert!(!id.is_empty());
 
-        // List → 1.
+        // List contains the saved dashboard (plus the seeded System Health one).
         let mut list_out: *mut c_char = std::ptr::null_mut();
         let ok = unsafe { sequins_dashboard_list(ds, &mut list_out, &mut err2) };
         assert!(ok);
         let list: serde_json::Value = serde_json::from_str(&unsafe { take(list_out) }).unwrap();
-        assert_eq!(list.as_array().unwrap().len(), 1);
+        let ids: Vec<&str> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|d| d["id"].as_str())
+            .collect();
+        assert!(ids.contains(&id.as_str()));
 
         // Delete.
         let id_c = CString::new(id).unwrap();
         let ok = unsafe { sequins_dashboard_delete(ds, id_c.as_ptr(), &mut err2) };
         assert!(ok);
+
+        sequins_data_source_free(ds);
+    }
+
+    #[test]
+    fn template_gallery_and_instantiate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = CString::new(tmp.path().to_str().unwrap()).unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let ds = sequins_data_source_new_local(
+            db.as_ptr(),
+            COtlpServerConfig {
+                grpc_port: 0,
+                http_port: 0,
+            },
+            &mut err,
+        );
+        assert!(!ds.is_null());
+
+        // The gallery lists at least the System Health template.
+        let mut out: *mut c_char = std::ptr::null_mut();
+        let mut err2: *mut c_char = std::ptr::null_mut();
+        let ok = unsafe { sequins_dashboard_templates_list(ds, &mut out, &mut err2) };
+        assert!(ok);
+        let templates: serde_json::Value = serde_json::from_str(&unsafe { take(out) }).unwrap();
+        let arr = templates.as_array().unwrap();
+        assert!(arr.iter().any(|t| t["id"] == "builtin-system-health"));
+
+        // Instantiating mints a fresh dashboard (a new id, not the seeded one).
+        let tid = CString::new("builtin-system-health").unwrap();
+        let mut out2: *mut c_char = std::ptr::null_mut();
+        let ok = unsafe {
+            sequins_dashboard_instantiate_template(ds, tid.as_ptr(), &mut out2, &mut err2)
+        };
+        assert!(ok);
+        let created: serde_json::Value = serde_json::from_str(&unsafe { take(out2) }).unwrap();
+        let new_id = created["id"].as_str().unwrap();
+        assert!(!new_id.is_empty());
+        assert_ne!(
+            new_id, "builtin-system-health",
+            "gallery copy gets a fresh id"
+        );
+        assert_eq!(created["title"], "System Health");
 
         sequins_data_source_free(ds);
     }

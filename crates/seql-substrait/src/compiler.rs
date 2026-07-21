@@ -2261,6 +2261,104 @@ mod tests {
         );
     }
 
+    /// The real System Health dashboard scoreBar query (span factors + missing-data
+    /// aware weighted overall) compiles and survives the Substrait round-trip.
+    #[tokio::test]
+    async fn test_health_dashboard_query_compiles_and_consumes() {
+        use datafusion_substrait::extensions::Extensions;
+        use datafusion_substrait::logical_plan::consumer::{
+            DefaultSubstraitConsumer, SubstraitConsumer,
+        };
+        use datafusion_substrait::substrait::proto::{plan_rel, Plan};
+
+        let ctx = schema_context().expect("schema_context");
+        let q = "spans | group by {} { \
+                count() where status == 2 as errs, count() as total, \
+                count() where attr.http_status_code >= 500 as http_5xx, \
+                count() where attr.http_status_code > 0 as http_total, \
+                p95(duration_ns) as p95_ns } \
+             | compute float(errs) / float(total) as span_error_rate, \
+                       case when http_total > 0 then float(http_5xx) / float(http_total) else null end as http_error_rate, \
+                       p95_ns as latency_p95 \
+             | compute score(span_error_rate, 0.01, 0.05) as span_error_score, \
+                       case when http_error_rate != null then score(http_error_rate, 0.05, 0.15) else null end as http_error_score, \
+                       score(latency_p95, 200000000, 500000000) as latency_score, \
+                       span_error_rate * 100.0 as span_error_score__value, \
+                       http_error_rate * 100.0 as http_error_score__value, \
+                       p95_ns / 1000000.0 as latency_score__value \
+             | compute (span_error_score * 0.40 + coalesce(http_error_score, 0.0) * 0.25 + latency_score * 0.20) \
+                       / (0.40 + case when http_error_score != null then 0.25 else 0.0 end + 0.20) as overall \
+             | select overall, span_error_score, span_error_score__value, http_error_score, \
+                      http_error_score__value, latency_score, latency_score__value";
+        // Scope-less template: a range is injected at execution (as a dashboard does).
+        let ast = seql_parser::parse(q).expect("health dashboard query should parse");
+        assert_eq!(ast.scan.time_range, None, "template carries no inline scope");
+        let bytes = compile_ast_with_range(
+            ast,
+            Some(TimeRange::SlidingWindow {
+                start_ns: 3_600_000_000_000,
+            }),
+            &ctx,
+        )
+        .await
+        .expect("health dashboard query should compile with an injected range");
+
+        let plan: Plan = prost::Message::decode(&bytes[..]).expect("decode");
+        let extensions = Extensions::try_from(&plan.extensions).expect("extensions");
+        let state = ctx.state();
+        let consumer = DefaultSubstraitConsumer::new(&extensions, &state);
+        let rel = match plan.relations[0].rel_type.as_ref().expect("rel_type") {
+            plan_rel::RelType::Root(root) => root.input.as_ref().expect("root input"),
+            plan_rel::RelType::Rel(rel) => rel,
+        };
+        assert!(
+            consumer.consume_rel(rel).await.is_ok(),
+            "backend consumer rejected the health dashboard plan"
+        );
+    }
+
+    /// The remaining System Health dashboard panel queries (stat cards, trend lines,
+    /// HTTP-class stacked bar) all parse and compile with an injected range.
+    #[tokio::test]
+    async fn test_health_dashboard_panel_queries_compile() {
+        let ctx = schema_context().expect("schema_context");
+        let queries = [
+            // Error-rate stat card.
+            "spans | group by {} { count() where status == 2 as e, count() as t } \
+             | compute float(e) / float(t) * 100.0 as error_rate_pct",
+            // p95 latency stat card.
+            "spans | group by {} { p95(duration_ns) as p95_ns } | compute p95_ns / 1000000.0 as p95_ms",
+            // Error-log stat card.
+            "logs | where severity_number >= 9 | group by {} { count() as error_logs }",
+            // Error-rate trend line (rate from raw counts + select to plot one series).
+            "spans | group by { ts() bin 10% as bucket } { count() where status == 2 as e, count() as t } \
+             | compute float(e) / float(t) * 100.0 as error_rate_pct | select bucket, error_rate_pct",
+            // Latency-percentile trend lines (ns → ms).
+            "spans | group by { ts() bin 10% as bucket } \
+                { p50(duration_ns) as p50, p95(duration_ns) as p95, p99(duration_ns) as p99 } \
+             | compute p50 / 1000000.0 as p50_ms, p95 / 1000000.0 as p95_ms, p99 / 1000000.0 as p99_ms \
+             | select bucket, p50_ms, p95_ms, p99_ms",
+            // HTTP status-class stacked bar over time (compound per-aggregate filters).
+            "spans | where attr.http_status_code > 0 | group by { ts() bin 10% as bucket } { \
+                count() where attr.http_status_code >= 200 and attr.http_status_code < 300 as c2xx, \
+                count() where attr.http_status_code >= 400 and attr.http_status_code < 500 as c4xx, \
+                count() where attr.http_status_code >= 500 as c5xx }",
+        ];
+        for q in queries {
+            let ast = seql_parser::parse(q).unwrap_or_else(|e| panic!("parse failed for `{q}`: {e:?}"));
+            let bytes = compile_ast_with_range(
+                ast,
+                Some(TimeRange::SlidingWindow {
+                    start_ns: 3_600_000_000_000,
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("compile failed for `{q}`: {e:?}"));
+            assert!(!bytes.is_empty(), "empty plan for `{q}`");
+        }
+    }
+
     /// `percentile(col, 90)` (a 0–100 form) is normalized to the 0..1 quantile.
     #[test]
     fn test_percentile_parses_0_100_form() {

@@ -45,6 +45,22 @@ final class DashboardsViewModel {
         }
     }
 
+    /// The built-in templates available in the "New from template" gallery.
+    func loadTemplates(dataSource: DataSource) -> [DashboardTemplateInfo] {
+        (try? dataSource.listDashboardTemplates()) ?? []
+    }
+
+    /// Instantiate a template into a fresh dashboard and select it.
+    func createFromTemplate(id: String, dataSource: DataSource) {
+        do {
+            let created = try dataSource.instantiateTemplate(id: id)
+            refresh(dataSource: dataSource)
+            select(created.id)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func deleteSelected(dataSource: DataSource) {
         guard let id = selectedDashboardId else { return }
         do {
