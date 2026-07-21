@@ -11,7 +11,6 @@
 //! side of the remote wire — our own app and any OpenAI client hit the same route.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -28,6 +27,8 @@ use rig::message::{
 use rig::OneOrMany;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+use crate::wire::{self, bad_request, model_not_found, unix_secs};
 
 /// Build the OpenAI-compatible router over a named registry of models.
 ///
@@ -176,34 +177,24 @@ fn build_completion_request(req: &ChatRequest) -> Result<CompletionRequest, Stri
     let tools: Vec<ToolDefinition> = req
         .tools
         .iter()
-        .map(|t| ToolDefinition {
-            name: t.function.name.clone(),
-            description: t.function.description.clone().unwrap_or_default(),
-            parameters: t.function.parameters.clone().unwrap_or_else(|| json!({})),
+        .map(|t| {
+            wire::tool_definition(
+                t.function.name.clone(),
+                t.function.description.clone(),
+                t.function.parameters.clone(),
+            )
         })
         .collect();
 
     let preamble = (!system_texts.is_empty()).then(|| system_texts.join("\n\n"));
 
-    Ok(CompletionRequest {
-        // No model override: `req.model` is our public registry id, not the backing
-        // provider's model name. The backing model supplies its own name (the
-        // middleware also clears this defensively).
-        model: None,
-        preamble,
-        chat_history,
-        documents: Vec::new(),
-        tools,
-        temperature: req.temperature,
-        // Drop the client's max_tokens: it sizes output for our *public* model id,
-        // but we route to a different backing model with its own limit. Forwarding
-        // an oversized value 400s ("max_tokens is too large for this model"); letting
-        // the backing model use its default is correct for a remapping proxy.
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-    })
+    // `base_completion_request` drops `max_tokens` (it sizes output for our *public*
+    // model id, but we route to a different backing model with its own limit — a
+    // forwarded oversized value 400s) and clears the model override. We forward only
+    // the client's temperature.
+    let mut request = wire::base_completion_request(preamble, chat_history, tools);
+    request.temperature = req.temperature;
+    Ok(request)
 }
 
 /// Split a completion response's choice into concatenated text and tool calls.
@@ -387,7 +378,7 @@ struct ChatToolCallFunction {
 
 impl ChatToolCallFunction {
     fn parsed_arguments(&self) -> serde_json::Value {
-        serde_json::from_str(&self.arguments).unwrap_or(serde_json::Value::Null)
+        wire::parse_arguments(&self.arguments)
     }
 }
 
@@ -406,29 +397,12 @@ struct ChatToolFunction {
 }
 
 // ---------------------------------------------------------------------------
-// Errors (OpenAI-shaped)
+// Errors + small helpers
 // ---------------------------------------------------------------------------
 
-fn model_not_found(model: &str) -> (StatusCode, Json<serde_json::Value>) {
-    error_body(
-        StatusCode::NOT_FOUND,
-        format!("The model '{model}' does not exist or is not configured."),
-        "invalid_request_error",
-        Some("model_not_found"),
-    )
-}
-
-fn bad_request(message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    error_body(
-        StatusCode::BAD_REQUEST,
-        message.to_string(),
-        "invalid_request_error",
-        None,
-    )
-}
-
+/// `502 api_error` for an upstream/backing-model failure.
 fn upstream_error(message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    error_body(
+    wire::error_body(
         StatusCode::BAD_GATEWAY,
         message.to_string(),
         "api_error",
@@ -436,35 +410,7 @@ fn upstream_error(message: &str) -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
-fn error_body(
-    status: StatusCode,
-    message: String,
-    kind: &str,
-    code: Option<&str>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        status,
-        Json(json!({ "error": { "message": message, "type": kind, "code": code } })),
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
-
-fn unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
+/// OpenAI chat-completion id (`chatcmpl-…`, hyphen-separated by convention).
 fn chat_id() -> String {
-    format!(
-        "chatcmpl-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    )
+    format!("chatcmpl-{}", wire::unix_nanos())
 }

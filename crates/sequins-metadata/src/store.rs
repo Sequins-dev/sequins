@@ -91,8 +91,7 @@ impl AppStateStore {
         let dash_prefix = ObjPath::from(format!("{}/dashboards", self.prefix));
         for location in self.list_locations(&dash_prefix).await? {
             match self.get_json::<Dashboard>(&location).await {
-                Ok(mut dash) => {
-                    dash.migrate_legacy();
+                Ok(dash) => {
                     self.dashboards.write().await.insert(dash.id.clone(), dash);
                 }
                 Err(e) => tracing::warn!(%location, error = %e, "skipping unreadable dashboard"),
@@ -183,6 +182,17 @@ impl AppStateStore {
         self.conversations.read().await.values().cloned().collect()
     }
 
+    /// Delete a conversation (in-memory + durable) and drop any response-index entries
+    /// pointing at it. No-op if absent.
+    pub async fn delete_conversation(&self, id: &str) -> Result<()> {
+        self.conversations.write().await.remove(id);
+        self.response_index.write().await.retain(|_, cid| cid != id);
+        match self.store.delete(&self.conversation_path(id)).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     // ---- Dashboards --------------------------------------------------------
 
     /// Snapshot all dashboards (for the DataFusion table provider).
@@ -193,7 +203,6 @@ impl AppStateStore {
     /// Create or update a dashboard, stamping `id`/timestamps as needed. Returns
     /// the stored dashboard (with its id).
     pub async fn upsert_dashboard(&self, mut dashboard: Dashboard) -> Result<Dashboard> {
-        dashboard.migrate_legacy();
         let now = now_ns();
         if dashboard.id.is_empty() {
             dashboard.id = self.next_id("dash");
@@ -232,30 +241,15 @@ impl AppStateStore {
     }
 }
 
-/// Read/write dashboards. Implemented by [`AppStateStore`] (local) and, elsewhere,
-/// by the remote client so the app has one interface across Local and Remote.
+/// Read/write dashboards. Implemented for `Storage` (local, delegating to
+/// [`AppStateStore`]'s inherent methods) and for the remote client over HTTP, so the
+/// app has one interface across Local and Remote.
 #[async_trait]
 pub trait DashboardApi: Send + Sync {
     async fn list_dashboards(&self) -> Result<Vec<Dashboard>>;
     async fn get_dashboard(&self, id: &str) -> Result<Option<Dashboard>>;
     async fn save_dashboard(&self, dashboard: Dashboard) -> Result<Dashboard>;
     async fn delete_dashboard(&self, id: &str) -> Result<()>;
-}
-
-#[async_trait]
-impl DashboardApi for AppStateStore {
-    async fn list_dashboards(&self) -> Result<Vec<Dashboard>> {
-        Ok(self.dashboards_snapshot().await)
-    }
-    async fn get_dashboard(&self, id: &str) -> Result<Option<Dashboard>> {
-        Ok(AppStateStore::get_dashboard(self, id).await)
-    }
-    async fn save_dashboard(&self, dashboard: Dashboard) -> Result<Dashboard> {
-        self.upsert_dashboard(dashboard).await
-    }
-    async fn delete_dashboard(&self, id: &str) -> Result<()> {
-        AppStateStore::delete_dashboard(self, id).await
-    }
 }
 
 #[cfg(test)]
@@ -348,7 +342,6 @@ mod tests {
                         weight: 1.0,
                     }],
                 }],
-                panels: Vec::new(),
             })
             .await
             .unwrap();
@@ -363,31 +356,5 @@ mod tests {
         let s3 = AppStateStore::new(store, "app_state");
         s3.load().await.unwrap();
         assert!(s3.dashboards_snapshot().await.is_empty());
-    }
-
-    #[test]
-    fn legacy_panels_migrate_into_rows_grouped_by_y() {
-        // Old free-grid JSON: two panels on row y=0 (side by side) + one on y=4.
-        let json = serde_json::json!({
-            "id": "d1", "title": "Old", "created_at_ns": 0, "updated_at_ns": 0,
-            "panels": [
-                { "visualization": { "seql": "a", "title": "A" }, "layout": { "x": 0, "y": 0, "w": 6, "h": 4 } },
-                { "visualization": { "seql": "b", "title": "B" }, "layout": { "x": 6, "y": 0, "w": 6, "h": 4 } },
-                { "visualization": { "seql": "c", "title": "C" }, "layout": { "x": 0, "y": 4, "w": 12, "h": 4 } }
-            ]
-        });
-        let mut dash: Dashboard = serde_json::from_value(json).unwrap();
-        dash.migrate_legacy();
-
-        assert!(dash.panels.is_empty(), "legacy panels consumed");
-        assert_eq!(dash.rows.len(), 2, "two y-groups → two rows");
-        assert_eq!(dash.rows[0].panels.len(), 2, "row 0 has both y=0 panels");
-        assert_eq!(dash.rows[0].panels[0].weight, 6.0, "weight from old width");
-        assert_eq!(dash.rows[1].panels.len(), 1);
-        assert_eq!(dash.panel_count(), 3);
-
-        // Idempotent.
-        dash.migrate_legacy();
-        assert_eq!(dash.rows.len(), 2);
     }
 }

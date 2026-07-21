@@ -1,5 +1,6 @@
-//! FFI: dashboard persistence (list/get/save/delete), normalized over Local
-//! (in-process `Storage`) and Remote (`RemoteClient` REST). JSON in, JSON out.
+//! FFI: app-state persistence — dashboards (list/get/save/delete) plus conversation
+//! deletion — normalized over Local (in-process `Storage`) and Remote (`RemoteClient`
+//! REST). JSON in, JSON out.
 //!
 //! Management-style ABI: each fn returns `bool` (success), writes JSON to an
 //! out-param (caller frees with `sequins_string_free`), and on failure writes an
@@ -164,6 +165,49 @@ pub unsafe extern "C" fn sequins_dashboard_delete(
     }
 }
 
+/// Delete a persisted conversation by id (in-memory + durable). Local only; remote
+/// connections report an error until the daemon exposes conversation deletion.
+///
+/// # Safety
+/// `data_source`/`id` must be valid; `error_out` is an out-param.
+#[no_mangle]
+pub unsafe extern "C" fn sequins_conversation_delete(
+    data_source: *mut CDataSource,
+    id: *const c_char,
+    error_out: *mut *mut c_char,
+) -> bool {
+    if data_source.is_null() || id.is_null() {
+        set_error(error_out, "data source or id is null");
+        return false;
+    }
+    let id = match CStr::from_ptr(id).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_error(error_out, "id is not valid UTF-8");
+            return false;
+        }
+    };
+    match &*(data_source as *const DataSourceImpl) {
+        #[cfg(feature = "local")]
+        DataSourceImpl::Local { storage, .. } => {
+            match RUNTIME.block_on(storage.app_state().delete_conversation(id)) {
+                Ok(()) => true,
+                Err(e) => {
+                    set_error(error_out, &e.to_string());
+                    false
+                }
+            }
+        }
+        DataSourceImpl::Remote { .. } => {
+            set_error(
+                error_out,
+                "deleting conversations is not supported on remote connections yet",
+            );
+            false
+        }
+    }
+}
+
 #[cfg(all(test, feature = "local"))]
 mod tests {
     use super::*;
@@ -197,8 +241,9 @@ mod tests {
         // Save.
         let dashboard = serde_json::json!({
             "id": "", "title": "Errors", "created_at_ns": 0, "updated_at_ns": 0,
-            "panels": [{ "visualization": { "seql": "logs last 1h", "title": "logs", "shape": "table" },
-                         "layout": { "x": 0, "y": 0, "w": 6, "h": 4 } }]
+            "rows": [{ "height": 280.0, "panels": [
+                { "visualization": { "seql": "logs last 1h", "title": "logs", "shape": "table" },
+                  "weight": 6.0 } ] }]
         });
         let dashboard_c = CString::new(dashboard.to_string()).unwrap();
         let mut out: *mut c_char = std::ptr::null_mut();

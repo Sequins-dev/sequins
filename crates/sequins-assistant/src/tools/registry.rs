@@ -14,8 +14,10 @@ use schemars::{schema_for, JsonSchema};
 use serde::de::DeserializeOwned;
 
 use super::ops::{
-    ColumnProfileArgs, DescribeSchemaArgs, ExplainArgs, ListTablesArgs, RunSeqlArgs, RunSqlArgs,
-    SampleArgs, TimeRangeArgs, ValidateSeqlArgs,
+    AddChartArgs, ArrangeDashboardArgs, AttributeValuesArgs, ColumnProfileArgs,
+    CreateDashboardArgs, DescribeSchemaArgs, ExplainArgs, GetDashboardArgs, ListAttributesArgs,
+    ListDashboardsArgs, ListMetricsArgs, ListTablesArgs, OverviewArgs, RenameDashboardArgs,
+    RunSeqlArgs, RunSqlArgs, SampleArgs, TimeRangeArgs, UpdateChartArgs, ValidateSeqlArgs,
 };
 use super::{OpError, Tools};
 
@@ -32,8 +34,12 @@ pub struct ToolSpec {
 /// The names of every tool this assistant executes in-process. Used by the
 /// middleware model to tell *our* tool calls from a caller's own tools.
 pub const TOOL_NAMES: &[&str] = &[
+    "overview",
     "list_tables",
     "describe_schema",
+    "list_attributes",
+    "attribute_values",
+    "list_metrics",
     "column_profile",
     "time_range",
     "sample",
@@ -41,6 +47,13 @@ pub const TOOL_NAMES: &[&str] = &[
     "run_sql",
     "validate_seql",
     "run_seql",
+    "list_dashboards",
+    "get_dashboard",
+    "create_dashboard",
+    "rename_dashboard",
+    "add_chart",
+    "update_chart",
+    "arrange_dashboard",
 ];
 
 /// Is `name` one of our in-process tools (vs. a caller-provided tool)?
@@ -56,6 +69,11 @@ fn schema<T: JsonSchema>() -> serde_json::Value {
 pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
+            name: "overview",
+            description: "Orient yourself: per-signal-table row counts and time spans, flagging empty tables. Call this first.",
+            parameters: schema::<OverviewArgs>(),
+        },
+        ToolSpec {
             name: "list_tables",
             description: "List the queryable signal tables (spans, logs, datapoints, …) and their time columns.",
             parameters: schema::<ListTablesArgs>(),
@@ -64,6 +82,21 @@ pub fn specs() -> Vec<ToolSpec> {
             name: "describe_schema",
             description: "Show a signal table's columns and Arrow types. Call before writing a query.",
             parameters: schema::<DescribeSchemaArgs>(),
+        },
+        ToolSpec {
+            name: "list_attributes",
+            description: "Enumerate the attribute keys present on a table: promoted (populated) columns plus common overflow-map keys (or resource/scope keys). Observability data is dominated by attributes — use this to discover real keys before filtering on attr.<key>.",
+            parameters: schema::<ListAttributesArgs>(),
+        },
+        ToolSpec {
+            name: "attribute_values",
+            description: "The most-frequent values of a given attribute key (promoted column or overflow key) — e.g. which http.route or service values exist.",
+            parameters: schema::<AttributeValuesArgs>(),
+        },
+        ToolSpec {
+            name: "list_metrics",
+            description: "List available metrics with their type, unit, and series cardinality. Use before charting a metric.",
+            parameters: schema::<ListMetricsArgs>(),
         },
         ToolSpec {
             name: "column_profile",
@@ -100,6 +133,41 @@ pub fn specs() -> Vec<ToolSpec> {
             description: "Execute a SeQL query and summarize its result: shape, columns, row count, sample rows, and stats. The final answer must be a SeQL query.",
             parameters: schema::<RunSeqlArgs>(),
         },
+        ToolSpec {
+            name: "list_dashboards",
+            description: "List saved dashboards with ids, titles, and chart counts.",
+            parameters: schema::<ListDashboardsArgs>(),
+        },
+        ToolSpec {
+            name: "get_dashboard",
+            description: "Show a dashboard's full layout — rows/heights and each chart's [row,col] position, title, weight, type, and query. Read this before editing to get chart indices.",
+            parameters: schema::<GetDashboardArgs>(),
+        },
+        ToolSpec {
+            name: "create_dashboard",
+            description: "Create a new empty dashboard with a title.",
+            parameters: schema::<CreateDashboardArgs>(),
+        },
+        ToolSpec {
+            name: "rename_dashboard",
+            description: "Rename an existing dashboard.",
+            parameters: schema::<RenameDashboardArgs>(),
+        },
+        ToolSpec {
+            name: "add_chart",
+            description: "Add a chart (a SeQL query + title + optional type) to a dashboard, either into an existing row at a position/weight or as a new full-width row.",
+            parameters: schema::<AddChartArgs>(),
+        },
+        ToolSpec {
+            name: "update_chart",
+            description: "Edit an existing chart's title, query, and/or type by its [row,col] position.",
+            parameters: schema::<UpdateChartArgs>(),
+        },
+        ToolSpec {
+            name: "arrange_dashboard",
+            description: "Rearrange a dashboard: place existing charts into new rows/columns with new widths (weights) and row heights. Charts are referenced by current position; unlisted charts are dropped. Use to move, resize, and reorder in one call.",
+            parameters: schema::<ArrangeDashboardArgs>(),
+        },
     ]
 }
 
@@ -130,8 +198,12 @@ pub async fn invoke(tools: &Tools, name: &str, args: serde_json::Value) -> Resul
     }
 
     let result: Result<String, OpError> = match name {
+        "overview" => tools.overview(parse(args)?).await,
         "list_tables" => tools.list_tables(parse(args)?).await,
         "describe_schema" => tools.describe_schema(parse(args)?).await,
+        "list_attributes" => tools.list_attributes(parse(args)?).await,
+        "attribute_values" => tools.attribute_values(parse(args)?).await,
+        "list_metrics" => tools.list_metrics(parse(args)?).await,
         "column_profile" => tools.column_profile(parse(args)?).await,
         "time_range" => tools.time_range(parse(args)?).await,
         "sample" => tools.sample(parse(args)?).await,
@@ -139,6 +211,13 @@ pub async fn invoke(tools: &Tools, name: &str, args: serde_json::Value) -> Resul
         "run_sql" => tools.run_sql(parse(args)?).await,
         "validate_seql" => tools.validate_seql(parse(args)?).await,
         "run_seql" => tools.run_seql(parse(args)?).await,
+        "list_dashboards" => tools.list_dashboards(parse(args)?).await,
+        "get_dashboard" => tools.get_dashboard(parse(args)?).await,
+        "create_dashboard" => tools.create_dashboard(parse(args)?).await,
+        "rename_dashboard" => tools.rename_dashboard(parse(args)?).await,
+        "add_chart" => tools.add_chart(parse(args)?).await,
+        "update_chart" => tools.update_chart(parse(args)?).await,
+        "arrange_dashboard" => tools.arrange_dashboard(parse(args)?).await,
         other => return Err(format!("unknown tool: {other}")),
     };
     result.map_err(|e| e.to_string())

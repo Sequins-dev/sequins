@@ -14,10 +14,8 @@
 
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -35,6 +33,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::model::{AgentEvent, SequinsAssistantModel};
+use crate::wire::{self, bad_request, model_not_found, new_id, parse_arguments, unix_secs};
 
 /// Router state: the model registry plus the optional app-state store that
 /// persists conversations (when `store` is set on the request).
@@ -70,7 +69,6 @@ where
 
     let response_id = new_id("resp");
     let store = state.store.clone();
-    let do_store = req.store.unwrap_or(true) && store.is_some();
 
     // Resolve the conversation this turn belongs to (existing) — a new one is
     // created at persist time if none is referenced.
@@ -89,13 +87,7 @@ where
     }
 
     let model_id = req.model.clone();
-    let persist = do_store.then(|| PersistTurn {
-        store: store.clone().unwrap(),
-        conversation_id: conversation_id.clone(),
-        title: derive_title(&req),
-        input_items: input_conversation_items(&req),
-        response_id: response_id.clone(),
-    });
+    let persist = PersistTurn::build(&store, &req, &conversation_id, &response_id);
 
     if req.stream {
         stream_response(
@@ -109,10 +101,7 @@ where
         .into_response()
     } else {
         let events: Vec<AgentEvent> = model.run_events(completion_req).collect().await;
-        let conversation_id = match persist {
-            Some(p) => p.run(&events).await.or(conversation_id),
-            None => conversation_id,
-        };
+        let conversation_id = PersistTurn::finish(persist, &events, conversation_id).await;
         Json(build_response_object(
             &model_id,
             &response_id,
@@ -133,6 +122,40 @@ struct PersistTurn {
 }
 
 impl PersistTurn {
+    /// Build the persist descriptor for a turn, or `None` when persistence is off
+    /// (no store configured, or `store: false` on the request).
+    fn build(
+        store: &Option<Arc<AppStateStore>>,
+        req: &ResponsesRequest,
+        conversation_id: &Option<String>,
+        response_id: &str,
+    ) -> Option<Self> {
+        let store = store.clone()?;
+        if !req.store.unwrap_or(true) {
+            return None;
+        }
+        Some(PersistTurn {
+            store,
+            conversation_id: conversation_id.clone(),
+            title: derive_title(req),
+            input_items: input_conversation_items(req),
+            response_id: response_id.to_string(),
+        })
+    }
+
+    /// Persist (if enabled) and resolve the continuation conversation id, falling back
+    /// to `fallback` when persistence is off or fails.
+    async fn finish(
+        persist: Option<Self>,
+        events: &[AgentEvent],
+        fallback: Option<String>,
+    ) -> Option<String> {
+        match persist {
+            Some(p) => p.run(events).await.or(fallback),
+            None => fallback,
+        }
+    }
+
     /// Persist the turn; returns the (possibly newly created) conversation id.
     async fn run(self, events: &[AgentEvent]) -> Option<String> {
         let output_items: Vec<ConversationItem> = events
@@ -183,14 +206,10 @@ fn prepend_history(request: &mut CompletionRequest, conv: &sequins_metadata::Con
         if item.item_type != "message" {
             continue;
         }
-        let text = item.text.clone().unwrap_or_default();
-        match item.role.as_str() {
-            "assistant" => prior.push(Message::assistant(text)),
-            "system" | "developer" => prior.push(Message::System { content: text }),
-            _ => prior.push(Message::User {
-                content: OneOrMany::one(UserContent::Text(Text::new(text))),
-            }),
-        }
+        prior.push(message_for_role(
+            &item.role,
+            item.text.clone().unwrap_or_default(),
+        ));
     }
     if prior.is_empty() {
         return;
@@ -320,16 +339,7 @@ fn build_completion_request(req: &ResponsesRequest) -> Result<CompletionRequest,
             for item in items {
                 match item {
                     InputItem::Message { role, content } => {
-                        let text = content.text();
-                        match role.as_str() {
-                            "assistant" => history.push(Message::assistant(text)),
-                            "system" | "developer" => {
-                                history.push(Message::System { content: text })
-                            }
-                            _ => history.push(Message::User {
-                                content: OneOrMany::one(UserContent::Text(Text::new(text))),
-                            }),
-                        }
+                        history.push(message_for_role(role, content.text()));
                     }
                     InputItem::FunctionCall {
                         call_id,
@@ -367,18 +377,28 @@ fn build_completion_request(req: &ResponsesRequest) -> Result<CompletionRequest,
         .filter_map(ResponsesTool::as_definition)
         .collect();
 
-    Ok(CompletionRequest {
-        model: None,
-        preamble: req.instructions.clone(),
-        chat_history,
-        documents: Vec::new(),
-        tools,
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-    })
+    // `instructions` becomes the preamble (the middleware merges it with the SeQL
+    // grounding).
+    let mut request = wire::base_completion_request(req.instructions.clone(), chat_history, tools);
+    // A requested reasoning effort becomes `reasoning_effort` on the backing request; the
+    // middleware reconciles it with the model if the value isn't supported.
+    if let Some(effort) = req.reasoning.as_ref().and_then(|r| r.effort.as_deref()) {
+        request.additional_params = Some(json!({ "reasoning_effort": effort }));
+    }
+    Ok(request)
+}
+
+/// A Rig chat [`Message`] for a plain-text item of the given role (`assistant` /
+/// `system`|`developer` / everything-else-as-user). Shared by request translation and
+/// server-side history replay.
+fn message_for_role(role: &str, text: String) -> Message {
+    match role {
+        "assistant" => Message::assistant(text),
+        "system" | "developer" => Message::System { content: text },
+        _ => Message::User {
+            content: OneOrMany::one(UserContent::Text(Text::new(text))),
+        },
+    }
 }
 
 /// Stream the agentic loop as Responses-API SSE events, surfacing every server tool
@@ -434,10 +454,7 @@ where
 
         // Persist the completed turn; the (possibly new) conversation id goes on the
         // terminal event so the client can continue via `previous_response_id`.
-        let final_conversation = match persist {
-            Some(p) => p.run(&collected).await.or(conversation_id),
-            None => conversation_id,
-        };
+        let final_conversation = PersistTurn::finish(persist, &collected, conversation_id).await;
 
         if let Some(msg) = failed {
             let resp = response_object(&model_id, &response_id, final_conversation.as_deref(), "failed", &output, Some(&msg));
@@ -553,10 +570,6 @@ fn sse(event: &str, data: serde_json::Value) -> Result<Event, Infallible> {
     Ok(Event::default().event(event).data(data.to_string()))
 }
 
-fn parse_arguments(arguments: &str) -> serde_json::Value {
-    serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null)
-}
-
 // ---------------------------------------------------------------------------
 // Assistant façade — one AgentEvent-style stream for Local and Remote, used by
 // the FFI so Swift has a single interface regardless of backend.
@@ -662,14 +675,7 @@ fn local_chat<B: CompletionModel + Send + Sync + 'static>(
                 prepend_history(&mut completion_req, &conv);
             }
         }
-        let do_store = req.store.unwrap_or(true) && store.is_some();
-        let persist = do_store.then(|| PersistTurn {
-            store: store.clone().unwrap(),
-            conversation_id: conversation_id.clone(),
-            title: derive_title(&req),
-            input_items: input_conversation_items(&req),
-            response_id: response_id.clone(),
-        });
+        let persist = PersistTurn::build(&store, &req, &conversation_id, &response_id);
 
         let events = model.run_events(completion_req);
         futures::pin_mut!(events);
@@ -690,10 +696,7 @@ fn local_chat<B: CompletionModel + Send + Sync + 'static>(
             }
             collected.push(event);
         }
-        let final_conversation = match persist {
-            Some(p) => p.run(&collected).await.or(conversation_id),
-            None => conversation_id,
-        };
+        let final_conversation = PersistTurn::finish(persist, &collected, conversation_id).await;
         yield ChatEvent::Done { response_id, conversation_id: final_conversation };
     }
 }
@@ -833,6 +836,16 @@ struct ResponsesRequest {
     /// Explicit conversation id to append to.
     #[serde(default)]
     conversation: Option<String>,
+    /// Reasoning controls (Responses API `reasoning: { effort }`). The effort is applied
+    /// as `reasoning_effort` on the backing Chat Completions request.
+    #[serde(default)]
+    reasoning: Option<ReasoningConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReasoningConfig {
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -910,51 +923,12 @@ struct ResponsesTool {
 impl ResponsesTool {
     fn as_definition(&self) -> Option<ToolDefinition> {
         let name = self.name.clone()?;
-        Some(ToolDefinition {
+        Some(wire::tool_definition(
             name,
-            description: self.description.clone().unwrap_or_default(),
-            parameters: self.parameters.clone().unwrap_or_else(|| json!({})),
-        })
+            self.description.clone(),
+            self.parameters.clone(),
+        ))
     }
-}
-
-// ---------------------------------------------------------------------------
-// Errors + small helpers
-// ---------------------------------------------------------------------------
-
-fn model_not_found(model: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::NOT_FOUND,
-        Json(json!({ "error": {
-            "message": format!("The model '{model}' does not exist or is not configured."),
-            "type": "invalid_request_error",
-            "code": "model_not_found",
-        }})),
-    )
-}
-
-fn bad_request(message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({ "error": { "message": message, "type": "invalid_request_error" } })),
-    )
-}
-
-fn unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-fn new_id(prefix: &str) -> String {
-    format!(
-        "{prefix}_{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    )
 }
 
 #[cfg(test)]

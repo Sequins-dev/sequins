@@ -1181,6 +1181,21 @@ fn predicate_to_expr(
             Ok(inner_expr.not())
         }
         Predicate::Compare(cmp) => {
+            // `field == null` / `field != null` is a natural idiom, but SQL's
+            // three-valued logic makes `col = NULL` and `col <> NULL` evaluate to NULL
+            // for every row — silently dropping the entire result. Interpret an
+            // equality/inequality against a `null` literal as `IS NULL` / `IS NOT NULL`
+            // so the query does what's meant.
+            let null_on_right = matches!(cmp.right, AstExpr::Literal(Literal::Null));
+            let null_on_left = matches!(cmp.left, AstExpr::Literal(Literal::Null));
+            if (null_on_right || null_on_left) && matches!(cmp.op, CompareOp::Eq | CompareOp::Neq) {
+                let field_side = if null_on_right { &cmp.left } else { &cmp.right };
+                let expr = ast_expr_to_df_expr(field_side, schema, signal, ctx)?;
+                return Ok(match cmp.op {
+                    CompareOp::Eq => expr.is_null(),
+                    _ => expr.is_not_null(),
+                });
+            }
             let left = ast_expr_to_df_expr(&cmp.left, schema, signal, ctx)?;
             let right = ast_expr_to_df_expr(&cmp.right, schema, signal, ctx)?;
             Ok(match cmp.op {

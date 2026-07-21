@@ -61,8 +61,7 @@ fn default_weight() -> f64 {
 /// A saved dashboard — a titled, ordered stack of full-width [`DashboardRow`]s.
 ///
 /// The layout is a flexbox of rows: each row has a height and fills the full width,
-/// splitting it among its panels by relative weight. Legacy free-grid dashboards
-/// (`panels` with `x/y/w/h`) are migrated into rows by [`Dashboard::migrate_legacy`].
+/// splitting it among its panels by relative weight.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dashboard {
     pub id: String,
@@ -71,52 +70,12 @@ pub struct Dashboard {
     pub updated_at_ns: u64,
     #[serde(default)]
     pub rows: Vec<DashboardRow>,
-    /// Legacy free-grid panels — read from old stored dashboards, migrated into
-    /// `rows`, and never re-serialized once migrated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub panels: Vec<Panel>,
 }
 
 impl Dashboard {
     /// Total number of panels across all rows.
     pub fn panel_count(&self) -> usize {
         self.rows.iter().map(|r| r.panels.len()).sum()
-    }
-
-    /// Convert any legacy `panels` (free x/y/w/h grid) into `rows`: panels are grouped
-    /// into rows by their `y`, ordered left-to-right by `x`, with each panel's width
-    /// `w` becoming its row weight. Idempotent; a no-op once migrated.
-    pub fn migrate_legacy(&mut self) {
-        if self.panels.is_empty() {
-            return;
-        }
-        let mut legacy = std::mem::take(&mut self.panels);
-        legacy.sort_by_key(|p| (p.layout.y, p.layout.x));
-        let mut rows: Vec<DashboardRow> = Vec::new();
-        let mut current_y: Option<u32> = None;
-        for p in legacy {
-            let weight = if p.layout.w == 0 {
-                1.0
-            } else {
-                p.layout.w as f64
-            };
-            let row_panel = RowPanel {
-                visualization: p.visualization,
-                weight,
-            };
-            if current_y == Some(p.layout.y) {
-                rows.last_mut().unwrap().panels.push(row_panel);
-            } else {
-                current_y = Some(p.layout.y);
-                rows.push(DashboardRow {
-                    height: DEFAULT_ROW_HEIGHT,
-                    panels: vec![row_panel],
-                });
-            }
-        }
-        // Prepend migrated rows before any rows that already exist (there shouldn't be).
-        rows.append(&mut self.rows);
-        self.rows = rows;
     }
 }
 
@@ -149,15 +108,6 @@ pub struct RowPanel {
     pub weight: f64,
 }
 
-/// A legacy free-grid panel: a saved visualization plus its old `x/y/w/h` layout.
-/// Retained only to deserialize and migrate older dashboards.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Panel {
-    pub visualization: SavedVisualization,
-    #[serde(default)]
-    pub layout: Layout,
-}
-
 /// A visualization the app can re-render: a SeQL query, a title, and an optional
 /// requested `ResponseShape` (as its `as_str()` form, e.g. `"timeseries"`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,17 +116,4 @@ pub struct SavedVisualization {
     pub title: String,
     #[serde(default)]
     pub shape: Option<String>,
-}
-
-/// Legacy grid placement of a panel within a dashboard (pre-rows layout).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Layout {
-    #[serde(default)]
-    pub x: u32,
-    #[serde(default)]
-    pub y: u32,
-    #[serde(default)]
-    pub w: u32,
-    #[serde(default)]
-    pub h: u32,
 }

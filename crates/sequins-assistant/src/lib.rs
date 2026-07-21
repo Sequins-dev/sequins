@@ -14,6 +14,7 @@ pub mod model;
 pub mod responses;
 pub mod serve;
 pub mod tools;
+mod wire;
 
 pub use config::{
     build_backing_model, build_registry, AssistantConfig, BackingModel, ModelConfig, ModelRegistry,

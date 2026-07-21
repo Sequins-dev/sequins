@@ -441,6 +441,13 @@ typedef struct CSchemaFrame {
    */
   char **column_names;
   /**
+   * Per-column semantic role codes (parallel to `column_names`), so renderers can
+   * tell dimensions (group keys/fields) from measures (aggregations/computed):
+   * 0=group_key, 1=aggregation, 2=field, 3=computed, 4=navigation, 5=trace_group,
+   * 6=row_id.
+   */
+  uint32_t *column_roles;
+  /**
    * Watermark at query start (nanoseconds since epoch)
    */
   uint64_t initial_watermark_ns;
@@ -1591,6 +1598,15 @@ bool sequins_dashboard_save(struct CDataSource *data_source,
  * `data_source`/`id` must be valid; `error_out` is an out-param.
  */
 bool sequins_dashboard_delete(struct CDataSource *data_source, const char *id, char **error_out);
+
+/**
+ * Delete a persisted conversation by id (in-memory + durable). Local only; remote
+ * connections report an error until the daemon exposes conversation deletion.
+ *
+ * # Safety
+ * `data_source`/`id` must be valid; `error_out` is an out-param.
+ */
+bool sequins_conversation_delete(struct CDataSource *data_source, const char *id, char **error_out);
 
 /**
  * Create a new local data source with embedded storage

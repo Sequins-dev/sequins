@@ -87,9 +87,6 @@ pub struct ModelConfig {
     /// Environment variable holding the API key (default `SEQUINS_ASSISTANT_API_KEY`).
     #[serde(default)]
     pub api_key_env: Option<String>,
-    /// Optional sampling temperature (reserved for future per-model defaults).
-    #[serde(default)]
-    pub temperature: Option<f64>,
 }
 
 /// Errors building the model registry.
@@ -232,7 +229,6 @@ mod tests {
                 base_url: None,
                 model: "gpt-4o".into(),
                 api_key_env: Some("SEQUINS_ASSISTANT_KEY_DEFINITELY_UNSET".into()),
-                temperature: None,
             }],
             grounding: None,
             auto_from_env: false,

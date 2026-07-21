@@ -53,12 +53,6 @@ impl<B: CompletionModel> SequinsAssistantModel<B> {
         self
     }
 
-    /// Override the in-process tool-call round cap.
-    pub fn with_max_tool_turns(mut self, turns: usize) -> Self {
-        self.max_tool_turns = turns.max(1);
-        self
-    }
-
     /// Inject our grounding into the preamble and our tool defs into the request,
     /// without dropping anything the caller supplied.
     fn inject(&self, request: &mut CompletionRequest) {
@@ -95,7 +89,7 @@ impl<B: CompletionModel> SequinsAssistantModel<B> {
         self.inject(&mut request);
 
         for _ in 0..self.max_tool_turns {
-            let response = self.backing.completion(request.clone()).await?;
+            let response = self.complete(&mut request).await?;
 
             let mut our_calls: Vec<ToolCall> = Vec::new();
             let mut has_foreign = false;
@@ -143,7 +137,8 @@ impl<B: CompletionModel> SequinsAssistantModel<B> {
                 .map(AssistantContent::ToolCall)
                 .collect();
             request.chat_history.push(Message::Assistant {
-                id: response_id(&response),
+                // Providers don't reliably supply an assistant message id here.
+                id: None,
                 content: OneOrMany::many(assistant_content)
                     .expect("our_calls is non-empty in this branch"),
             });
@@ -173,7 +168,7 @@ impl<B: CompletionModel> SequinsAssistantModel<B> {
 
         // Exhausted the tool-turn budget: one final call with no tools, forcing text.
         request.tools.clear();
-        let response = self.backing.completion(request).await?;
+        let response = self.complete(&mut request).await?;
         for content in response.choice.iter() {
             if let AssistantContent::Text(t) = content {
                 if !t.text.is_empty() {
@@ -182,6 +177,31 @@ impl<B: CompletionModel> SequinsAssistantModel<B> {
             }
         }
         Ok(response)
+    }
+
+    /// Run one backing completion, reconciling `reasoning_effort` with the model when the
+    /// provider rejects the request over it, then persisting the fix on `request` so later
+    /// tool turns keep it.
+    ///
+    /// `reasoning_effort` is model-specific and can't be sent unconditionally: newer
+    /// reasoning models (e.g. `gpt-5.6-*`) *require* `"none"` for function tools, some
+    /// models reject the value `"none"`, and non-reasoning models (e.g. `gpt-4o`) reject
+    /// the parameter entirely. So on a reasoning-effort error we escalate the adjustment —
+    /// try `"none"`, then drop the parameter — until it's accepted (at most twice).
+    async fn complete(
+        &self,
+        request: &mut CompletionRequest,
+    ) -> Result<CompletionResponse<B::Response>, CompletionError> {
+        let mut adjustments = 0;
+        loop {
+            match self.backing.completion(request.clone()).await {
+                Err(e) if mentions_reasoning_effort(&e) && adjustments < 2 => {
+                    adjustments += 1;
+                    adjust_reasoning_effort(request);
+                }
+                other => return other,
+            }
+        }
     }
 
     /// Run the agentic loop as a live [`AgentEvent`] stream — used by the Responses
@@ -292,6 +312,65 @@ impl GetTokenUsage for MiddlewareStreamResponse {
     }
 }
 
+/// Whether a completion error is the provider complaining about `reasoning_effort` (an
+/// unsupported value, an unrecognized parameter, or the gpt-5.6-style "function tools …
+/// set reasoning_effort to 'none'").
+fn mentions_reasoning_effort(error: &CompletionError) -> bool {
+    error
+        .to_string()
+        .to_lowercase()
+        .contains("reasoning_effort")
+}
+
+/// The request's current `reasoning_effort` value, if any.
+fn reasoning_effort_value(request: &CompletionRequest) -> Option<String> {
+    request
+        .additional_params
+        .as_ref()
+        .and_then(|params| params.get("reasoning_effort"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// Escalate the reasoning-effort adjustment one step toward acceptance: with no effort
+/// (or a rejected non-`"none"` effort), try `"none"`; if even `"none"` was rejected, drop
+/// the parameter so the model uses its default.
+fn adjust_reasoning_effort(request: &mut CompletionRequest) {
+    match reasoning_effort_value(request).as_deref() {
+        Some("none") => remove_reasoning_effort(request),
+        _ => set_reasoning_effort_none(request),
+    }
+}
+
+/// Set `reasoning_effort: "none"` in the request's flattened `additional_params`.
+fn set_reasoning_effort_none(request: &mut CompletionRequest) {
+    let mut params = request
+        .additional_params
+        .take()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = params.as_object_mut() {
+        obj.insert("reasoning_effort".to_string(), serde_json::json!("none"));
+    } else {
+        params = serde_json::json!({ "reasoning_effort": "none" });
+    }
+    request.additional_params = Some(params);
+}
+
+/// Remove `reasoning_effort` from `additional_params`, clearing the map entirely when it
+/// becomes empty.
+fn remove_reasoning_effort(request: &mut CompletionRequest) {
+    if let Some(obj) = request
+        .additional_params
+        .as_mut()
+        .and_then(|params| params.as_object_mut())
+    {
+        obj.remove("reasoning_effort");
+        if obj.is_empty() {
+            request.additional_params = None;
+        }
+    }
+}
+
 /// Return a copy of `response` with any of *our* tool calls removed from its choice,
 /// so a caller only ever sees text and its own tool calls.
 fn strip_our_tool_calls<R>(response: CompletionResponse<R>) -> CompletionResponse<R> {
@@ -311,11 +390,6 @@ fn strip_our_tool_calls<R>(response: CompletionResponse<R>) -> CompletionRespons
         raw_response: response.raw_response,
         message_id: response.message_id,
     }
-}
-
-/// Best-effort assistant message id (providers don't always supply one).
-fn response_id<R>(_response: &CompletionResponse<R>) -> Option<String> {
-    None
 }
 
 /// The default SeQL system grounding. Includes a compact SeQL syntax cheatsheet with
@@ -357,19 +431,43 @@ Every query begins with a signal and a mandatory time scope, then optional `|` s
 - Avg latency over time:       `spans last 1h | group by { ts() bin 1m as bucket } { avg(duration_ns) as avg_ns }`
 - Error logs per minute:       `logs last 1h | where severity_number >= 17 | group by { ts() bin 1m as bucket } { count() as errors }`
 
-## Workflow
+## Exploring the data
 
-Ground names with `list_tables` / `describe_schema` only if unsure. Write ONE SeQL query
-using the rules above. If `validate_seql` fails, read `error.message`/`offset`, FIX the
-query per the syntax above, and validate AT MOST once or twice more — do not loop.
+Prefer discovery tools over guessing — observability data is dominated by attributes:
+- `overview` — row counts + time spans per table; skip empty tables. Call first when unsure.
+- `list_attributes(table)` — the real attribute keys present (promoted + custom). Call this
+  before filtering on `attr.<key>`; don't guess key names.
+- `attribute_values(table, key)` — the actual values of a key (e.g. which `http.route`s exist).
+- `list_metrics` — metric names/types/units; `describe_schema(table)` for columns.
+- To keep rows where a field is present, write `where http_route != null` (it means IS NOT
+  NULL). Bare promoted attrs (e.g. `http_route`, `http_status_code`) are real columns.
 
-Client tools for showing results (call with the final SeQL `query`, a short `title`, and
-an optional `chart_type` like `line`/`bar`/`stat`/`table`):
-- `render_visualization` — show a chart INLINE in the chat. Use for a one-off answer.
-- `add_to_dashboard` — SAVE a chart to a dashboard given a `dashboard` NAME (created if it
-  doesn't exist). Use when the user asks to add a chart to, or build/populate, a dashboard.
+## Presenting results
 
-The app re-runs the query to render it."#
+- `render_visualization(query, title, chart_type?)` — show a chart INLINE in the chat for a
+  one-off answer. `chart_type` is optional (`line`/`bar`/`stat`/`table`/`heatmap`/…); omit to
+  auto-select. The app re-runs the query to render it.
+
+## Dashboards
+
+Read before you edit, and address charts by position:
+- `list_dashboards` / `get_dashboard(dashboard)` — see dashboards and each chart's `[row,col]`
+  position, title, weight, type, and query. Always `get_dashboard` before editing.
+- `create_dashboard(title)` then `add_chart(dashboard, query, title, chart_type?, row?,
+  position?, weight?)` — build/populate. Omit `row` to add a new full-width row; give `row`
+  (and `position`/`weight`) to place charts side by side.
+- `update_chart(dashboard, row, column, …)` — edit a chart's title/query/type.
+- `arrange_dashboard(dashboard, rows:[{height?, panels:[{from_row, from_column, weight?}]}])` —
+  move/resize/reorder in one call. Charts are referenced by current position; set `weight` for
+  column-width ratios and `height` for rows. Charts you omit are removed.
+- Deleting a dashboard or removing a chart requires the user's approval — propose it and let
+  them confirm; do not assume.
+
+## Query workflow
+
+Ground names with the discovery tools only if unsure. Write ONE SeQL query using the rules
+above. If `validate_seql` fails, read `error.message`/`offset`, FIX the query, and validate AT
+MOST once or twice more — do not loop."#
         .to_string()
 }
 

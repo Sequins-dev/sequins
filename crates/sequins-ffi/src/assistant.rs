@@ -153,7 +153,11 @@ pub unsafe extern "C" fn sequins_assistant_new(
                         return std::ptr::null_mut();
                     }
                 };
-            let tools = sequins_assistant::Tools::new(Arc::clone(backend));
+            // Give the tool layer the local dashboard store so the assistant can read and
+            // edit dashboards (`Storage` implements `DashboardApi`).
+            let dashboards: Arc<dyn sequins_metadata::DashboardApi> = storage.clone();
+            let tools =
+                sequins_assistant::Tools::new(Arc::clone(backend)).with_dashboards(dashboards);
             let model = sequins_assistant::SequinsAssistantModel::new(backing, tools);
             Assistant::local(model, Some(Arc::clone(storage.app_state())))
         }
