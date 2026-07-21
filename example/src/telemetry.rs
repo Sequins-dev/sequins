@@ -4,10 +4,17 @@ use opentelemetry_sdk::{runtime, trace::TracerProvider, Resource};
 use std::time::Duration;
 use tracing_subscriber::prelude::*;
 
+/// OTLP/gRPC endpoint for traces, logs, and metrics. Honors the standard
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` env var, defaulting to a local daemon.
+pub fn otlp_grpc_endpoint() -> String {
+    std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .unwrap_or_else(|_| "http://localhost:4317".to_string())
+}
+
 pub fn init_logs() -> opentelemetry_sdk::logs::LoggerProvider {
     let exporter = opentelemetry_otlp::new_exporter()
         .tonic()
-        .with_endpoint("http://localhost:4317");
+        .with_endpoint(otlp_grpc_endpoint());
 
     let logger_provider = opentelemetry_otlp::new_pipeline()
         .logging()
@@ -37,7 +44,7 @@ pub fn init_logs() -> opentelemetry_sdk::logs::LoggerProvider {
 pub fn init_tracer() -> TracerProvider {
     let exporter = opentelemetry_otlp::new_exporter()
         .tonic()
-        .with_endpoint("http://localhost:4317");
+        .with_endpoint(otlp_grpc_endpoint());
 
     opentelemetry_otlp::new_pipeline()
         .tracing()
@@ -52,7 +59,7 @@ pub fn init_tracer() -> TracerProvider {
 pub fn init_metrics() -> opentelemetry_sdk::metrics::SdkMeterProvider {
     let exporter = opentelemetry_otlp::new_exporter()
         .tonic()
-        .with_endpoint("http://localhost:4317");
+        .with_endpoint(otlp_grpc_endpoint());
 
     opentelemetry_otlp::new_pipeline()
         .metrics(runtime::Tokio)

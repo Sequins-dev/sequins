@@ -72,3 +72,97 @@ extension TimeRange {
         .absolute(start: Date(timeIntervalSince1970: 0), end: Date())
     }
 }
+
+// MARK: - SeQL time-scope rewriting
+
+extension TimeRange {
+    /// SeQL scan-position signal keywords (the mandatory leading token of a query).
+    private static let signalKeywords: Set<String> = [
+        "spans", "span_links", "logs", "datapoints", "histograms", "metrics",
+        "samples", "traces", "profiles", "stacks", "frames", "mappings",
+        "resources", "scopes",
+    ]
+
+    /// The SeQL scan-level time-scope clause for this range:
+    /// `last <dur>` for relative, `between(<startNs>, <endNs>)` for absolute.
+    public var seqlTimeScope: String {
+        switch self {
+        case .relative(let duration):
+            return "last \(TimeRange.durationClause(duration))"
+        case .absolute(let start, let end):
+            let startNs = Int64(start.timeIntervalSince1970 * 1_000_000_000)
+            let endNs = Int64(end.timeIntervalSince1970 * 1_000_000_000)
+            return "between(\(startNs), \(endNs))"
+        }
+    }
+
+    /// Format a duration as a single SeQL duration literal (`<n><unit>`), picking the
+    /// largest exact unit. SeQL has no compound durations, so a non-exact duration
+    /// falls back to whole seconds.
+    private static func durationClause(_ seconds: TimeInterval) -> String {
+        let total = max(1, Int(seconds.rounded()))
+        if total % 86_400 == 0 { return "\(total / 86_400)d" }
+        if total % 3_600 == 0 { return "\(total / 3_600)h" }
+        if total % 60 == 0 { return "\(total / 60)m" }
+        return "\(total)s"
+    }
+
+    /// Rewrite `seql` so its leading `<signal> <time-scope>` uses this range.
+    ///
+    /// SeQL requires a time-scope immediately after the signal keyword, so we replace
+    /// that token. Returns the query unchanged when it doesn't begin with a recognized
+    /// `<signal> <time-scope>` (e.g. the `signal(id)` shorthand), so a query we can't
+    /// safely rewrite is never corrupted.
+    public func applied(to seql: String) -> String {
+        let full = Substring(seql)
+        let leadingWS = full.prefix { $0.isWhitespace }
+        var rest = full.dropFirst(leadingWS.count)
+
+        let signal = rest.prefix { $0.isLetter || $0 == "_" }
+        guard !signal.isEmpty, TimeRange.signalKeywords.contains(String(signal)) else {
+            return seql
+        }
+        rest = rest.dropFirst(signal.count)
+
+        // `signal(id)` shorthand carries no time-scope — leave untouched.
+        if rest.first == "(" { return seql }
+
+        let midWS = rest.prefix { $0.isWhitespace }
+        guard !midWS.isEmpty else { return seql }
+        rest = rest.dropFirst(midWS.count)
+
+        guard let tail = TimeRange.dropTimeScope(rest) else { return seql }
+        return "\(leadingWS)\(signal)\(midWS)\(seqlTimeScope)\(tail)"
+    }
+
+    /// If `s` begins with a SeQL time-scope token, return the remainder after it;
+    /// otherwise `nil`.
+    private static func dropTimeScope(_ s: Substring) -> Substring? {
+        for keyword in ["today", "yesterday"] where s.hasPrefix(keyword) {
+            let tail = s.dropFirst(keyword.count)
+            if tail.isEmpty || tail.first!.isWhitespace || tail.first! == "|" {
+                return tail
+            }
+        }
+
+        if s.hasPrefix("between") {
+            let t = s.dropFirst("between".count).drop { $0.isWhitespace }
+            guard t.first == "(", let close = t.firstIndex(of: ")") else { return nil }
+            return t[t.index(after: close)...]
+        }
+
+        if s.hasPrefix("last") {
+            var t = s.dropFirst("last".count)
+            guard let boundary = t.first, boundary.isWhitespace else { return nil }
+            t = t.drop { $0.isWhitespace }
+            let digits = t.prefix { $0.isNumber }
+            guard !digits.isEmpty else { return nil }
+            t = t.dropFirst(digits.count)
+            if t.hasPrefix("ms") { return t.dropFirst(2) }
+            guard let unit = t.first, "smhd".contains(unit) else { return nil }
+            return t.dropFirst(1)
+        }
+
+        return nil
+    }
+}

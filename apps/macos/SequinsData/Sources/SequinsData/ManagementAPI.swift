@@ -122,12 +122,7 @@ extension DataSource {
         )
 
         if !success {
-            if let errorPtr = errorPtr {
-                let errorMessage = String(cString: errorPtr)
-                sequins_string_free(errorPtr)
-                throw SequinsError.ffiError(errorMessage)
-            }
-            throw SequinsError.nullPointer
+            throw consumeFFIError(errorPtr, fallback: .nullPointer)
         }
     }
 
@@ -151,12 +146,7 @@ extension DataSource {
         )
 
         if !success {
-            if let errorPtr = errorPtr {
-                let errorMessage = String(cString: errorPtr)
-                sequins_string_free(errorPtr)
-                throw SequinsError.ffiError(errorMessage)
-            }
-            throw SequinsError.nullPointer
+            throw consumeFFIError(errorPtr, fallback: .nullPointer)
         }
 
         return RetentionPolicy(cPolicy: cPolicy)
@@ -182,12 +172,7 @@ extension DataSource {
         )
 
         if !success {
-            if let errorPtr = errorPtr {
-                let errorMessage = String(cString: errorPtr)
-                sequins_string_free(errorPtr)
-                throw SequinsError.ffiError(errorMessage)
-            }
-            throw SequinsError.nullPointer
+            throw consumeFFIError(errorPtr, fallback: .nullPointer)
         }
 
         return StorageStats(cStats: cStats)
@@ -208,12 +193,7 @@ extension DataSource {
         )
 
         if !success {
-            if let errorPtr = errorPtr {
-                let errorMessage = String(cString: errorPtr)
-                sequins_string_free(errorPtr)
-                throw SequinsError.ffiError(errorMessage)
-            }
-            throw SequinsError.nullPointer
+            throw consumeFFIError(errorPtr, fallback: .nullPointer)
         }
 
         return deletedCount
@@ -237,12 +217,7 @@ extension DataSource {
         )
 
         if !success {
-            if let errorPtr = errorPtr {
-                let errorMessage = String(cString: errorPtr)
-                sequins_string_free(errorPtr)
-                throw SequinsError.ffiError(errorMessage)
-            }
-            throw SequinsError.nullPointer
+            throw consumeFFIError(errorPtr, fallback: .nullPointer)
         }
 
         return MaintenanceStats(cStats: cStats)

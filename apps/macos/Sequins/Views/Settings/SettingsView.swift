@@ -49,6 +49,9 @@ struct SelectedEnvironmentView: View {
     @Environment(AppStateViewModel.self) private var appState
     @Bindable var environment: ConnectionEnvironment
     @State private var needsReconnect = false
+    /// Assistant API key / bearer token — loaded from and saved to the Keychain (never
+    /// stored in the SwiftData model).
+    @State private var assistantSecret = ""
 
     var body: some View {
         Form {
@@ -95,6 +98,9 @@ struct SelectedEnvironmentView: View {
                 remoteEnvironmentSettings
             }
 
+            // Assistant (AI) configuration
+            assistantSettings
+
             // About section
             Section("About") {
                 LabeledContent("Version", value: "1.0.0")
@@ -102,6 +108,55 @@ struct SelectedEnvironmentView: View {
             }
         }
         .formStyle(.grouped)
+        .task(id: environment.id) {
+            assistantSecret = KeychainStore.shared.assistantSecret(environmentId: environment.id) ?? ""
+        }
+    }
+
+    /// Assistant (AI) configuration. Base URL + model persist on the environment; the
+    /// API key / bearer token is stored in the Keychain. Changes apply on the next chat
+    /// turn (the assistant reads its config fresh each time), so no reconnect is needed.
+    @ViewBuilder
+    private var assistantSettings: some View {
+        Section("Assistant (AI)") {
+            LabeledContent(environment.isLocal ? "Provider Base URL" : "Daemon /v1 URL") {
+                TextField(
+                    environment.isLocal ? "https://api.openai.com/v1" : "http://host:8082/v1",
+                    text: assistantBinding(\.assistantBaseURL)
+                )
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 350)
+            }
+
+            LabeledContent(environment.isLocal ? "API Key" : "Bearer Token") {
+                SecureField("", text: $assistantSecret)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 350)
+                    .onChange(of: assistantSecret) { _, newValue in
+                        KeychainStore.shared.setAssistantSecret(newValue, environmentId: environment.id)
+                    }
+            }
+
+            Text(environment.isLocal
+                ? "OpenAI-compatible provider. Leave the base URL blank for api.openai.com. The API key is stored securely in your Keychain. Pick a model from the list in the Assistant tab."
+                : "The daemon's assistant /v1 endpoint and bearer token. Stored in your Keychain. Pick a model in the Assistant tab.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// A `String` binding over an optional environment field that persists on edit and
+    /// maps empty strings to `nil`.
+    private func assistantBinding(
+        _ keyPath: ReferenceWritableKeyPath<ConnectionEnvironment, String?>
+    ) -> Binding<String> {
+        Binding(
+            get: { environment[keyPath: keyPath] ?? "" },
+            set: {
+                environment[keyPath: keyPath] = $0.isEmpty ? nil : $0
+                appState.environmentManager.updateEnvironment(environment)
+            }
+        )
     }
 
     @ViewBuilder

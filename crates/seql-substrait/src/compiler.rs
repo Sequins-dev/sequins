@@ -5,6 +5,7 @@
 //! embedded in `advanced_extensions.enhancement`.
 
 use arrow::datatypes::DataType as ArrowDataType;
+use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 use datafusion::datasource::provider_as_source;
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::FunctionRegistry;
@@ -1180,6 +1181,21 @@ fn predicate_to_expr(
             Ok(inner_expr.not())
         }
         Predicate::Compare(cmp) => {
+            // `field == null` / `field != null` is a natural idiom, but SQL's
+            // three-valued logic makes `col = NULL` and `col <> NULL` evaluate to NULL
+            // for every row — silently dropping the entire result. Interpret an
+            // equality/inequality against a `null` literal as `IS NULL` / `IS NOT NULL`
+            // so the query does what's meant.
+            let null_on_right = matches!(cmp.right, AstExpr::Literal(Literal::Null));
+            let null_on_left = matches!(cmp.left, AstExpr::Literal(Literal::Null));
+            if (null_on_right || null_on_left) && matches!(cmp.op, CompareOp::Eq | CompareOp::Neq) {
+                let field_side = if null_on_right { &cmp.left } else { &cmp.right };
+                let expr = ast_expr_to_df_expr(field_side, schema, signal, ctx)?;
+                return Ok(match cmp.op {
+                    CompareOp::Eq => expr.is_null(),
+                    _ => expr.is_not_null(),
+                });
+            }
             let left = ast_expr_to_df_expr(&cmp.left, schema, signal, ctx)?;
             let right = ast_expr_to_df_expr(&cmp.right, schema, signal, ctx)?;
             Ok(match cmp.op {
@@ -1453,7 +1469,14 @@ fn group_expr_to_df_expr(
         // E.g., for 5-minute bins: (cast(ts, Int64) / 300_000_000_000) * 300_000_000_000
         let bin_lit = lit(bin_ns as i64);
         let int_expr = cast(expr, ArrowDataType::Int64);
-        (int_expr.clone() / bin_lit.clone()) * bin_lit
+        let binned = (int_expr.clone() / bin_lit.clone()) * bin_lit;
+        // Wrap the binned epoch-nanoseconds back into a Timestamp so the bucket column is
+        // a real temporal type: clients render a proper time axis (Arrow Timestamp →
+        // Swift `Date`) instead of a giant integer, and downstream keeps time semantics.
+        cast(
+            binned,
+            ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+        )
     } else {
         expr
     };

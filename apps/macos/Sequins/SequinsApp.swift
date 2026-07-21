@@ -39,6 +39,17 @@ struct SequinsApp: App {
 
         // Set up notification service
         setupNotifications(appState: state)
+
+        // Demo/QA hook: auto-open the main window on launch when requested, so the
+        // menu-bar app can be driven headlessly. No-op unless the env var is set.
+        if let tabName = ProcessInfo.processInfo.environment["SEQUINS_AUTO_OPEN_WINDOW"] {
+            let tab = NavigationItem(rawValue: tabName) ?? .assistant
+            let launchState = state
+            DispatchQueue.main.async {
+                MainWindowController.shared.showWindow(appState: launchState, selectedTab: tab)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
     }
 
     private func setupNotifications(appState: AppStateViewModel) {

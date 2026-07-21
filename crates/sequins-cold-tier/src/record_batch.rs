@@ -79,14 +79,26 @@ impl ColdTier {
             inner_strategy
         };
 
-        // Get the Arrow schema to create the DType
+        // Convert the Arrow schema + batch to Vortex. `DType::from_arrow` *panics*
+        // (rather than returning an error) on Arrow types Vortex can't represent —
+        // notably the `Map<Utf8, LargeBinary>` overflow-attributes column. A panic on
+        // a background flush worker unwinds the task and can leave shared runtime state
+        // wedged (starving unrelated work, e.g. app-state reads), so contain it here
+        // and surface a normal error: this batch simply isn't flushed to cold.
         let arrow_schema = batch.schema();
-        let dtype = DType::from_arrow(arrow_schema);
-
-        // Convert Arrow RecordBatch to Vortex Array
-        // The false parameter indicates not to preserve nullability
-        let vortex_array = ArrayRef::from_arrow(batch, false)
-            .map_err(|e| Error::Storage(format!("Failed to convert Arrow batch: {}", e)))?;
+        let (dtype, vortex_array) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let dtype = DType::from_arrow(arrow_schema);
+            let array = ArrayRef::from_arrow(batch, false)?;
+            Ok::<(DType, ArrayRef), vortex::error::VortexError>((dtype, array))
+        }))
+        .map_err(|_| {
+            Error::UnsupportedForCold(
+                "Vortex cannot encode this batch's Arrow schema (unsupported type, \
+                 e.g. a Map column); batch not flushed to cold"
+                    .to_string(),
+            )
+        })?
+        .map_err(|e| Error::Storage(format!("Failed to convert Arrow batch: {}", e)))?;
 
         // Create a stream from the single array
         let stream = stream::once(async move { VortexResult::Ok(vortex_array) });
@@ -231,6 +243,39 @@ mod tests {
         assert!(
             result.is_err(),
             "missing column should return an error in release builds"
+        );
+    }
+
+    /// A batch carrying a `Map<Utf8, LargeBinary>` column (the shape of the
+    /// `_overflow_attrs` overflow-attributes column) must fail the cold write with a
+    /// normal `Err` — Vortex *panics* on that Arrow type, and an uncontained panic on
+    /// a flush worker can wedge the shared runtime. See `write_record_batch_at`.
+    #[tokio::test]
+    async fn test_unsupported_map_schema_returns_err_not_panic() {
+        use arrow::array::{Int64Array, LargeBinaryBuilder, MapBuilder, StringBuilder};
+
+        let mut map = MapBuilder::new(None, StringBuilder::new(), LargeBinaryBuilder::new());
+        map.keys().append_value("k");
+        map.values().append_value(b"cbor-bytes");
+        map.append(true).unwrap();
+        let map_array = map.finish();
+
+        let batch = RecordBatch::try_from_iter(vec![
+            ("ts", Arc::new(Int64Array::from(vec![1i64])) as ArrayRef),
+            ("_overflow_attrs", Arc::new(map_array) as ArrayRef),
+        ])
+        .unwrap();
+        let schema = batch.schema();
+
+        let (cold, _tmp) = crate::test_helpers::create_test_cold_tier().await;
+        let result = cold
+            .write_record_batch_at(batch, schema, "spans/unsupported.vortex", None)
+            .await;
+        let err = result.expect_err("a Map column Vortex can't encode must return Err, not panic");
+        assert!(
+            err.is_unsupported_for_cold(),
+            "must be the permanent UnsupportedForCold variant (so the hot tier drops \
+             it instead of retaining → OOM), got {err:?}"
         );
     }
 

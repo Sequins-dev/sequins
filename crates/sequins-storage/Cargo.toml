@@ -17,6 +17,7 @@ sequins-wal        = { workspace = true }
 sequins-live-query = { workspace = true }
 sequins-hot-tier   = { workspace = true }
 sequins-cold-tier  = { workspace = true }
+sequins-metadata   = { workspace = true }
 
 # Arrow + DataFusion
 arrow                = { workspace = true }

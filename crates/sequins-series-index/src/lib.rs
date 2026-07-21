@@ -10,7 +10,7 @@
 pub mod error;
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
@@ -150,6 +150,32 @@ impl SeriesIndex {
     /// Look up series metadata by ID
     pub fn lookup(&self, id: SeriesId) -> Option<&SeriesMetadata> {
         self.reverse_map.get(&id)
+    }
+
+    /// Distinct metric names present in the index.
+    pub fn metric_names(&self) -> BTreeSet<String> {
+        self.reverse_map
+            .values()
+            .map(|m| m.metric_name.clone())
+            .collect()
+    }
+
+    /// Distinct label keys across series, optionally scoped to one metric.
+    pub fn label_keys(&self, metric: Option<&str>) -> BTreeSet<String> {
+        self.reverse_map
+            .values()
+            .filter(|m| metric.map_or(true, |name| m.metric_name == name))
+            .flat_map(|m| m.attributes.keys().cloned())
+            .collect()
+    }
+
+    /// Distinct values for a label key, optionally scoped to one metric.
+    pub fn label_values(&self, key: &str, metric: Option<&str>) -> BTreeSet<String> {
+        self.reverse_map
+            .values()
+            .filter(|m| metric.map_or(true, |name| m.metric_name == name))
+            .filter_map(|m| m.attributes.get(key).cloned())
+            .collect()
     }
 
     /// Find all series matching a metric name and label filters
@@ -355,6 +381,42 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn test_label_enumeration() {
+        let mut index = SeriesIndex::new();
+        index.register(
+            "http_requests",
+            create_attrs(&[("method", "GET"), ("route", "/a")]),
+        );
+        index.register(
+            "http_requests",
+            create_attrs(&[("method", "POST"), ("route", "/b")]),
+        );
+        index.register("cpu_seconds", create_attrs(&[("core", "0")]));
+
+        assert_eq!(
+            index.metric_names(),
+            ["cpu_seconds".to_string(), "http_requests".to_string()]
+                .into_iter()
+                .collect()
+        );
+        // All label keys, and scoped to one metric.
+        assert!(index.label_keys(None).contains("route"));
+        assert!(index.label_keys(None).contains("core"));
+        assert_eq!(
+            index.label_keys(Some("http_requests")),
+            ["method".to_string(), "route".to_string()]
+                .into_iter()
+                .collect()
+        );
+        // Values for a key, scoped to a metric.
+        assert_eq!(
+            index.label_values("route", Some("http_requests")),
+            ["/a".to_string(), "/b".to_string()].into_iter().collect()
+        );
+        assert!(index.label_values("core", Some("http_requests")).is_empty());
     }
 
     #[test]

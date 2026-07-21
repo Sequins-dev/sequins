@@ -183,7 +183,7 @@ pub extern "C" fn sequins_data_source_new_remote(
         }
     };
 
-    let _management_str = unsafe {
+    let management_str = unsafe {
         match CStr::from_ptr(management_url).to_str() {
             Ok(s) => s,
             Err(e) => {
@@ -196,9 +196,10 @@ pub extern "C" fn sequins_data_source_new_remote(
         }
     };
 
-    // Create RemoteClient — synchronous (lazy channel, no actual TCP connection yet)
+    // Create RemoteClient — synchronous (lazy channel, no actual TCP connection yet).
+    // The management URL powers the dashboard REST endpoints.
     let client = match RemoteClient::new(query_str) {
-        Ok(c) => Arc::new(c),
+        Ok(c) => Arc::new(c.with_management_url(Some(management_str.to_string()))),
         Err(e) => {
             set_error(error_out, &format!("Failed to create RemoteClient: {}", e));
             return std::ptr::null_mut();
