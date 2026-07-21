@@ -239,6 +239,24 @@ pub enum Expr {
         /// Arguments
         args: Vec<Expr>,
     },
+    /// A `CASE WHEN <predicate> THEN <expr> ... [ELSE <expr>] END` expression.
+    /// Lowers to a standard SQL `CASE` (so it stays plain-SQL-expressible); it is
+    /// also the desugaring target of the `score()` / `grade()` sugar functions.
+    Case {
+        /// Ordered `WHEN condition THEN result` branches; the first true condition wins.
+        branches: Vec<CaseBranch>,
+        /// Optional `ELSE` result when no branch matches (NULL when absent).
+        otherwise: Option<Box<Expr>>,
+    },
+}
+
+/// One `WHEN <condition> THEN <result>` arm of an [`Expr::Case`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaseBranch {
+    /// The boolean condition guarding this branch.
+    pub condition: Predicate,
+    /// The value produced when `condition` is the first to hold.
+    pub result: Expr,
 }
 
 /// Arithmetic operators
@@ -281,6 +299,18 @@ pub enum ScalarFn {
     Upper,
     /// The signal's primary time column (resolved at compile time)
     Timestamp,
+    /// e^x (natural exponential) — standard SQL `exp()`.
+    Exp,
+    /// First non-null argument — standard SQL `coalesce()`.
+    Coalesce,
+    /// Smallest of the arguments — standard SQL `least()`.
+    Least,
+    /// Largest of the arguments — standard SQL `greatest()`.
+    Greatest,
+    /// Cast to a 64-bit float — `cast(x AS DOUBLE)`. Useful to force float division.
+    ToFloat,
+    /// Cast to a 64-bit integer — `cast(x AS BIGINT)`.
+    ToInt,
 }
 
 /// A reference to a field on a signal row or its attributes

@@ -403,15 +403,17 @@ language (NOT SQL). Do not write SQL in SeQL queries.
 
 ## SeQL syntax (follow exactly)
 
-Every query begins with a signal and a mandatory time scope, then optional `|` stages:
+Every query begins with a signal, then an OPTIONAL time scope, then optional `|` stages:
 
-    <signal> <time-scope> [ | <stage> ]*
+    <signal> [<time-scope>] [ | <stage> ]*
 
 - Signals: `spans`, `logs`, `metrics`, `datapoints`, `histograms`, `profiles`,
   `samples`, `resources`, `scopes`, `span_links`, `span_events`.
-- Time scope (required, right after the signal): `last <dur>` | `today` | `yesterday` |
+- Time scope (optional, right after the signal): `last <dur>` | `today` | `yesterday` |
   `between(<start_ns>, <end_ns>)`. Durations are a single integer + unit
   (`ms`,`s`,`m`,`h`,`d`) — e.g. `15m`, `1h`, `7d`. NO compound durations like `1h30m`.
+  Omit the scope to write a **template** that a dashboard/control bar supplies the range
+  for; a query executed with no range at all errors.
 - Stages (chained with `|`):
   - `where <predicate>` — e.g. `where status == 2`, `where severity_number >= 9`,
     `where attr.http_status_code >= 500`. Combine with `and`/`or`.
@@ -428,6 +430,15 @@ Every query begins with a signal and a mandatory time scope, then optional `|` s
   - `window { <fn> as <name>, … }` — window functions over the time-ordered result (use
     AFTER a time-bucketed `group by`): `moving_avg(<col>, <n>)`, `cumulative(<col>)`,
     `delta(<col>)` (period-over-period change).
+  - `compute <expr> as <name>, …` — derive columns with full expressions (after a
+    `group by`, these operate on the aggregate columns). Arithmetic `+ - * / %` with
+    parentheses; scalar fns `abs/round/ceil/floor/exp/coalesce(a,…)/least(a,…)/greatest(a,…)/
+    float(x)/int(x)`; and `case when <predicate> then <expr> [when …] [else <expr>] end`.
+    Use `float(a)/float(b)` to avoid integer division when computing a rate.
+  - **Thresholded scoring** (health/ranking): `score(value, warn, err)` → a 0..1 score
+    (1=good; linear down to 0.7 at `warn`, 0.3 at `err`, then exp-decays), and
+    `grade(value, warn, err)` → `'healthy'`/`'degraded'`/`'unhealthy'`. Both are sugar
+    over `case`, so they work in `compute`. Higher value = worse.
   - `take <n>` — limit rows. `select <cols>` — project columns.
 
 Time note: on a **dashboard**, the panel's selected range and live toggle are applied for
@@ -443,6 +454,7 @@ like `last 1h` and use `ts() bin 10%` — the chart then follows the dashboard's
 - Latency percentiles:         `spans last 1h | group by {} { p95(duration_ns) as p95, percentile(duration_ns, 0.9) as p90, stddev(duration_ns) as sd }`
 - Throughput by service:       `spans last 1h | group by { service_name } { throughput() as rps }`
 - Error-rate moving average:   `spans last 1h | group by { ts() bin auto as bucket } { error_rate() as er } | window { moving_avg(er, 5) as er_ma }`
+- Health score (thresholds):    `spans last 1h | group by {} { count() where status==2 as errs, count() as total } | compute float(errs)/float(total) as err_rate | compute score(err_rate, 0.01, 0.05) as err_score, grade(err_rate, 0.01, 0.05) as err_status`
 
 ## Exploring the data
 

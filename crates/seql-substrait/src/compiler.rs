@@ -1652,9 +1652,103 @@ pub fn ast_expr_to_df_expr(
                     }
                     Ok(datafusion::prelude::upper(arg_exprs[0].clone()))
                 }
+                ScalarFn::Exp => {
+                    if arg_exprs.len() != 1 {
+                        return Err(QueryError::Execution {
+                            message: "exp() expects 1 argument".into(),
+                        });
+                    }
+                    // Cast to float so integer inputs don't truncate the exponent.
+                    scalar_udf_call(
+                        ctx,
+                        "exp",
+                        vec![cast(arg_exprs[0].clone(), ArrowDataType::Float64)],
+                    )
+                }
+                ScalarFn::Coalesce => {
+                    if arg_exprs.is_empty() {
+                        return Err(QueryError::Execution {
+                            message: "coalesce() expects at least 1 argument".into(),
+                        });
+                    }
+                    scalar_udf_call(ctx, "coalesce", arg_exprs)
+                }
+                ScalarFn::Least => {
+                    if arg_exprs.is_empty() {
+                        return Err(QueryError::Execution {
+                            message: "least() expects at least 1 argument".into(),
+                        });
+                    }
+                    scalar_udf_call(ctx, "least", arg_exprs)
+                }
+                ScalarFn::Greatest => {
+                    if arg_exprs.is_empty() {
+                        return Err(QueryError::Execution {
+                            message: "greatest() expects at least 1 argument".into(),
+                        });
+                    }
+                    scalar_udf_call(ctx, "greatest", arg_exprs)
+                }
+                ScalarFn::ToFloat => {
+                    if arg_exprs.len() != 1 {
+                        return Err(QueryError::Execution {
+                            message: "float() expects 1 argument".into(),
+                        });
+                    }
+                    Ok(cast(arg_exprs[0].clone(), ArrowDataType::Float64))
+                }
+                ScalarFn::ToInt => {
+                    if arg_exprs.len() != 1 {
+                        return Err(QueryError::Execution {
+                            message: "int() expects 1 argument".into(),
+                        });
+                    }
+                    Ok(cast(arg_exprs[0].clone(), ArrowDataType::Int64))
+                }
             }
         }
+        AstExpr::Case {
+            branches,
+            otherwise,
+        } => {
+            if branches.is_empty() {
+                return Err(QueryError::Execution {
+                    message: "CASE requires at least one WHEN branch".into(),
+                });
+            }
+            let mut iter = branches.iter();
+            let first = iter.next().expect("branches is non-empty");
+            let first_cond = predicate_to_expr(&first.condition, _schema, signal, ctx)?;
+            let first_res = ast_expr_to_df_expr(&first.result, _schema, signal, ctx)?;
+            let mut builder = when(first_cond, first_res);
+            for b in iter {
+                let cond = predicate_to_expr(&b.condition, _schema, signal, ctx)?;
+                let res = ast_expr_to_df_expr(&b.result, _schema, signal, ctx)?;
+                builder = builder.when(cond, res);
+            }
+            let built = match otherwise {
+                Some(e) => builder.otherwise(ast_expr_to_df_expr(e, _schema, signal, ctx)?),
+                None => builder.end(),
+            };
+            built.map_err(|e| QueryError::Execution {
+                message: format!("CASE lowering failed: {e}"),
+            })
+        }
     }
+}
+
+/// Call a built-in scalar function registered on the session context by name
+/// (e.g. `exp`, `coalesce`, `least`, `greatest`). Keeps us off version-specific
+/// `expr_fn` import paths — the functions are standard SQL.
+fn scalar_udf_call(
+    ctx: &SessionContext,
+    name: &str,
+    args: Vec<DfExpr>,
+) -> Result<DfExpr, QueryError> {
+    let udf = ctx.udf(name).map_err(|e| QueryError::Execution {
+        message: format!("scalar function `{name}` is not available: {e}"),
+    })?;
+    Ok(udf.call(args))
 }
 
 fn literal_to_df_lit(lit_val: &Literal) -> Result<DfExpr, QueryError> {
@@ -2089,6 +2183,82 @@ mod tests {
         .await
         .expect("stddev/variance/percentile should compile");
         assert!(!bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_case_exp_and_scalar_fns_compile() {
+        let ctx = schema_context().expect("schema_context");
+        let bytes = compile(
+            "spans last 1h | group by {} { count() as n } \
+             | compute greatest(0.0, least(1.0, float(n) * 0.001)) as clamped, \
+                       exp(0.0 - float(n) / 100.0) as decay, \
+                       coalesce(n, 0) as safe, \
+                       case when n > 100 then 1.0 when n > 10 then 0.5 else 0.0 end as bucket",
+            &ctx,
+        )
+        .await
+        .expect("CASE + exp/least/greatest/float/coalesce should compile");
+        assert!(!bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_score_query_compiles() {
+        let ctx = schema_context().expect("schema_context");
+        // A health-style scoring query: rate → score → weighted overall with
+        // missing-data-aware weighting (via `!= null`).
+        let bytes = compile(
+            "spans last 1h | group by {} { \
+                count() where status == 2 as errs, count() as total, \
+                p95(duration_ns) as p95_ns } \
+             | compute float(errs) / float(total) as err_rate, p95_ns as latency \
+             | compute score(err_rate, 0.01, 0.05) as err_score, \
+                       score(latency, 200000000, 500000000) as lat_score, \
+                       grade(err_rate, 0.01, 0.05) as err_status \
+             | compute (err_score * 0.4 + coalesce(lat_score, 0.0) * 0.2) \
+                       / (0.4 + case when lat_score != null then 0.2 else 0.0 end) as overall",
+            &ctx,
+        )
+        .await
+        .expect("scoring query should compile");
+        assert!(!bytes.is_empty());
+    }
+
+    /// A `score()`/CASE/exp query must survive the full Substrait round-trip — the
+    /// backend executes by consuming the produced plan, so a producer that emits CASE
+    /// but a consumer that rejects it would break local execution silently.
+    #[tokio::test]
+    async fn test_score_query_compiles_and_consumes() {
+        use datafusion_substrait::extensions::Extensions;
+        use datafusion_substrait::logical_plan::consumer::{
+            DefaultSubstraitConsumer, SubstraitConsumer,
+        };
+        use datafusion_substrait::substrait::proto::{plan_rel, Plan};
+
+        let ctx = schema_context().expect("schema_context");
+        let bytes = compile(
+            "spans last 1h | group by {} { count() where status == 2 as errs, count() as total } \
+             | compute float(errs) / float(total) as err_rate \
+             | compute score(err_rate, 0.01, 0.05) as err_score, \
+                       grade(err_rate, 0.01, 0.05) as err_status",
+            &ctx,
+        )
+        .await
+        .expect("scoring query should compile");
+
+        let plan: Plan = prost::Message::decode(&bytes[..]).expect("decode");
+        let extensions = Extensions::try_from(&plan.extensions).expect("extensions");
+        let state = ctx.state();
+        let consumer = DefaultSubstraitConsumer::new(&extensions, &state);
+        let rel = match plan.relations[0].rel_type.as_ref().expect("rel_type") {
+            plan_rel::RelType::Root(root) => root.input.as_ref().expect("root input"),
+            plan_rel::RelType::Rel(rel) => rel,
+        };
+        let consumed = consumer.consume_rel(rel).await;
+        assert!(
+            consumed.is_ok(),
+            "backend consumer rejected the scoring plan: {:?}",
+            consumed.err()
+        );
     }
 
     /// `percentile(col, 90)` (a 0–100 form) is normalized to the 0..1 quantile.
