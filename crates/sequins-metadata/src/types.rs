@@ -116,4 +116,59 @@ pub struct SavedVisualization {
     pub title: String,
     #[serde(default)]
     pub shape: Option<String>,
+    /// Optional presentation overrides (units, axis scale, stacking, …). Absent on
+    /// older saved dashboards; defaults to empty.
+    #[serde(default, skip_serializing_if = "VisualizationOptions::is_empty")]
+    pub options: VisualizationOptions,
+}
+
+/// Presentation overrides for a [`SavedVisualization`]. Every field is optional so
+/// dashboards saved before this blob existed deserialize unchanged, and an all-unset
+/// value is omitted from serialized output.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VisualizationOptions {
+    /// Value unit shown on axes/labels (e.g. `"ms"`, `"bytes"`, `"req/s"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// Y-axis scale: `"linear"` (default) or `"log"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y_scale: Option<String>,
+    /// Force the y-axis lower bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y_min: Option<f64>,
+    /// Force the y-axis upper bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y_max: Option<f64>,
+    /// Stack series instead of overlaying them (area/bar charts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stacked: Option<bool>,
+    /// Show a series legend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend: Option<bool>,
+    /// Cap the number of series rendered (top-N by magnitude).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_limit: Option<u32>,
+    /// Horizontal reference lines drawn across the plot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thresholds: Vec<Threshold>,
+}
+
+impl VisualizationOptions {
+    /// True when no override is set (used to omit the blob from serialized output).
+    pub fn is_empty(&self) -> bool {
+        *self == VisualizationOptions::default()
+    }
+}
+
+/// A horizontal reference line on a chart (e.g. an SLO or alert boundary).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Threshold {
+    /// Y-value at which the line is drawn.
+    pub value: f64,
+    /// Optional CSS-style color (e.g. `"#ff0000"` or `"red"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Optional label for the line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }

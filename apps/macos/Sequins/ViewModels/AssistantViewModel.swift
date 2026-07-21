@@ -393,7 +393,34 @@ final class AssistantViewModel {
         guard !seql.isEmpty else { return nil }
         let title = (obj["title"] as? String) ?? "Visualization"
         let shape = (obj["chart_type"] as? String) ?? (obj["shape"] as? String)
-        return SavedVisualization(seql: seql, title: title, shape: shape)
+        let options = Self.parseOptions(from: obj["options"])
+        return SavedVisualization(seql: seql, title: title, shape: shape, options: options)
+    }
+
+    /// Parse a presentation-options object (snake_case, as the model emits it) into a
+    /// `VisualizationOptions`. Missing/invalid fields fall back to unset.
+    static func parseOptions(from raw: Any?) -> VisualizationOptions {
+        guard let obj = raw as? [String: Any] else { return VisualizationOptions() }
+        func dbl(_ k: String) -> Double? {
+            if let d = obj[k] as? Double { return d }
+            if let n = obj[k] as? NSNumber { return n.doubleValue }
+            return nil
+        }
+        let thresholds: [VizThreshold] = (obj["thresholds"] as? [[String: Any]] ?? []).compactMap { t in
+            let v = (t["value"] as? Double) ?? (t["value"] as? NSNumber)?.doubleValue
+            guard let value = v else { return nil }
+            return VizThreshold(value: value, color: t["color"] as? String, label: t["label"] as? String)
+        }
+        return VisualizationOptions(
+            unit: obj["unit"] as? String,
+            yScale: obj["y_scale"] as? String,
+            yMin: dbl("y_min"),
+            yMax: dbl("y_max"),
+            stacked: obj["stacked"] as? Bool,
+            legend: obj["legend"] as? Bool,
+            seriesLimit: (obj["series_limit"] as? Int) ?? (obj["series_limit"] as? NSNumber)?.intValue,
+            thresholds: thresholds
+        )
     }
 
     private func buildRequestJSON(userText: String, model: String?) -> String {
@@ -434,6 +461,32 @@ final class AssistantViewModel {
                         "type": "string",
                         "enum": VizType.allCases.map { $0.rawValue },
                         "description": "Optional chart type. Omit to let the client choose.",
+                    ],
+                    "options": [
+                        "type": "object",
+                        "description": "Optional presentation overrides.",
+                        "properties": [
+                            "unit": ["type": "string", "description": "Value unit for axes/labels (e.g. ms, bytes, req/s)."],
+                            "y_scale": ["type": "string", "enum": ["linear", "log"], "description": "Y-axis scale."],
+                            "y_min": ["type": "number", "description": "Force y-axis lower bound."],
+                            "y_max": ["type": "number", "description": "Force y-axis upper bound."],
+                            "stacked": ["type": "boolean", "description": "Stack series instead of overlaying."],
+                            "legend": ["type": "boolean", "description": "Show a series legend."],
+                            "series_limit": ["type": "integer", "description": "Cap the number of series rendered (top-N)."],
+                            "thresholds": [
+                                "type": "array",
+                                "description": "Horizontal reference lines (e.g. SLO boundaries).",
+                                "items": [
+                                    "type": "object",
+                                    "properties": [
+                                        "value": ["type": "number"],
+                                        "color": ["type": "string"],
+                                        "label": ["type": "string"],
+                                    ],
+                                    "required": ["value"],
+                                ],
+                            ],
+                        ],
                     ],
                 ],
                 "required": ["query", "title"],

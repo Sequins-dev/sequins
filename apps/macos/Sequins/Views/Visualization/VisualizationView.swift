@@ -74,7 +74,8 @@ struct VisualizationView: View {
                     rows: runner.rows,
                     columnTypes: runner.columnTypes,
                     columnRoles: runner.columnRoles,
-                    previousValue: previousStatValue
+                    previousValue: previousStatValue,
+                    options: visualization.options
                 )
             }
         }
@@ -111,6 +112,8 @@ struct VizRenderer: View {
     var columnTypes: [NodeTypeLabel] = []
     var columnRoles: [SeQLColumnRole] = []
     var previousValue: Double?
+    /// Presentation overrides (unit, y-scale, stacking, legend, thresholds, …).
+    var options: VisualizationOptions = VisualizationOptions()
 
     /// A chart type that plots measures but has none to plot degrades to a table, so a
     /// result with rows always shows something rather than an empty chart.
@@ -119,19 +122,23 @@ struct VizRenderer: View {
            VizFormat.valueColumns(columns: columns, rows: rows, roles: columnRoles).isEmpty {
             return .table
         }
+        // `stacked` option promotes a plain bar chart to a stacked one.
+        if vizType == .bar, options.stacked == true {
+            return .stackedBar
+        }
         return vizType
     }
 
     var body: some View {
         switch effectiveType {
         case .line:
-            ExploreTimeSeriesView(columns: columns, rows: rows, columnTypes: columnTypes)
+            ExploreTimeSeriesView(columns: columns, rows: rows, columnTypes: columnTypes, options: options)
         case .area:
-            AreaChartView(columns: columns, rows: rows, columnTypes: columnTypes, columnRoles: columnRoles)
+            AreaChartView(columns: columns, rows: rows, columnTypes: columnTypes, columnRoles: columnRoles, options: options)
         case .bar:
-            BarChartView(columns: columns, rows: rows, stacked: false, columnTypes: columnTypes, columnRoles: columnRoles)
+            BarChartView(columns: columns, rows: rows, stacked: false, columnTypes: columnTypes, columnRoles: columnRoles, options: options)
         case .stackedBar:
-            BarChartView(columns: columns, rows: rows, stacked: true, columnTypes: columnTypes, columnRoles: columnRoles)
+            BarChartView(columns: columns, rows: rows, stacked: true, columnTypes: columnTypes, columnRoles: columnRoles, options: options)
         case .pie:
             PieChartView(columns: columns, rows: rows, columnTypes: columnTypes, columnRoles: columnRoles)
         case .gauge:
@@ -149,6 +156,23 @@ struct VizRenderer: View {
             HeatmapChartView(columns: columns, rows: rows, columnTypes: columnTypes)
         case .trace:
             TraceVizView(columns: columns, rows: rows)
+        }
+    }
+}
+
+extension View {
+    /// Apply option-driven y-axis presentation (logarithmic scale and/or an explicit
+    /// min…max domain). Swift Charts scale modifiers propagate to descendant `Chart`s
+    /// via the environment, so this can wrap any chart-bearing view.
+    @ViewBuilder
+    func chartYPresentation(_ options: VisualizationOptions) -> some View {
+        let log = options.useLogScale
+        if let lo = options.yMin, let hi = options.yMax, hi > lo {
+            self.chartYScale(domain: lo...hi, type: log ? .log : .linear)
+        } else if log {
+            self.chartYScale(domain: .automatic(includesZero: false), type: .log)
+        } else {
+            self
         }
     }
 }

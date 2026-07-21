@@ -62,6 +62,47 @@ final class DashboardVizTests: XCTestCase {
         XCTAssertEqual(SavedVisualization(seql: "x", title: "t", shape: "trace_tree").vizType, .trace)
     }
 
+    func testVisualizationOptionsRoundTrip() throws {
+        let viz = SavedVisualization(
+            seql: "spans last 1h | group by { ts() bin 1m as t } { p99(duration) as latency }",
+            title: "Latency",
+            shape: "line",
+            options: VisualizationOptions(
+                unit: "ms",
+                yScale: "log",
+                yMax: 1000,
+                stacked: true,
+                legend: false,
+                seriesLimit: 5,
+                thresholds: [VizThreshold(value: 500, color: "red", label: "SLO")]
+            )
+        )
+        let data = try DashboardJSON.encoder.encode(viz)
+        let json = String(decoding: data, as: UTF8.self)
+        // snake_case wire keys.
+        XCTAssertTrue(json.contains("y_scale"), json)
+        XCTAssertTrue(json.contains("series_limit"), json)
+
+        let back = try DashboardJSON.decoder.decode(SavedVisualization.self, from: data)
+        XCTAssertEqual(back.options.unit, "ms")
+        XCTAssertTrue(back.options.useLogScale)
+        XCTAssertEqual(back.options.yMax, 1000)
+        XCTAssertEqual(back.options.stacked, true)
+        XCTAssertEqual(back.options.legend, false)
+        XCTAssertEqual(back.options.seriesLimit, 5)
+        XCTAssertEqual(back.options.thresholds.first?.value, 500)
+        XCTAssertEqual(back.options.thresholds.first?.label, "SLO")
+        XCTAssertEqual(back.options.unitSuffix, " ms")
+    }
+
+    func testVisualizationOptionsOmittedWhenEmpty() throws {
+        // A viz with no options must not emit an `options` key (backward-compatible).
+        let viz = SavedVisualization(seql: "logs last 1h", title: "Logs")
+        let json = String(decoding: try DashboardJSON.encoder.encode(viz), as: UTF8.self)
+        XCTAssertFalse(json.contains("options"), json)
+        XCTAssertTrue(viz.options.isEmpty)
+    }
+
     func testVizTypeAutoSelect() {
         XCTAssertEqual(VizType.autoSelect(shape: .timeSeries, columns: ["t", "v"], rows: []), .line)
         XCTAssertEqual(VizType.autoSelect(shape: .scalar, columns: ["c"], rows: [[1]]), .stat)

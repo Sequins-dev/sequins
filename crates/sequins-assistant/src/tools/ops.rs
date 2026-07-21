@@ -28,7 +28,8 @@ use sequins_arrow_schema::{PromotedAttribute, SignalType};
 use sequins_datafusion_backend::{hot_signal_tables, hot_signal_type_for_table, DataFusionBackend};
 use sequins_flight::{decode_metadata, ipc_to_batch, SeqlMetadata};
 use sequins_metadata::{
-    Dashboard, DashboardApi, DashboardRow, RowPanel, SavedVisualization, DEFAULT_ROW_HEIGHT,
+    Dashboard, DashboardApi, DashboardRow, RowPanel, SavedVisualization, Threshold,
+    VisualizationOptions, DEFAULT_ROW_HEIGHT,
 };
 use sequins_series_index::SeriesIndex;
 use sequins_traits::QueryApi;
@@ -176,6 +177,13 @@ pub struct MetricLabelValuesArgs {
     pub metric: Option<String>,
 }
 
+/// Arguments for `recommend_chart`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RecommendChartArgs {
+    /// The SeQL query whose result should be visualized.
+    pub query: String,
+}
+
 /// Arguments for `overview` (none).
 #[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct OverviewArgs {}
@@ -271,6 +279,9 @@ pub struct AddChartArgs {
     /// Relative width weight within the row (default 1.0).
     #[serde(default)]
     pub weight: Option<f64>,
+    /// Optional presentation overrides (unit, y_scale, stacked, legend, …).
+    #[serde(default)]
+    pub options: Option<ChartOptionsArgs>,
 }
 
 /// Arguments for `update_chart`.
@@ -288,6 +299,9 @@ pub struct UpdateChartArgs {
     pub query: Option<String>,
     #[serde(default)]
     pub chart_type: Option<String>,
+    /// Optional presentation overrides. Replaces the chart's current options when set.
+    #[serde(default)]
+    pub options: Option<ChartOptionsArgs>,
 }
 
 /// Arguments for `arrange_dashboard` — a declarative new layout referencing existing
@@ -318,6 +332,71 @@ pub struct ArrangePanel {
     /// New relative width weight (default: keep the chart's current weight).
     #[serde(default)]
     pub weight: Option<f64>,
+}
+
+/// Presentation overrides accepted by `add_chart`/`update_chart`; converts into a
+/// [`VisualizationOptions`] blob the renderers honor. Every field is optional.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ChartOptionsArgs {
+    /// Value unit shown on axes/labels (e.g. "ms", "bytes", "req/s").
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// Y-axis scale: "linear" (default) or "log".
+    #[serde(default)]
+    pub y_scale: Option<String>,
+    /// Force the y-axis lower bound.
+    #[serde(default)]
+    pub y_min: Option<f64>,
+    /// Force the y-axis upper bound.
+    #[serde(default)]
+    pub y_max: Option<f64>,
+    /// Stack series instead of overlaying them (area/bar charts).
+    #[serde(default)]
+    pub stacked: Option<bool>,
+    /// Show a series legend.
+    #[serde(default)]
+    pub legend: Option<bool>,
+    /// Cap the number of series rendered (top-N by magnitude).
+    #[serde(default)]
+    pub series_limit: Option<u32>,
+    /// Horizontal reference lines (e.g. SLO/alert boundaries).
+    #[serde(default)]
+    pub thresholds: Vec<ThresholdArg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ThresholdArg {
+    /// Y-value at which to draw the line.
+    pub value: f64,
+    /// Optional color (e.g. "#ff0000" or "red").
+    #[serde(default)]
+    pub color: Option<String>,
+    /// Optional label for the line.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+impl From<ChartOptionsArgs> for VisualizationOptions {
+    fn from(a: ChartOptionsArgs) -> Self {
+        VisualizationOptions {
+            unit: a.unit.filter(|s| !s.is_empty()),
+            y_scale: a.y_scale.filter(|s| !s.is_empty()),
+            y_min: a.y_min,
+            y_max: a.y_max,
+            stacked: a.stacked,
+            legend: a.legend,
+            series_limit: a.series_limit,
+            thresholds: a
+                .thresholds
+                .into_iter()
+                .map(|t| Threshold {
+                    value: t.value,
+                    color: t.color.filter(|s| !s.is_empty()),
+                    label: t.label.filter(|s| !s.is_empty()),
+                })
+                .collect(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -679,6 +758,50 @@ impl Tools {
             out.push_str(&render_batches(&sample)?);
         }
         Ok(out)
+    }
+
+    /// Recommend a chart type for a query's result, from its inferred shape and column
+    /// roles (dimensions vs measures) — the same signal the client renderer uses, so the
+    /// model can pick a `chart_type` that actually fits before rendering/saving.
+    pub async fn recommend_chart(&self, args: RecommendChartArgs) -> Result<String, OpError> {
+        use seql_ast::schema::ColumnRole;
+        let mut stream = self.backend.query(&args.query).await?;
+        let mut shape = String::from("table");
+        let mut roles: Vec<ColumnRole> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        let mut rows = 0usize;
+        while let Some(frame) = stream.next().await {
+            let fd = frame?;
+            let Some(meta) = decode_metadata(&fd.app_metadata) else {
+                continue;
+            };
+            match meta {
+                SeqlMetadata::Schema {
+                    table: None,
+                    shape: s,
+                    columns,
+                    ..
+                } => {
+                    shape = s.as_str().to_string();
+                    for c in &columns {
+                        names.push(c.name.clone());
+                        roles.push(c.role);
+                    }
+                }
+                SeqlMetadata::Data { table: None } => {
+                    if let Ok(b) = ipc_to_batch(&fd.data_body) {
+                        rows += b.num_rows();
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (chart, why) = recommend_chart_type(&shape, &roles, rows);
+        Ok(format!(
+            "For `{}`:\n- shape: {shape}, {rows} rows\n- columns: {}\n- recommended chart_type: {chart}\n- why: {why}",
+            args.query,
+            names.join(", "),
+        ))
     }
 
     /// A compact per-signal-table overview: row counts and (where a time column
@@ -1044,6 +1167,7 @@ impl Tools {
                 seql: args.query,
                 title: args.title,
                 shape: args.chart_type,
+                options: args.options.map(Into::into).unwrap_or_default(),
             },
             weight: args.weight.unwrap_or(1.0),
         };
@@ -1088,6 +1212,9 @@ impl Tools {
         }
         if let Some(ct) = args.chart_type {
             panel.visualization.shape = Some(ct);
+        }
+        if let Some(opts) = args.options {
+            panel.visualization.options = opts.into();
         }
         let d = api.save_dashboard(d).await?;
         Ok(format!(
@@ -1237,6 +1364,45 @@ fn human_duration_ns(ns: u64) -> String {
     parts.join(" ")
 }
 
+/// Map a result's shape + column roles to a recommended chart type (mirrors the client
+/// renderer's role-aware auto-selection). Returns `(chart_type, reason)`.
+fn recommend_chart_type(
+    shape: &str,
+    roles: &[seql_ast::schema::ColumnRole],
+    rows: usize,
+) -> (&'static str, String) {
+    use seql_ast::schema::ColumnRole::*;
+    match shape {
+        "timeseries" => ("line", "time series → line (or area to stack).".to_string()),
+        "scalar" => ("stat", "a single value → stat.".to_string()),
+        "heatmap" => ("heatmap", "distribution → heatmap.".to_string()),
+        "trace_tree" | "trace_timeline" => ("trace", "spans → trace view.".to_string()),
+        "pattern_groups" => ("table", "log patterns → table.".to_string()),
+        _ => {
+            let dims = roles
+                .iter()
+                .filter(|r| matches!(r, GroupKey | Field))
+                .count();
+            let measures = roles
+                .iter()
+                .filter(|r| matches!(r, Aggregation | Computed))
+                .count();
+            if measures == 0 {
+                ("table", "no measure columns to plot → table.".to_string())
+            } else if dims >= 2 && measures == 1 {
+                (
+                    "heatmap",
+                    "two dimensions × one measure → heatmap (or table).".to_string(),
+                )
+            } else if dims == 1 && rows > 1 && rows <= 24 {
+                ("bar", "one category + a measure → bar.".to_string())
+            } else {
+                ("table", "wide or large result → table.".to_string())
+            }
+        }
+    }
+}
+
 /// Render a dashboard's structure for the model: rows with heights, and each chart's
 /// `[row,col]` position, title, weight, type, and query — the addresses edit tools use.
 fn render_dashboard(d: &Dashboard) -> String {
@@ -1260,9 +1426,44 @@ fn render_dashboard(d: &Dashboard) -> String {
                 p.visualization.shape.as_deref().unwrap_or("auto"),
                 p.visualization.seql
             ));
+            let opts = render_options(&p.visualization.options);
+            if !opts.is_empty() {
+                out.push_str(&format!("        options: {opts}\n"));
+            }
         }
     }
     out
+}
+
+/// Render a compact one-line summary of a chart's presentation options, or an empty
+/// string when none are set.
+fn render_options(o: &VisualizationOptions) -> String {
+    let mut parts = Vec::new();
+    if let Some(u) = &o.unit {
+        parts.push(format!("unit={u}"));
+    }
+    if let Some(s) = &o.y_scale {
+        parts.push(format!("y_scale={s}"));
+    }
+    if let Some(v) = o.y_min {
+        parts.push(format!("y_min={v}"));
+    }
+    if let Some(v) = o.y_max {
+        parts.push(format!("y_max={v}"));
+    }
+    if let Some(v) = o.stacked {
+        parts.push(format!("stacked={v}"));
+    }
+    if let Some(v) = o.legend {
+        parts.push(format!("legend={v}"));
+    }
+    if let Some(v) = o.series_limit {
+        parts.push(format!("series_limit={v}"));
+    }
+    if !o.thresholds.is_empty() {
+        parts.push(format!("thresholds={}", o.thresholds.len()));
+    }
+    parts.join(", ")
 }
 
 /// Resolve an attribute key to a promoted column name present in `cols`, accepting the
@@ -1583,6 +1784,11 @@ mod tests {
                 row: None,
                 position: None,
                 weight: None,
+                options: Some(ChartOptionsArgs {
+                    unit: Some("ms".into()),
+                    y_scale: Some("log".into()),
+                    ..Default::default()
+                }),
             })
             .await
             .unwrap();
@@ -1595,9 +1801,15 @@ mod tests {
                 row: Some(0),
                 position: None,
                 weight: Some(2.0),
+                options: None,
             })
             .await
             .unwrap();
+        // The options set on the first chart round-trip into the rendered layout.
+        assert!(
+            after.contains("unit=ms") && after.contains("y_scale=log"),
+            "{after}"
+        );
         // Second chart added into row 0 → two side-by-side panels.
         assert!(
             after.contains("[0,0]") && after.contains("[0,1]"),
@@ -1612,6 +1824,7 @@ mod tests {
                 title: Some("Spans per minute".into()),
                 query: None,
                 chart_type: None,
+                options: None,
             })
             .await
             .unwrap();
@@ -1665,5 +1878,44 @@ mod tests {
             .unwrap();
         assert!(out.contains("shape:"));
         assert!(out.contains("columns:"));
+    }
+
+    #[tokio::test]
+    async fn recommend_chart_reads_result_shape() {
+        let (tools, _t) = seeded_tools(6).await;
+        let out = tools
+            .recommend_chart(RecommendChartArgs {
+                query: "spans last 1h | group by { ts() bin 1m as bucket } { count() as n }".into(),
+            })
+            .await
+            .unwrap();
+        assert!(out.contains("recommended chart_type:"), "{out}");
+        assert!(out.contains("shape:"), "{out}");
+    }
+
+    #[test]
+    fn recommend_chart_type_maps_shapes() {
+        use seql_ast::schema::ColumnRole;
+        // A time bucket + one measure → a line chart.
+        let (kind, _) = recommend_chart_type(
+            "timeseries",
+            &[ColumnRole::GroupKey, ColumnRole::Aggregation],
+            30,
+        );
+        assert_eq!(kind, "line");
+        // A single scalar → a stat.
+        let (kind, _) = recommend_chart_type("scalar", &[ColumnRole::Aggregation], 1);
+        assert_eq!(kind, "stat");
+        // Two dimensions + one measure → a heatmap.
+        let (kind, _) = recommend_chart_type(
+            "table",
+            &[
+                ColumnRole::GroupKey,
+                ColumnRole::GroupKey,
+                ColumnRole::Aggregation,
+            ],
+            50,
+        );
+        assert_eq!(kind, "heatmap");
     }
 }

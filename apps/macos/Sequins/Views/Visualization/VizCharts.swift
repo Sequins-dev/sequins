@@ -16,10 +16,13 @@ struct AreaChartView: View {
     let rows: [[Any?]]
     var columnTypes: [NodeTypeLabel] = []
     var columnRoles: [SeQLColumnRole] = []
+    var options: VisualizationOptions = VisualizationOptions()
 
     var body: some View {
+        // Area stacks by default; `stacked: false` overlays filled areas instead.
         TimeSeriesChart(columns: columns, rows: rows, columnTypes: columnTypes,
-                        columnRoles: columnRoles, filled: true, stacked: true)
+                        columnRoles: columnRoles, filled: true,
+                        stacked: options.stacked ?? true, options: options)
     }
 }
 
@@ -31,14 +34,36 @@ struct BarChartView: View {
     var stacked: Bool = false
     var columnTypes: [NodeTypeLabel] = []
     var columnRoles: [SeQLColumnRole] = []
+    var options: VisualizationOptions = VisualizationOptions()
 
     private struct Bar: Identifiable {
         let id = UUID(); let category: String; let value: Double; let series: String
     }
 
-    /// Numeric value columns (measures when roles are known).
+    /// Numeric value columns (measures when roles are known), capped to
+    /// `options.seriesLimit` by peak magnitude.
     private var valueCols: [(index: Int, name: String)] {
-        VizFormat.valueColumns(columns: columns, rows: rows, roles: columnRoles)
+        let cols = VizFormat.valueColumns(columns: columns, rows: rows, roles: columnRoles)
+        guard let limit = options.seriesLimit, limit > 0, cols.count > Int(limit) else {
+            return cols
+        }
+        let ranked = cols.sorted { peakMagnitude($0.index) > peakMagnitude($1.index) }
+        return Array(ranked.prefix(Int(limit)))
+    }
+
+    /// Largest absolute value in a column, for ranking series under `series_limit`.
+    private func peakMagnitude(_ index: Int) -> Double {
+        var m = 0.0
+        for row in rows where index < row.count {
+            if let v = VizFormat.numeric(row[index]) { m = max(m, abs(v)) }
+        }
+        return m
+    }
+
+    /// Legend visibility: explicit `options.legend`, else visible only when multi-series.
+    private var legendVisibility: Visibility {
+        if let l = options.legend { return l ? .visible : .hidden }
+        return valueCols.count > 1 ? .visible : .hidden
     }
 
     private var singleSeries: Bool { valueCols.count == 1 }
@@ -79,22 +104,35 @@ struct BarChartView: View {
         if bars.isEmpty {
             VizMessage(icon: "chart.bar", text: "No numeric data")
         } else {
-            Chart(bars) { bar in
-                let mark = BarMark(
-                    x: .value(columns.first ?? "category", bar.category),
-                    y: .value("value", bar.value)
-                )
-                .foregroundStyle(by: .value("Series", bar.series))
-                if stacked {
-                    mark
-                } else {
-                    mark.position(by: .value("Series", bar.series))
+            Chart {
+                ForEach(bars) { bar in
+                    let mark = BarMark(
+                        x: .value(columns.first ?? "category", bar.category),
+                        y: .value("value", bar.value)
+                    )
+                    .foregroundStyle(by: .value("Series", bar.series))
+                    if stacked {
+                        mark
+                    } else {
+                        mark.position(by: .value("Series", bar.series))
+                    }
+                }
+                ForEach(Array(options.thresholds.enumerated()), id: \.offset) { _, t in
+                    RuleMark(y: .value("threshold", t.value))
+                        .foregroundStyle(Color(cssLike: t.color) ?? .orange)
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                        .annotation(position: .top, alignment: .trailing) {
+                            if let label = t.label, !label.isEmpty {
+                                Text(label).font(.caption2)
+                                    .foregroundStyle(Color(cssLike: t.color) ?? .orange)
+                            }
+                        }
                 }
             }
             .chartYAxis {
                 AxisMarks { v in
                     AxisGridLine()
-                    AxisValueLabel { if let d = v.as(Double.self) { Text(VizFormat.compact(d)) } }
+                    AxisValueLabel { if let d = v.as(Double.self) { Text(VizFormat.compact(d) + options.unitSuffix) } }
                 }
             }
             .chartXAxis {
@@ -102,7 +140,8 @@ struct BarChartView: View {
                     AxisValueLabel(orientation: bars.count > 6 ? .verticalReversed : .horizontal)
                 }
             }
-            .chartLegend(valueCols.count > 1 ? .visible : .hidden)
+            .chartYPresentation(options)
+            .chartLegend(legendVisibility)
             .padding()
         }
     }

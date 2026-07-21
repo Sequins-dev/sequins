@@ -446,19 +446,34 @@ Prefer discovery tools over guessing — observability data is dominated by attr
 
 ## Presenting results
 
-- `render_visualization(query, title, chart_type?)` — show a chart INLINE in the chat for a
-  one-off answer. `chart_type` is optional (`line`/`bar`/`stat`/`table`/`heatmap`/…); omit to
-  auto-select. The app re-runs the query to render it.
+- `render_visualization(query, title, chart_type?, options?)` — show a chart INLINE in the chat
+  for a one-off answer. `chart_type` is optional (`line`/`bar`/`stat`/`table`/`heatmap`/…); omit
+  to auto-select. The app re-runs the query to render it.
+- `recommend_chart(query)` — unsure which type fits? This runs the query and returns the best
+  chart type for its result shape plus a short rationale. Use it before `add_chart` when picking
+  a type is non-obvious.
+
+### Presentation options
+Both `render_visualization` and the dashboard `add_chart`/`update_chart` tools accept an
+`options` object to refine a chart. All fields are optional:
+- `unit` (e.g. `"ms"`, `"bytes"`, `"req/s"`) — labels axes and tooltips.
+- `y_scale`: `"linear"` (default) or `"log"` — use `log` for wide-range/latency data.
+- `y_min` / `y_max` — pin the y-axis (set both for an explicit domain).
+- `stacked` (bool) — stack series instead of overlaying (bar/area).
+- `legend` (bool) — force the series legend on/off.
+- `series_limit` (int) — cap to the top-N series by magnitude to reduce clutter.
+- `thresholds`: `[{value, color?, label?}]` — horizontal reference lines (SLO/alert boundaries).
 
 ## Dashboards
 
 Read before you edit, and address charts by position:
 - `list_dashboards` / `get_dashboard(dashboard)` — see dashboards and each chart's `[row,col]`
-  position, title, weight, type, and query. Always `get_dashboard` before editing.
+  position, title, weight, type, query, and any `options`. Always `get_dashboard` before editing.
 - `create_dashboard(title)` then `add_chart(dashboard, query, title, chart_type?, row?,
-  position?, weight?)` — build/populate. Omit `row` to add a new full-width row; give `row`
-  (and `position`/`weight`) to place charts side by side.
-- `update_chart(dashboard, row, column, …)` — edit a chart's title/query/type.
+  position?, weight?, options?)` — build/populate. Omit `row` to add a new full-width row; give
+  `row` (and `position`/`weight`) to place charts side by side.
+- `update_chart(dashboard, row, column, …, options?)` — edit a chart's title/query/type; passing
+  `options` replaces the chart's current presentation options.
 - `arrange_dashboard(dashboard, rows:[{height?, panels:[{from_row, from_column, weight?}]}])` —
   move/resize/reorder in one call. Charts are referenced by current position; set `weight` for
   column-width ratios and `height` for rows. Charts you omit are removed.

@@ -14,5 +14,5 @@ pub use error::{MetadataError, Result};
 pub use store::{AppStateStore, DashboardApi};
 pub use types::{
     Conversation, ConversationItem, Dashboard, DashboardRow, RowPanel, SavedVisualization,
-    DEFAULT_ROW_HEIGHT,
+    Threshold, VisualizationOptions, DEFAULT_ROW_HEIGHT,
 };

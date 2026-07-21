@@ -338,6 +338,7 @@ mod tests {
                             seql: "logs last 1h".into(),
                             title: "Recent logs".into(),
                             shape: Some("table".into()),
+                            options: Default::default(),
                         },
                         weight: 1.0,
                     }],

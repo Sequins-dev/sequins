@@ -17,8 +17,8 @@ use super::ops::{
     AddChartArgs, ArrangeDashboardArgs, AttributeValuesArgs, ColumnProfileArgs,
     CreateDashboardArgs, DescribeSchemaArgs, ExplainArgs, GetDashboardArgs, ListAttributesArgs,
     ListDashboardsArgs, ListMetricsArgs, ListTablesArgs, MetricLabelValuesArgs, MetricLabelsArgs,
-    OverviewArgs, RenameDashboardArgs, RunSeqlArgs, RunSqlArgs, SampleArgs, TimeRangeArgs,
-    UpdateChartArgs, ValidateSeqlArgs,
+    OverviewArgs, RecommendChartArgs, RenameDashboardArgs, RunSeqlArgs, RunSqlArgs, SampleArgs,
+    TimeRangeArgs, UpdateChartArgs, ValidateSeqlArgs,
 };
 use super::{OpError, Tools};
 
@@ -50,6 +50,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "run_sql",
     "validate_seql",
     "run_seql",
+    "recommend_chart",
     "list_dashboards",
     "get_dashboard",
     "create_dashboard",
@@ -147,6 +148,11 @@ pub fn specs() -> Vec<ToolSpec> {
             parameters: schema::<RunSeqlArgs>(),
         },
         ToolSpec {
+            name: "recommend_chart",
+            description: "Run a SeQL query and recommend the best chart type for its result shape (line, bar, stat, heatmap, table, …), with a short rationale. Use before add_chart when unsure which type fits.",
+            parameters: schema::<RecommendChartArgs>(),
+        },
+        ToolSpec {
             name: "list_dashboards",
             description: "List saved dashboards with ids, titles, and chart counts.",
             parameters: schema::<ListDashboardsArgs>(),
@@ -226,6 +232,7 @@ pub async fn invoke(tools: &Tools, name: &str, args: serde_json::Value) -> Resul
         "run_sql" => tools.run_sql(parse(args)?).await,
         "validate_seql" => tools.validate_seql(parse(args)?).await,
         "run_seql" => tools.run_seql(parse(args)?).await,
+        "recommend_chart" => tools.recommend_chart(parse(args)?).await,
         "list_dashboards" => tools.list_dashboards(parse(args)?).await,
         "get_dashboard" => tools.get_dashboard(parse(args)?).await,
         "create_dashboard" => tools.create_dashboard(parse(args)?).await,
