@@ -1,6 +1,20 @@
 import Foundation
 import SequinsFFI
 
+/// Consume an FFI `char **error_out`: if it holds a message, copy it, free the C string,
+/// and wrap it in a `SequinsError.ffiError`; otherwise return `fallback`. One home for the
+/// `String(cString:)` + `sequins_string_free` + wrap dance every fallible FFI call repeats.
+func consumeFFIError(
+    _ errorPtr: UnsafeMutablePointer<CChar>?, fallback: SequinsError
+) -> SequinsError {
+    if let errorPtr {
+        let message = String(cString: errorPtr)
+        sequins_string_free(errorPtr)
+        return SequinsError.ffiError(message)
+    }
+    return fallback
+}
+
 /// Configuration for the embedded OTLP server
 public struct OTLPServerConfig {
     /// gRPC port. Use 0 to request an OS-assigned ephemeral port.
@@ -45,12 +59,7 @@ public final class DataSource {
         let cConfig = config.toCStruct()
 
         guard let pointer = sequins_data_source_new_local(dbPath, cConfig, &errorPtr) else {
-            if let errorPtr = errorPtr {
-                let errorMessage = String(cString: errorPtr)
-                sequins_string_free(errorPtr)
-                throw SequinsError.ffiError(errorMessage)
-            }
-            throw SequinsError.nullPointer
+            throw consumeFFIError(errorPtr, fallback: .nullPointer)
         }
 
         // Start the OTLP server
@@ -81,12 +90,7 @@ public final class DataSource {
         var errorPtr: UnsafeMutablePointer<CChar>? = nil
 
         guard let pointer = sequins_data_source_new_remote(queryURL, managementURL, &errorPtr) else {
-            if let errorPtr = errorPtr {
-                let errorMessage = String(cString: errorPtr)
-                sequins_string_free(errorPtr)
-                throw SequinsError.ffiError(errorMessage)
-            }
-            throw SequinsError.nullPointer
+            throw consumeFFIError(errorPtr, fallback: .nullPointer)
         }
 
         return DataSource(pointer: pointer)
@@ -109,12 +113,7 @@ public final class DataSource {
 
         let success = sequins_management_get_health_threshold_config(pointer, &cConfig, &errorPtr)
         if !success {
-            if let errorPtr = errorPtr {
-                let errorMessage = String(cString: errorPtr)
-                sequins_string_free(errorPtr)
-                throw SequinsError.ffiError(errorMessage)
-            }
-            throw SequinsError.ffiError("Failed to get health threshold config")
+            throw consumeFFIError(errorPtr, fallback: .ffiError("Failed to get health threshold config"))
         }
 
         defer { sequins_health_threshold_config_free(cConfig) }
@@ -180,12 +179,7 @@ public final class DataSource {
         }
 
         if !success {
-            if let errorPtr = errorPtr {
-                let errorMessage = String(cString: errorPtr)
-                sequins_string_free(errorPtr)
-                throw SequinsError.ffiError(errorMessage)
-            }
-            throw SequinsError.ffiError("Failed to set health threshold config")
+            throw consumeFFIError(errorPtr, fallback: .ffiError("Failed to set health threshold config"))
         }
     }
 
@@ -218,12 +212,7 @@ public final class DataSource {
         free(cRule.display_name)
 
         if !success {
-            if let errorPtr = errorPtr {
-                let errorMessage = String(cString: errorPtr)
-                sequins_string_free(errorPtr)
-                throw SequinsError.ffiError(errorMessage)
-            }
-            throw SequinsError.ffiError("Failed to add health rule")
+            throw consumeFFIError(errorPtr, fallback: .ffiError("Failed to add health rule"))
         }
     }
 
@@ -244,12 +233,7 @@ public final class DataSource {
         )
 
         if !success {
-            if let errorPtr = errorPtr {
-                let errorMessage = String(cString: errorPtr)
-                sequins_string_free(errorPtr)
-                throw SequinsError.ffiError(errorMessage)
-            }
-            throw SequinsError.ffiError("Failed to remove health rule")
+            throw consumeFFIError(errorPtr, fallback: .ffiError("Failed to remove health rule"))
         }
     }
 
@@ -268,12 +252,7 @@ public final class DataSource {
         let count = sequins_data_source_generate_test_data(pointer, &errorPtr)
 
         if count == 0 {
-            if let errorPtr = errorPtr {
-                let errorMessage = String(cString: errorPtr)
-                sequins_string_free(errorPtr)
-                throw SequinsError.ffiError(errorMessage)
-            }
-            throw SequinsError.ffiError("Failed to generate test data")
+            throw consumeFFIError(errorPtr, fallback: .ffiError("Failed to generate test data"))
         }
 
         return Int(count)

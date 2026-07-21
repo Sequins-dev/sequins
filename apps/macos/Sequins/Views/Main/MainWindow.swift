@@ -3,6 +3,7 @@ import SwiftUI
 /// Main application window containing the navigation split view and tab content
 struct MainWindow: View {
     @Environment(AppStateViewModel.self) private var appState
+    @Environment(\.openSettings) private var openSettings
     @State private var selectedTab: NavigationItem
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
@@ -142,9 +143,18 @@ struct MainWindow: View {
                 appState.connectToDataSource()
             }
         }
+        .onAppear {
+            // Reload dashboards after an assistant turn that edited them server-side, so a
+            // dashboard the user is viewing updates live.
+            assistantViewModel.onDashboardsChanged = {
+                if let ds = appState.dataSource {
+                    dashboardsViewModel.refresh(dataSource: ds)
+                }
+            }
+        }
         .alert("Connection Error", isPresented: .constant(appState.dataSourceError != nil)) {
             Button("Retry") { appState.reconnect() }
-            Button("Settings") { appState.showSettings = true }
+            Button("Settings") { openSettings() }
             Button("OK") { appState.dataSourceError = nil }
         } message: {
             if let error = appState.dataSourceError {

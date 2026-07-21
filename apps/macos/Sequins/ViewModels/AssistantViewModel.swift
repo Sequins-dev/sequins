@@ -40,6 +40,27 @@ struct ChatItem: Identifiable {
     }
 }
 
+/// Reasoning effort for the assistant's next turn. `auto` sends nothing — the model's
+/// default — while the middleware reconciles models that require a specific value.
+enum ReasoningEffort: String, CaseIterable, Identifiable {
+    case auto, none, low, medium, high
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .auto: return "Auto"
+        case .none: return "None"
+        case .low: return "Low"
+        case .medium: return "Medium"
+        case .high: return "High"
+        }
+    }
+
+    /// Value sent as `reasoning.effort`, or `nil` for `auto` (omit it entirely).
+    var wireValue: String? { self == .auto ? nil : rawValue }
+}
+
 /// Drives the Assistant chat tab: the conversation list, the active transcript, and a
 /// streaming turn. Conversation history is read from the `messages`/`conversations`
 /// tables via SQL; turns are sent through the normalized assistant FFI.
@@ -53,10 +74,38 @@ final class AssistantViewModel {
     var inputText: String = ""
     var errorMessage: String?
 
+    /// Models advertised by the provider/daemon's `/v1/models`, for the input-bar picker.
+    private(set) var availableModels: [String] = []
+    /// The model used for the next turn — chosen in the input bar, seeded from the
+    /// environment's saved model, defaulting to the first advertised model.
+    var selectedModel: String?
+    /// Reasoning effort for the next turn (chosen in the input bar).
+    var selectedReasoning: ReasoningEffort = .auto
+    /// Populated when the model list couldn't be fetched (bad key, offline, no `/models`).
+    private(set) var modelsError: String?
+
     private var activeStream: AssistantChatStream?
     private var assistant: Assistant?
     private var assistantConfigKey: String?
     private var lastResponseId: String?
+
+    /// Called when a turn completes, so the host can reload dashboards the assistant may
+    /// have created/edited server-side (set by `MainWindow`).
+    var onDashboardsChanged: (() -> Void)?
+
+    /// A destructive action the assistant proposed (delete a dashboard / remove a chart)
+    /// that awaits the user's approval. Rendered as a card in the transcript; the input
+    /// stays live so the user can instead type revised instructions.
+    private(set) var pendingApproval: PendingApproval?
+
+    struct PendingApproval: Identifiable {
+        let id = UUID()
+        let toolName: String
+        let arguments: String
+        let title: String
+        let detail: String
+        let confirmLabel: String
+    }
 
     // MARK: - Conversation list
 
@@ -109,11 +158,134 @@ final class AssistantViewModel {
         errorMessage = nil
     }
 
+    /// Delete a persisted conversation, removing it from the list and clearing the
+    /// transcript if it was the open chat.
+    func deleteConversation(_ id: String, dataSource: DataSource) {
+        do {
+            try dataSource.deleteConversation(id: id)
+            conversations.removeAll { $0.id == id }
+            if selectedConversationId == id { newChat() }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    // MARK: - Destructive-action approval
+
+    /// Turn a destructive tool call into a pending approval card rather than executing it.
+    private func proposeDestructive(name: String, arguments: String) {
+        let obj = (arguments.data(using: .utf8)
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] ?? [:]
+        let dashboard = (obj["dashboard"] as? String) ?? "this dashboard"
+        let pending: PendingApproval
+        switch name {
+        case "delete_dashboard":
+            pending = PendingApproval(
+                toolName: name, arguments: arguments,
+                title: "Delete dashboard “\(dashboard)”?",
+                detail: "This permanently removes the dashboard and all of its charts.",
+                confirmLabel: "Delete")
+        default: // remove_chart
+            let row = (obj["row"] as? Int).map(String.init) ?? "?"
+            let col = (obj["column"] as? Int).map(String.init) ?? "?"
+            pending = PendingApproval(
+                toolName: name, arguments: arguments,
+                title: "Remove chart [\(row),\(col)] from “\(dashboard)”?",
+                detail: "This removes the chart from the dashboard.",
+                confirmLabel: "Remove")
+        }
+        pendingApproval = pending
+    }
+
+    /// User approved the pending destructive action — execute it via the data source.
+    func approvePending(dataSource: DataSource) {
+        guard let p = pendingApproval else { return }
+        pendingApproval = nil
+        let obj = (p.arguments.data(using: .utf8)
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] ?? [:]
+        let key = (obj["dashboard"] as? String) ?? ""
+        do {
+            let output: String
+            switch p.toolName {
+            case "delete_dashboard":
+                guard let d = try resolveDashboard(key, dataSource: dataSource) else {
+                    throw SequinsError.ffiError("no dashboard matching “\(key)”")
+                }
+                try dataSource.deleteDashboard(id: d.id)
+                output = "Deleted dashboard “\(d.title)”."
+            default: // remove_chart
+                guard var d = try resolveDashboard(key, dataSource: dataSource) else {
+                    throw SequinsError.ffiError("no dashboard matching “\(key)”")
+                }
+                let row = obj["row"] as? Int ?? -1
+                let col = obj["column"] as? Int ?? -1
+                guard d.rows.indices.contains(row), d.rows[row].panels.indices.contains(col) else {
+                    throw SequinsError.ffiError("no chart at [\(row),\(col)]")
+                }
+                d.rows[row].panels.remove(at: col)
+                d.rows.removeAll { $0.panels.isEmpty }
+                _ = try dataSource.saveDashboard(d)
+                output = "Removed chart [\(row),\(col)] from “\(d.title)”."
+            }
+            transcript.append(ChatItem(kind: .toolActivity(AssistantToolActivity(
+                name: p.toolName, arguments: p.arguments, output: output))))
+            onDashboardsChanged?()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// User declined the pending destructive action.
+    func rejectPending() {
+        guard let p = pendingApproval else { return }
+        pendingApproval = nil
+        transcript.append(ChatItem(kind: .toolActivity(AssistantToolActivity(
+            name: p.toolName, arguments: p.arguments, output: "Declined."))))
+    }
+
+    /// Resolve a dashboard by id, then case-insensitive title.
+    private func resolveDashboard(_ key: String, dataSource: DataSource) throws -> Dashboard? {
+        if let byId = try dataSource.getDashboard(id: key) { return byId }
+        return try dataSource.listDashboards()
+            .first { $0.title.caseInsensitiveCompare(key) == .orderedSame }
+    }
+
+    // MARK: - Model list
+
+    /// Fetch the provider/daemon's model list for the input-bar picker and settle on a
+    /// selection: keep the current one, else the environment's saved model, else the
+    /// first advertised model.
+    func loadModels(config: AssistantConfig) async {
+        if selectedModel == nil { selectedModel = config.model }
+        do {
+            let models = try await fetchAssistantModels(config)
+            availableModels = models
+            modelsError = nil
+            if selectedModel == nil || selectedModel?.isEmpty == true {
+                selectedModel = models.first
+            }
+        } catch {
+            availableModels = []
+            modelsError = error.localizedDescription
+        }
+    }
+
     // MARK: - Sending
 
-    func send(dataSource: DataSource, config: AssistantConfig) {
+    func send(dataSource: DataSource, config baseConfig: AssistantConfig) {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isStreaming else { return }
+        // A new instruction supersedes any pending destructive proposal — treat it as a
+        // decline and let the model act on the revised guidance.
+        if let pending = pendingApproval {
+            pendingApproval = nil
+            transcript.append(ChatItem(kind: .toolActivity(AssistantToolActivity(
+                name: pending.toolName, arguments: pending.arguments,
+                output: "Skipped — see new instructions below."))))
+        }
+        // The input-bar picker's model wins over the environment default.
+        var config = baseConfig
+        if let selectedModel, !selectedModel.isEmpty { config.model = selectedModel }
         inputText = ""
         errorMessage = nil
         transcript.append(ChatItem(kind: .userText(text)))
@@ -134,8 +306,8 @@ final class AssistantViewModel {
                     if let viz = self.parseVisualization(from: call.arguments) {
                         self.transcript.append(ChatItem(kind: .visualization(viz)))
                     }
-                case "add_to_dashboard":
-                    self.handleAddToDashboard(arguments: call.arguments, dataSource: dataSource)
+                case "delete_dashboard", "remove_chart":
+                    self.proposeDestructive(name: call.name, arguments: call.arguments)
                 default:
                     break
                 }
@@ -175,6 +347,8 @@ final class AssistantViewModel {
         isStreaming = false
         activeStream = nil
         refreshConversations(dataSource: dataSource)
+        // The turn may have created/edited dashboards via server-side tools; reload them.
+        onDashboardsChanged?()
     }
 
     private func appendTextDelta(_ delta: String) {
@@ -209,36 +383,6 @@ final class AssistantViewModel {
         }
     }
 
-    /// Handle an `add_to_dashboard` tool call: find the named dashboard (or create it)
-    /// and append the visualization as a new full-width row, then persist.
-    private func handleAddToDashboard(arguments: String, dataSource: DataSource) {
-        guard let viz = parseVisualization(from: arguments),
-              let obj = jsonObject(arguments) else { return }
-        let dashboardName = (obj["dashboard"] as? String)
-            ?? (obj["dashboard_name"] as? String)
-            ?? "Assistant"
-        do {
-            let existing = try dataSource.listDashboards()
-            var dashboard = existing.first { $0.title.caseInsensitiveCompare(dashboardName) == .orderedSame }
-                ?? Dashboard(title: dashboardName)
-            dashboard.rows.append(DashboardRow(panels: [RowPanel(visualization: viz)]))
-            _ = try dataSource.saveDashboard(dashboard)
-            // Show the chart inline plus a confirmation of where it went.
-            transcript.append(ChatItem(kind: .visualization(viz)))
-            transcript.append(ChatItem(kind: .toolActivity(AssistantToolActivity(
-                name: "add_to_dashboard",
-                arguments: arguments,
-                output: "Added “\(viz.title)” to dashboard “\(dashboardName)”."))))
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    private func jsonObject(_ json: String) -> [String: Any]? {
-        guard let data = json.data(using: .utf8) else { return nil }
-        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-    }
-
     /// Parse `render_visualization` arguments (`{ query|seql, title, chart_type? }`)
     /// into a `SavedVisualization`.
     func parseVisualization(from argsJSON: String) -> SavedVisualization? {
@@ -258,8 +402,11 @@ final class AssistantViewModel {
             "input": [["type": "message", "role": "user", "content": userText]],
             "stream": true,
             "store": true,
-            "tools": [renderVisualizationTool, addToDashboardTool],
+            "tools": [renderVisualizationTool, deleteDashboardTool, removeChartTool],
         ]
+        if let effort = selectedReasoning.wireValue {
+            req["reasoning"] = ["effort": effort]
+        }
         if let lastResponseId {
             req["previous_response_id"] = lastResponseId
         }
@@ -294,36 +441,34 @@ final class AssistantViewModel {
         ]
     }
 
-    private var addToDashboardTool: [String: Any] {
+    private var deleteDashboardTool: [String: Any] {
         [
-            "name": "add_to_dashboard",
-            "description": "Save a visualization to a dashboard (by name). If a dashboard with "
-                + "that name exists the chart is appended as a new row; otherwise a new dashboard "
-                + "with that name is created. Use this when the user asks to add a chart to, or "
-                + "build, a dashboard — as opposed to render_visualization which only shows a chart "
-                + "inline in the chat.",
+            "name": "delete_dashboard",
+            "description": "Delete a dashboard (by id or title). DESTRUCTIVE — the user must "
+                + "approve; propose it and let them confirm.",
             "parameters": [
                 "type": "object",
                 "properties": [
-                    "query": [
-                        "type": "string",
-                        "description": "The SeQL query whose results the chart shows.",
-                    ],
-                    "title": [
-                        "type": "string",
-                        "description": "A short, descriptive title for the chart.",
-                    ],
-                    "dashboard": [
-                        "type": "string",
-                        "description": "Name of the dashboard to add the chart to (created if missing).",
-                    ],
-                    "chart_type": [
-                        "type": "string",
-                        "enum": VizType.allCases.map { $0.rawValue },
-                        "description": "Optional chart type. Omit to let the client choose.",
-                    ],
+                    "dashboard": ["type": "string", "description": "Dashboard id or title to delete."],
                 ],
-                "required": ["query", "title", "dashboard"],
+                "required": ["dashboard"],
+            ],
+        ]
+    }
+
+    private var removeChartTool: [String: Any] {
+        [
+            "name": "remove_chart",
+            "description": "Remove a chart from a dashboard by its [row,column] position (from "
+                + "get_dashboard). DESTRUCTIVE — the user must approve.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "dashboard": ["type": "string", "description": "Dashboard id or title."],
+                    "row": ["type": "integer", "description": "Row index of the chart."],
+                    "column": ["type": "integer", "description": "Column index within the row."],
+                ],
+                "required": ["dashboard", "row", "column"],
             ],
         ]
     }

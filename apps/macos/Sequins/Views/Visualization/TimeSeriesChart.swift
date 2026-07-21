@@ -11,6 +11,7 @@ struct TimeSeriesChart: View {
     let columns: [String]
     let rows: [[Any?]]
     let columnTypes: [NodeTypeLabel]
+    var columnRoles: [SeQLColumnRole] = []
     /// Fill under the line (area) vs. a plain line.
     var filled: Bool = false
     /// Stack the areas/series (area only).
@@ -28,19 +29,13 @@ struct TimeSeriesChart: View {
     @State private var plotFrame: CGRect = .zero
 
     private var isTemporal: Bool {
-        if columnTypes.first == .timestamp { return true }
-        // Fall back to the data: the backend now emits time buckets as Arrow timestamps,
-        // which arrive as `Date`.
-        return rows.first?.first is Date
+        VizFormat.isTemporalFirstColumn(columnTypes: columnTypes, rows: rows)
     }
 
-    /// Numeric "value" columns (every column after the first that carries numbers).
+    /// Numeric "value" columns (measures when roles are known, else every column after
+    /// the first that carries numbers).
     private var seriesColumns: [(index: Int, name: String)] {
-        guard columns.count > 1 else { return [] }
-        return (1..<columns.count).compactMap { idx in
-            let numeric = rows.contains { $0.count > idx && VizFormat.numeric($0[idx]) != nil }
-            return numeric ? (idx, columns[idx]) : nil
-        }
+        VizFormat.valueColumns(columns: columns, rows: rows, roles: columnRoles)
     }
 
     private var data: [Datum] {

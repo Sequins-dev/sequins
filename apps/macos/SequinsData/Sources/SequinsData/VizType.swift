@@ -52,18 +52,6 @@ public enum VizType: String, CaseIterable, Codable, Sendable {
         }
     }
 
-    /// Whether this type is a good fit for the given result (used to gray out
-    /// obviously-wrong choices in the picker). Permissive by default.
-    public func isSuitable(columnCount: Int, rowCount: Int) -> Bool {
-        switch self {
-        case .stat, .gauge: return columnCount >= 1
-        case .pie: return columnCount >= 2
-        case .line, .area, .bar, .stackedBar: return columnCount >= 2
-        case .heatmap: return columnCount >= 3
-        case .table, .trace: return true
-        }
-    }
-
     /// Parse a stored `shape` string into a `VizType`, accepting both `VizType` raw
     /// values and legacy `ResponseShape` strings (e.g. "timeseries", "trace_tree").
     public static func from(shapeString: String?) -> VizType? {
@@ -85,9 +73,26 @@ public enum VizType: String, CaseIterable, Codable, Sendable {
         }
     }
 
-    /// Choose a default `VizType` from the Rust-inferred shape and the result columns.
+    /// Whether this type plots numeric measures (so an absence of any measure/numeric
+    /// column means it can't render and should fall back to a table).
+    public var plotsMeasures: Bool {
+        switch self {
+        case .line, .area, .bar, .stackedBar, .pie, .gauge, .heatmap: return true
+        case .stat, .table, .trace: return false
+        }
+    }
+
+    /// Choose a default `VizType` from the Rust-inferred shape, the result columns, and
+    /// (when available) their semantic roles.
+    ///
+    /// Roles make table-shaped results reliable: a grouped aggregation like
+    /// `group by { http_route, http_status_code } { count() }` has two *dimensions* and
+    /// one *measure* — that's a heatmap (dim × dim → value), not a broken line/bar that
+    /// mistakes `http_status_code` for a data series. When roles are absent we fall back
+    /// to a conservative column-count heuristic; either way an unplottable result becomes
+    /// a table rather than an empty chart.
     public static func autoSelect(
-        shape: ResponseShape, columns: [String], rows: [[Any?]]
+        shape: ResponseShape, columns: [String], rows: [[Any?]], roles: [SeQLColumnRole] = []
     ) -> VizType {
         switch shape {
         case .timeSeries: return .line
@@ -96,8 +101,16 @@ public enum VizType: String, CaseIterable, Codable, Sendable {
         case .heatmap: return .heatmap
         case .patternGroups: return .table
         case .table:
-            // A compact two-column (category + one value) result reads well as a bar
-            // chart; anything wider or larger stays a table.
+            if !roles.isEmpty {
+                let dimensions = roles.filter { $0.isDimension }.count
+                let measures = roles.filter { $0.isMeasure }.count
+                if measures == 0 { return .table }
+                if dimensions >= 2 && measures == 1 { return .heatmap }
+                if dimensions == 1 && rows.count > 1 && rows.count <= 24 { return .bar }
+                return .table
+            }
+            // No roles: a compact two-column (category + one value) result reads well as
+            // a bar chart; anything wider or larger stays a table.
             if columns.count == 2, rows.count <= 24, rows.count > 1 {
                 return .bar
             }

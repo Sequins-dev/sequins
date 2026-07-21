@@ -15,10 +15,11 @@ struct AreaChartView: View {
     let columns: [String]
     let rows: [[Any?]]
     var columnTypes: [NodeTypeLabel] = []
+    var columnRoles: [SeQLColumnRole] = []
 
     var body: some View {
         TimeSeriesChart(columns: columns, rows: rows, columnTypes: columnTypes,
-                        filled: true, stacked: true)
+                        columnRoles: columnRoles, filled: true, stacked: true)
     }
 }
 
@@ -29,17 +30,15 @@ struct BarChartView: View {
     let rows: [[Any?]]
     var stacked: Bool = false
     var columnTypes: [NodeTypeLabel] = []
+    var columnRoles: [SeQLColumnRole] = []
 
     private struct Bar: Identifiable {
         let id = UUID(); let category: String; let value: Double; let series: String
     }
 
-    /// Numeric value columns.
+    /// Numeric value columns (measures when roles are known).
     private var valueCols: [(index: Int, name: String)] {
-        guard columns.count > 1 else { return [] }
-        return (1..<columns.count).compactMap { idx in
-            rows.contains { $0.count > idx && VizFormat.numeric($0[idx]) != nil } ? (idx, columns[idx]) : nil
-        }
+        VizFormat.valueColumns(columns: columns, rows: rows, roles: columnRoles)
     }
 
     private var singleSeries: Bool { valueCols.count == 1 }
@@ -115,6 +114,7 @@ struct PieChartView: View {
     let columns: [String]
     let rows: [[Any?]]
     var columnTypes: [NodeTypeLabel] = []
+    var columnRoles: [SeQLColumnRole] = []
 
     private struct Slice: Identifiable {
         let id = UUID(); let category: String; let value: Double
@@ -122,14 +122,12 @@ struct PieChartView: View {
 
     /// True when the data looks like a time series (pie is the wrong chart for it).
     private var looksTemporal: Bool {
-        columnTypes.first == .timestamp || rows.first?.first is Date
+        VizFormat.isTemporalFirstColumn(columnTypes: columnTypes, rows: rows)
     }
 
     private var slices: [Slice] {
         guard columns.count >= 2 else { return [] }
-        let valueIdx = (1..<columns.count).first { idx in
-            rows.contains { $0.count > idx && VizFormat.numeric($0[idx]) != nil }
-        } ?? 1
+        let valueIdx = VizFormat.valueColumns(columns: columns, rows: rows, roles: columnRoles).first?.index ?? 1
         var out: [Slice] = rows.compactMap { row in
             guard !row.isEmpty, valueIdx < row.count, let v = VizFormat.numeric(row[valueIdx]) else { return nil }
             return Slice(category: VizFormat.string(row.first ?? nil), value: v)
@@ -188,7 +186,7 @@ struct GaugeChartView: View {
     var columnTypes: [NodeTypeLabel] = []
 
     private var value: Double? {
-        rows.first?.compactMap { VizFormat.numeric($0) }.first
+        VizFormat.firstNumeric(inFirstRowOf: rows)
     }
 
     /// A "max" from a second numeric column named max/limit/total, else a nice upper bound.
@@ -254,7 +252,7 @@ struct HeatmapChartView: View {
     }
 
     private var isTemporalX: Bool {
-        columnTypes.first == .timestamp || rows.first?.first is Date
+        VizFormat.isTemporalFirstColumn(columnTypes: columnTypes, rows: rows)
     }
 
     private var cells: [Cell] {

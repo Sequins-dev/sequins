@@ -213,22 +213,14 @@ struct EditEnvironmentView: View {
                 .textFieldStyle(.roundedBorder)
             }
 
-            LabeledContent("Model") {
-                TextField(
-                    environment.isLocal ? "gpt-5.5" : "(optional)",
-                    text: optionalBinding(\.assistantModel)
-                )
-                .textFieldStyle(.roundedBorder)
-            }
-
             LabeledContent(environment.isLocal ? "API Key" : "Bearer Token") {
                 SecureField("", text: $assistantSecret)
                     .textFieldStyle(.roundedBorder)
             }
 
             Text(environment.isLocal
-                ? "Stored securely in your Keychain. Required to chat with the assistant."
-                : "Bearer token for the daemon's assistant endpoint. Stored in your Keychain.")
+                ? "Stored securely in your Keychain. Pick a model from the list in the Assistant tab."
+                : "Bearer token for the daemon's assistant endpoint. Stored in your Keychain. Pick a model in the Assistant tab.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

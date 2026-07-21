@@ -1,20 +1,16 @@
 import Foundation
 import SequinsData
 
-/// Runs the query behind a ``VisualizationView`` and exposes its schema, rows, per-column
-/// semantic types, and the raw batches reactively. Supports a one-shot snapshot
-/// (`executeSeQL`) and a continuously updating live stream (`executeLiveSeQL`).
+/// Runs the query behind a ``VisualizationView`` and exposes its schema, rows, and
+/// per-column semantic types reactively. Supports a one-shot snapshot (`executeSeQL`)
+/// and a continuously updating live stream (`executeLiveSeQL`).
 @MainActor
 @Observable
 final class VisualizationRunner: SeQLSink {
     private(set) var schema: SeQLSchema?
     private(set) var rows: [[Any?]] = []
-    private(set) var recordTrees: [RecordNode] = []
     /// Semantic type per column (temporal/duration/number/id/…), from the Arrow schema.
     private(set) var columnTypes: [NodeTypeLabel] = []
-    /// The raw primary-table batches (kept for renderers that need typed decode, e.g. the
-    /// trace waterfall).
-    private(set) var primaryBatches: [RecordBatch] = []
     private(set) var errorMessage: String?
     private(set) var isLoading = false
 
@@ -22,6 +18,8 @@ final class VisualizationRunner: SeQLSink {
     private var liveStream: LiveSeQLStream?
 
     var columns: [String] { schema?.columnNames ?? [] }
+    /// Per-column semantic roles (dimensions vs measures), when the schema supplies them.
+    var columnRoles: [SeQLColumnRole] { schema?.columnRoles ?? [] }
     var shape: ResponseShape { schema?.shape ?? .table }
 
     /// (Re)start the query. Cancels any prior stream first.
@@ -29,9 +27,7 @@ final class VisualizationRunner: SeQLSink {
         stop()
         errorMessage = nil
         rows = []
-        recordTrees = []
         columnTypes = []
-        primaryBatches = []
         isLoading = true
 
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -75,9 +71,7 @@ final class VisualizationRunner: SeQLSink {
         guard let stream = liveStream else { return }
         if let s = stream.schema { schema = s }
         let batches = stream.batches
-        primaryBatches = batches
         rows = batches.flatMap { $0.toRows() }
-        recordTrees = batches.flatMap { $0.toRecordTrees() }
         if let first = batches.first { columnTypes = first.columnTypeLabels() }
     }
 
@@ -90,12 +84,9 @@ final class VisualizationRunner: SeQLSink {
     nonisolated func onBatch(_ batch: RecordBatch, table: String?) {
         guard table == nil else { return }
         let newRows = batch.toRows()
-        let newTrees = batch.toRecordTrees()
         let types = batch.columnTypeLabels()
         Task { @MainActor in
             self.rows.append(contentsOf: newRows)
-            self.recordTrees.append(contentsOf: newTrees)
-            self.primaryBatches.append(batch)
             if self.columnTypes.isEmpty { self.columnTypes = types }
         }
     }

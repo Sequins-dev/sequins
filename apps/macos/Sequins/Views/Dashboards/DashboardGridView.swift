@@ -74,6 +74,7 @@ struct DashboardGridView: View {
 
                         RowResizeHandle(
                             thickness: handleThickness,
+                            revealed: dragActive,
                             onChanged: { dy in
                                 if let ds = dataSource {
                                     viewModel.setRowHeight(rowIndex, height: row.height + dy, persist: false, dataSource: ds)
@@ -206,6 +207,7 @@ private struct DashboardRowView: View {
                     if panelIndex < row.panels.count - 1 {
                         PanelRatioHandle(
                             width: panelHandleWidth,
+                            revealed: dragActive,
                             onChanged: { dx in ratioDrag(after: panelIndex, dx: dx, panelsWidth: panelsWidth, commit: false) },
                             onEnded: { dx in ratioDrag(after: panelIndex, dx: dx, panelsWidth: panelsWidth, commit: true) }
                         )
@@ -390,10 +392,21 @@ private struct DashboardPanelView: View {
 // MARK: - Handles
 
 /// A vertical bar dragged left/right to re-proportion two adjacent panels.
+///
+/// Its grip is normally invisible so the gap reads as plain margin between charts; it
+/// surfaces only when a chart is being dragged (`revealed` — every boundary lights up as
+/// a drop/resize area) or while this handle itself is hovered or dragged to resize.
 private struct PanelRatioHandle: View {
     let width: CGFloat
+    /// A chart drag is in progress — reveal all separators as drop/resize areas.
+    let revealed: Bool
     let onChanged: (CGFloat) -> Void
     let onEnded: (CGFloat) -> Void
+
+    @State private var isHovering = false
+    @State private var isDragging = false
+
+    private var showGrip: Bool { revealed || isHovering || isDragging }
 
     var body: some View {
         Rectangle()
@@ -402,25 +415,37 @@ private struct PanelRatioHandle: View {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(Color.secondary.opacity(0.35))
                     .frame(width: 3)
+                    .opacity(showGrip ? 1 : 0)
             )
             .frame(width: width)
             .contentShape(Rectangle())
             .onHover { inside in
+                isHovering = inside
                 if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
             }
             .gesture(
                 DragGesture()
-                    .onChanged { onChanged($0.translation.width) }
-                    .onEnded { onEnded($0.translation.width) }
+                    .onChanged { isDragging = true; onChanged($0.translation.width) }
+                    .onEnded { isDragging = false; onEnded($0.translation.width) }
             )
+            .animation(.easeOut(duration: 0.12), value: showGrip)
     }
 }
 
-/// A horizontal bar dragged up/down to resize the row above it.
+/// A horizontal bar dragged up/down to resize the row above it. Like ``PanelRatioHandle``
+/// its grip is blank margin until a chart is dragged (`revealed`) or the handle is
+/// hovered/dragged to resize.
 private struct RowResizeHandle: View {
     let thickness: CGFloat
+    /// A chart drag is in progress — reveal all separators as drop/resize areas.
+    let revealed: Bool
     let onChanged: (CGFloat) -> Void
     let onEnded: (CGFloat) -> Void
+
+    @State private var isHovering = false
+    @State private var isDragging = false
+
+    private var showGrip: Bool { revealed || isHovering || isDragging }
 
     var body: some View {
         Rectangle()
@@ -430,17 +455,20 @@ private struct RowResizeHandle: View {
                     .fill(Color.secondary.opacity(0.35))
                     .frame(height: 3)
                     .padding(.horizontal, 40)
+                    .opacity(showGrip ? 1 : 0)
             )
             .frame(height: thickness)
             .contentShape(Rectangle())
             .onHover { inside in
+                isHovering = inside
                 if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
             }
             .gesture(
                 DragGesture()
-                    .onChanged { onChanged($0.translation.height) }
-                    .onEnded { onEnded($0.translation.height) }
+                    .onChanged { isDragging = true; onChanged($0.translation.height) }
+                    .onEnded { isDragging = false; onEnded($0.translation.height) }
             )
+            .animation(.easeOut(duration: 0.12), value: showGrip)
     }
 }
 

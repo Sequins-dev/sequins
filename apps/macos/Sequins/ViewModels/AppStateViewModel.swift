@@ -20,7 +20,6 @@ final class AppStateViewModel {
     // UI State
     var selectedService: Service?
     var selectedView: NavigationItem = .traces
-    var showSettings = false
     var showServerInfo = false
     var isServiceAttributesExpanded = false
 
@@ -67,17 +66,19 @@ final class AppStateViewModel {
     /// Keychain-stored secret. Returns `nil` when the assistant is not configured for
     /// the current environment (so the UI can prompt the user to set it up).
     ///
-    /// - Local: needs a model + API key (base URL optional → api.openai.com).
-    /// - Remote: needs the daemon `/v1` base URL + a bearer token.
+    /// The model is chosen at runtime in the Assistant tab (from the provider's model
+    /// list), so it isn't required here — only enough to reach the provider/daemon:
+    /// - Local: an API key (base URL optional → api.openai.com).
+    /// - Remote: the daemon `/v1` base URL + a bearer token.
     func assistantConfig() -> AssistantConfig? {
         if let env = environmentManager.selectedEnvironment {
             let secret = KeychainStore.shared.assistantSecret(environmentId: env.id)
             let base = env.assistantBaseURL?.isEmpty == false ? env.assistantBaseURL : nil
             let model = env.assistantModel?.isEmpty == false ? env.assistantModel : nil
             if let secret, !secret.isEmpty {
-                if env.isLocal, let model {
+                if env.isLocal {
                     return AssistantConfig(baseURL: base, model: model, apiKey: secret)
-                } else if !env.isLocal, let base {
+                } else if let base {
                     return AssistantConfig(baseURL: base, model: model, apiKey: secret)
                 }
             }

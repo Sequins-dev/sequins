@@ -181,4 +181,45 @@ public enum VizFormat {
         }
         return words.joined(separator: " ")
     }
+
+    // MARK: - Data-shape helpers (shared across chart renderers)
+
+    /// The numeric "value" columns of a result — the series to plot.
+    ///
+    /// When column `roles` are known, only **measures** (aggregations/computed) count as
+    /// values, so a numeric *dimension* (e.g. `http_status_code`) is never mistaken for a
+    /// data series. Without roles it falls back to "every column after the first that
+    /// carries numbers." A column is only included if it actually contains numeric data.
+    public static func valueColumns(
+        columns: [String], rows: [[Any?]], roles: [SeQLColumnRole] = []
+    ) -> [(index: Int, name: String)] {
+        func carriesNumbers(_ idx: Int) -> Bool {
+            rows.contains { $0.count > idx && numeric($0[idx]) != nil }
+        }
+        if !roles.isEmpty {
+            let measures: [(index: Int, name: String)] = (0..<columns.count).compactMap { idx in
+                guard idx < roles.count, roles[idx].isMeasure, carriesNumbers(idx) else { return nil }
+                return (idx, columns[idx])
+            }
+            if !measures.isEmpty { return measures }
+            // Roles present but no populated measure — fall through to the heuristic.
+        }
+        guard columns.count > 1 else { return [] }
+        return (1..<columns.count).compactMap { idx in
+            carriesNumbers(idx) ? (idx, columns[idx]) : nil
+        }
+    }
+
+    /// Whether the first column is temporal — either typed as a timestamp, or the first
+    /// cell is already a `Date` (the backend emits time buckets as Arrow timestamps).
+    public static func isTemporalFirstColumn(
+        columnTypes: [NodeTypeLabel], rows: [[Any?]]
+    ) -> Bool {
+        columnTypes.first == .timestamp || rows.first?.first is Date
+    }
+
+    /// The first numeric value in the first row (the scalar behind stats/gauges).
+    public static func firstNumeric(inFirstRowOf rows: [[Any?]]) -> Double? {
+        rows.first?.compactMap { numeric($0) }.first
+    }
 }

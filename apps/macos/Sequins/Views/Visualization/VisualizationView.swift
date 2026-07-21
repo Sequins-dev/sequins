@@ -24,12 +24,17 @@ struct VisualizationView: View {
     var effectiveVizType: VizType {
         vizTypeOverride
             ?? visualization.vizType
-            ?? VizType.autoSelect(shape: runner.shape, columns: runner.columns, rows: runner.rows)
+            ?? VizType.autoSelect(
+                shape: runner.shape,
+                columns: runner.columns,
+                rows: runner.rows,
+                roles: runner.columnRoles
+            )
     }
 
     /// The prior-period scalar value (for a stat's delta), when loaded.
     private var previousStatValue: Double? {
-        prevRunner.rows.first?.compactMap { VizFormat.numeric($0) }.first
+        VizFormat.firstNumeric(inFirstRowOf: prevRunner.rows)
     }
 
     /// The query to execute — time-scope rewritten when `applyTimeRange` is set.
@@ -68,7 +73,7 @@ struct VisualizationView: View {
                     columns: runner.columns,
                     rows: runner.rows,
                     columnTypes: runner.columnTypes,
-                    recordTrees: runner.recordTrees,
+                    columnRoles: runner.columnRoles,
                     previousValue: previousStatValue
                 )
             }
@@ -104,21 +109,31 @@ struct VizRenderer: View {
     let columns: [String]
     let rows: [[Any?]]
     var columnTypes: [NodeTypeLabel] = []
-    let recordTrees: [RecordNode]
+    var columnRoles: [SeQLColumnRole] = []
     var previousValue: Double?
 
+    /// A chart type that plots measures but has none to plot degrades to a table, so a
+    /// result with rows always shows something rather than an empty chart.
+    private var effectiveType: VizType {
+        if vizType.plotsMeasures, !rows.isEmpty,
+           VizFormat.valueColumns(columns: columns, rows: rows, roles: columnRoles).isEmpty {
+            return .table
+        }
+        return vizType
+    }
+
     var body: some View {
-        switch vizType {
+        switch effectiveType {
         case .line:
             ExploreTimeSeriesView(columns: columns, rows: rows, columnTypes: columnTypes)
         case .area:
-            AreaChartView(columns: columns, rows: rows, columnTypes: columnTypes)
+            AreaChartView(columns: columns, rows: rows, columnTypes: columnTypes, columnRoles: columnRoles)
         case .bar:
-            BarChartView(columns: columns, rows: rows, stacked: false, columnTypes: columnTypes)
+            BarChartView(columns: columns, rows: rows, stacked: false, columnTypes: columnTypes, columnRoles: columnRoles)
         case .stackedBar:
-            BarChartView(columns: columns, rows: rows, stacked: true, columnTypes: columnTypes)
+            BarChartView(columns: columns, rows: rows, stacked: true, columnTypes: columnTypes, columnRoles: columnRoles)
         case .pie:
-            PieChartView(columns: columns, rows: rows, columnTypes: columnTypes)
+            PieChartView(columns: columns, rows: rows, columnTypes: columnTypes, columnRoles: columnRoles)
         case .gauge:
             GaugeChartView(columns: columns, rows: rows, columnTypes: columnTypes)
         case .stat:

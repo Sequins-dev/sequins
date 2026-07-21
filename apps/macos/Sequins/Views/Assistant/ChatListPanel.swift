@@ -6,6 +6,9 @@ struct ChatListPanel: View {
     @Environment(AppStateViewModel.self) private var appState
     @Bindable var viewModel: AssistantViewModel
 
+    /// The conversation pending deletion (drives the confirmation dialog).
+    @State private var conversationToDelete: ConversationSummary?
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -38,12 +41,8 @@ struct ChatListPanel: View {
             } else {
                 List(selection: selectionBinding) {
                     ForEach(viewModel.conversations) { convo in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(convo.displayTitle)
-                                .lineLimit(1)
-                            Text("\(convo.itemCount) message\(convo.itemCount == 1 ? "" : "s")")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        ConversationRow(convo: convo) {
+                            conversationToDelete = convo
                         }
                         .tag(convo.id)
                     }
@@ -52,6 +51,24 @@ struct ChatListPanel: View {
             }
         }
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .confirmationDialog(
+            "Delete this chat?",
+            isPresented: Binding(
+                get: { conversationToDelete != nil },
+                set: { if !$0 { conversationToDelete = nil } }
+            ),
+            presenting: conversationToDelete
+        ) { convo in
+            Button("Delete", role: .destructive) {
+                if let ds = appState.dataSource {
+                    viewModel.deleteConversation(convo.id, dataSource: ds)
+                }
+                conversationToDelete = nil
+            }
+            Button("Cancel", role: .cancel) { conversationToDelete = nil }
+        } message: { convo in
+            Text("“\(convo.displayTitle)” will be permanently deleted.")
+        }
     }
 
     private var selectionBinding: Binding<String?> {
@@ -63,5 +80,38 @@ struct ChatListPanel: View {
                 }
             }
         )
+    }
+}
+
+/// One conversation row: title + message count, with a delete (✕) button revealed on
+/// hover.
+private struct ConversationRow: View {
+    let convo: ConversationSummary
+    let onDelete: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(convo.displayTitle)
+                    .lineLimit(1)
+                Text("\(convo.itemCount) message\(convo.itemCount == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            if hovering {
+                Button(action: onDelete) {
+                    Image(systemName: "xmark")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Delete chat")
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
     }
 }

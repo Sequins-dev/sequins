@@ -216,11 +216,6 @@ extension DataSource {
     fileprivate func ffiError(
         _ errorPtr: UnsafeMutablePointer<CChar>?, fallback: String
     ) -> SequinsError {
-        if let errorPtr {
-            let msg = String(cString: errorPtr)
-            sequins_string_free(errorPtr)
-            return SequinsError.ffiError(msg)
-        }
-        return SequinsError.ffiError(fallback)
+        consumeFFIError(errorPtr, fallback: .ffiError(fallback))
     }
 }

@@ -12,7 +12,7 @@ struct ExploreScalarView: View {
     var previousValue: Double?
 
     private var currentValue: Double? {
-        rows.first?.compactMap { VizFormat.numeric($0) }.first
+        VizFormat.firstNumeric(inFirstRowOf: rows)
     }
 
     private var display: String {

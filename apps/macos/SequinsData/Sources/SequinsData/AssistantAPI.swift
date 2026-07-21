@@ -33,6 +33,64 @@ public struct AssistantConfig: Sendable {
             apiKey: key
         )
     }
+
+    /// The provider/daemon base URL, defaulting to api.openai.com for a local assistant
+    /// with no explicit base. Trailing slash stripped.
+    public var resolvedBaseURL: String {
+        let base = (baseURL?.isEmpty == false ? baseURL! : "https://api.openai.com/v1")
+        return base.hasSuffix("/") ? String(base.dropLast()) : base
+    }
+}
+
+/// Fetch the available model ids from the assistant provider/daemon's OpenAI-compatible
+/// `GET /v1/models` endpoint (bearer-authenticated with `apiKey`). Returns the ids
+/// sorted and de-duplicated. Works for both a local provider and a remote daemon, since
+/// both speak the OpenAI models API.
+public func fetchAssistantModels(_ config: AssistantConfig) async throws -> [String] {
+    guard let url = URL(string: config.resolvedBaseURL + "/models") else {
+        throw SequinsError.ffiError("invalid assistant base URL")
+    }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 15
+    if let key = config.apiKey, !key.isEmpty {
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+    }
+    let (data, response) = try await URLSession.shared.data(for: request)
+    if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+        let body = String(data: data, encoding: .utf8) ?? ""
+        throw SequinsError.ffiError("models request failed (HTTP \(http.statusCode)): \(body.prefix(200))")
+    }
+    struct ModelList: Decodable {
+        let data: [Model]
+        struct Model: Decodable { let id: String }
+    }
+    let decoded = try JSONDecoder().decode(ModelList.self, from: data)
+    let ids = decoded.data.map { $0.id }
+    // Keep chat/text models; drop embedding/audio/image/moderation/base-completion
+    // families. If filtering would drop everything (an unusual provider), fall back to
+    // the full list rather than showing nothing.
+    let chat = ids.filter(isChatCompletionModel)
+    return Set(chat.isEmpty ? ids : chat).sorted()
+}
+
+/// Heuristic for whether a model id is a text/chat-completion model. The OpenAI
+/// `/v1/models` list carries no capability field, so we filter by well-known id markers:
+/// embeddings, audio (whisper/tts/realtime/transcribe), image (dall-e/gpt-image),
+/// moderation, instruct/base-completion families.
+private func isChatCompletionModel(_ id: String) -> Bool {
+    let lower = id.lowercased()
+    let excludedSubstrings = [
+        "embedding",
+        "whisper", "tts", "audio", "transcribe", "realtime",
+        "dall-e", "dalle", "image",
+        "moderation",
+        "instruct",
+        "text-search", "code-search", "text-similarity",
+    ]
+    if excludedSubstrings.contains(where: lower.contains) { return false }
+    let excludedPrefixes = ["babbage", "davinci"]
+    if excludedPrefixes.contains(where: lower.hasPrefix) { return false }
+    return true
 }
 
 /// A server-executed tool call and its rendered result (assistant "activity").
@@ -153,6 +211,16 @@ public final class Assistant {
 }
 
 extension DataSource {
+    /// Delete a persisted conversation by id. Local data sources only; remote
+    /// connections throw until the daemon exposes conversation deletion.
+    public func deleteConversation(id: String) throws {
+        var errorPtr: UnsafeMutablePointer<CChar>?
+        let ok = id.withCString { sequins_conversation_delete(rawPointer, $0, &errorPtr) }
+        if !ok {
+            throw consumeFFIError(errorPtr, fallback: .ffiError("failed to delete conversation"))
+        }
+    }
+
     /// Construct an ``Assistant`` over this data source and provider/daemon config.
     public func makeAssistant(_ config: AssistantConfig) throws -> Assistant {
         // strdup the config strings; `sequins_assistant_new` copies them synchronously,
