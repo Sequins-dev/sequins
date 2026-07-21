@@ -618,7 +618,10 @@ extension DataSource {
     /// Create a reactive view that transforms a live SeQL query into `ViewDelta` callbacks.
     ///
     /// - Parameters:
-    ///   - query: SeQL query text
+    ///   - query: SeQL query text (may be a scope-less template)
+    ///   - timeRange: Structured time range that overrides the query's inline scope;
+    ///     nil honors the inline scope (kind 0). Prefer this over baking `last <dur>`
+    ///     into the query string.
     ///   - strategy: View strategy (table, aggregate, or flamegraph)
     ///   - retentionNs: Retention window in nanoseconds (0 = default 1h, flamegraph only)
     ///   - onDeltas: Callback invoked on the main thread with each batch of deltas
@@ -627,6 +630,7 @@ extension DataSource {
     @discardableResult
     public func executeView(
         _ query: String,
+        timeRange: TimeRange? = nil,
         strategy: ViewStrategy,
         retentionNs: UInt64 = 0,
         onDeltas: @escaping ([ViewDelta]) -> Void
@@ -678,8 +682,11 @@ extension DataSource {
             }
         }
 
+        let r = timeRange?.ffiScalars ?? (kind: 0, a: 0, b: 0)
         let handle = query.withCString { queryPtr in
-            sequins_view_create(rawPointer, queryPtr, strategy.rawValue, retentionNs, callback, ctxRaw)
+            sequins_view_create(
+                rawPointer, queryPtr, r.kind, r.a, r.b,
+                strategy.rawValue, retentionNs, callback, ctxRaw)
         }
 
         guard let handle else {

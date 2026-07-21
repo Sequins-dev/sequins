@@ -123,21 +123,14 @@ final class MetricsViewModel {
         self.timeRange = timeRange
 
         let duration = timeRange.bounds.end.timeIntervalSince(timeRange.bounds.start)
-        let hours = Int(duration / 3600)
         let binSize = binSizeString(for: duration)
-
-        let timeStr: String
-        if hours > 0 && hours <= 24 {
-            timeStr = "last \(hours)h"
-        } else {
-            let minutes = Int(duration / 60)
-            timeStr = "last \(max(minutes, 1))m"
-        }
 
         let resourceFilter = buildResourceIdFilter(selectedService) ?? ""
 
-        let gaugeQuery = "metrics \(timeStr)\(resourceFilter) | where metric_type != 'histogram' <- (datapoints | group by { ts() bin \(binSize) as bucket, metric_id } { avg(value) as val }) as datapoints"
-        let histQuery = "metrics \(timeStr)\(resourceFilter) | where metric_type = 'histogram' <- (histograms) as histograms"
+        // Scope-less templates — the range is applied structurally to the outer `metrics`
+        // scan (the nested datapoints/histograms subqueries are unchanged).
+        let gaugeQuery = "metrics\(resourceFilter) | where metric_type != 'histogram' <- (datapoints | group by { ts() bin \(binSize) as bucket, metric_id } { avg(value) as val }) as datapoints"
+        let histQuery = "metrics\(resourceFilter) | where metric_type = 'histogram' <- (histograms) as histograms"
 
         print("📊 [MetricsViewModel] Gauge query: \(gaugeQuery)")
         print("📊 [MetricsViewModel] Histogram query: \(histQuery)")
@@ -151,11 +144,11 @@ final class MetricsViewModel {
         error = nil
 
         do {
-            gaugeViewHandle = try dataSource.executeView(gaugeQuery, strategy: .table) { [weak self] deltas in
+            gaugeViewHandle = try dataSource.executeView(gaugeQuery, timeRange: timeRange, strategy: .table) { [weak self] deltas in
                 self?.processGaugeDeltas(deltas)
             }
 
-            histogramViewHandle = try dataSource.executeView(histQuery, strategy: .table) { [weak self] deltas in
+            histogramViewHandle = try dataSource.executeView(histQuery, timeRange: timeRange, strategy: .table) { [weak self] deltas in
                 self?.processHistogramDeltas(deltas)
             }
         } catch {
@@ -207,26 +200,19 @@ final class MetricsViewModel {
 
         self.timeRange = timeRange
         let duration = timeRange.bounds.end.timeIntervalSince(timeRange.bounds.start)
-        let hours = Int(duration / 3600)
         let liveBinSize = binSizeString(for: duration)
-        let timeStr: String
-        if hours > 0 && hours <= 24 {
-            timeStr = "last \(hours)h"
-        } else {
-            let minutes = Int(duration / 60)
-            timeStr = "last \(max(minutes, 1))m"
-        }
         let resourceFilter = buildResourceIdFilter(selectedService) ?? ""
 
         do {
-            let gaugeQuery = "metrics \(timeStr)\(resourceFilter) | where metric_type != 'histogram' <- (datapoints | group by { ts() bin \(liveBinSize) as bucket, metric_id } { avg(value) as val }) as datapoints"
-            gaugeViewHandle = try dataSource.executeView(gaugeQuery, strategy: .table) { [weak self] deltas in
+            // Scope-less templates — range applied structurally to the outer `metrics` scan.
+            let gaugeQuery = "metrics\(resourceFilter) | where metric_type != 'histogram' <- (datapoints | group by { ts() bin \(liveBinSize) as bucket, metric_id } { avg(value) as val }) as datapoints"
+            gaugeViewHandle = try dataSource.executeView(gaugeQuery, timeRange: timeRange, strategy: .table) { [weak self] deltas in
                 self?.processGaugeDeltas(deltas)
             }
 
-            let histQuery = "metrics \(timeStr)\(resourceFilter) | where metric_type = 'histogram' <- (histograms) as histograms"
+            let histQuery = "metrics\(resourceFilter) | where metric_type = 'histogram' <- (histograms) as histograms"
             histogramSnapshotComplete = false
-            histogramViewHandle = try dataSource.executeView(histQuery, strategy: .table) { [weak self] deltas in
+            histogramViewHandle = try dataSource.executeView(histQuery, timeRange: timeRange, strategy: .table) { [weak self] deltas in
                 self?.processHistogramDeltas(deltas)
             }
         } catch {

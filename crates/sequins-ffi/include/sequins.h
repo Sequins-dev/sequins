@@ -2099,7 +2099,11 @@ void sequins_seql_stream_free(struct CStreamHandle *handle);
  *
  * # Parameters
  * - `data_source`   — local data source (remote not yet supported)
- * - `query`         — SeQL query text
+ * - `query`         — SeQL query text (may be a scope-less template)
+ * - `range_kind`    — structured time range selector: 0 = honor the query's inline
+ *   scope, 1 = sliding window (`range_a_ns` = start offset), 2 = absolute
+ *   (`range_a_ns`..`range_b_ns`). A non-zero range overrides any inline scope.
+ * - `range_a_ns` / `range_b_ns` — range bounds, interpreted per `range_kind`.
  * - `strategy`      — [`CViewStrategy`] variant
  * - `retention_ns`  — retention window in nanoseconds; if 0, defaults to 1 hour.
  *   Only meaningful for `Flamegraph` strategy.
@@ -2118,6 +2122,9 @@ void sequins_seql_stream_free(struct CStreamHandle *handle);
  */
 struct CViewHandle *sequins_view_create(struct CDataSource *data_source,
                                         const char *query,
+                                        uint32_t range_kind,
+                                        uint64_t range_a_ns,
+                                        uint64_t range_b_ns,
                                         uint32_t strategy,
                                         uint64_t retention_ns,
                                         void (*on_deltas)(struct CViewDelta*, uint32_t, void*),

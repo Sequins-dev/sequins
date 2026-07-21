@@ -25,16 +25,21 @@ public final class ReactiveTableView {
 
     public init() {}
 
-    /// Start a live view stream. Replaces any existing stream.
+    /// Start a live view stream. Replaces any existing stream. `timeRange`, when set,
+    /// is passed structurally to override the query's inline scope (prefer a scope-less
+    /// template query + this over baking `last <dur>` into the string).
     public func start(
         dataSource: DataSource,
         query: String,
+        timeRange: TimeRange? = nil,
         strategy: ViewStrategy = .table,
         retentionNs: UInt64 = 0
     ) throws {
         try withSpan("ReactiveTableView.start") { _ in
             cancel()
-            viewHandle = try dataSource.executeView(query, strategy: strategy, retentionNs: retentionNs) {
+            viewHandle = try dataSource.executeView(
+                query, timeRange: timeRange, strategy: strategy, retentionNs: retentionNs
+            ) {
                 [weak self] deltas in self?.applyDeltas(deltas)
             }
         }
@@ -44,11 +49,13 @@ public final class ReactiveTableView {
     ///
     /// Use this instead of `start` when you only need a historical snapshot and do not want
     /// the stream to continue receiving live updates after the initial data arrives.
-    public func startSnapshot(dataSource: DataSource, query: String) throws {
+    public func startSnapshot(
+        dataSource: DataSource, query: String, timeRange: TimeRange? = nil
+    ) throws {
         cancel()
         let sink = SnapshotSink(self)
         snapshotSink = sink
-        seqlStream = try dataSource.executeSeQL(query, sink: sink)
+        seqlStream = try dataSource.executeSeQL(query, timeRange: timeRange, sink: sink)
     }
 
     /// Cancel the current stream.

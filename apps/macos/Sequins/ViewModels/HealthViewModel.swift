@@ -100,13 +100,14 @@ final class HealthViewModel {
         let duration = timeRange.bounds.end.timeIntervalSince(timeRange.bounds.start)
         lastDuration = duration
         let timeWindowMinutes = max(1.0, duration / 60.0)
-        let durationStr = formatDuration(duration)
         let resourceFilter = buildResourceIdFilter(selectedService)
         lastResourceFilter = resourceFilter
         let serviceName = selectedService?.name ?? "unknown"
 
+        // Scope-less template queries — the selected range is passed structurally to
+        // `executeView` (see `timeRange:` below), overriding any inline scope.
         let spanQuery =
-            "spans last \(durationStr)\(resourceFilter)"
+            "spans\(resourceFilter)"
             + " | group by {} {"
             + " count() where status == 2 as error_count,"
             + " count() as total,"
@@ -118,7 +119,7 @@ final class HealthViewModel {
             + " }"
 
         let logQuery =
-            "logs last \(durationStr) | where severity_number >= 9\(resourceFilter)"
+            "logs | where severity_number >= 9\(resourceFilter)"
             + " | group by {} { count() as error_logs }"
 
         print("🏥 [HealthViewModel] Span query: \(spanQuery)")
@@ -135,7 +136,9 @@ final class HealthViewModel {
         feed = newFeed
 
         do {
-            spanViewHandle = try dataSource.executeView(spanQuery, strategy: .aggregate) { [weak newFeed] deltas in
+            spanViewHandle = try dataSource.executeView(
+                spanQuery, timeRange: timeRange, strategy: .aggregate
+            ) { [weak newFeed] deltas in
                 for d in deltas where d.type == .tableReplaced || d.type == .rowsAppended {
                     if let batch = d.data.first {
                         newFeed?.applySpanBatch(batch)
@@ -143,7 +146,9 @@ final class HealthViewModel {
                 }
             }
 
-            logViewHandle = try dataSource.executeView(logQuery, strategy: .aggregate) { [weak newFeed] deltas in
+            logViewHandle = try dataSource.executeView(
+                logQuery, timeRange: timeRange, strategy: .aggregate
+            ) { [weak newFeed] deltas in
                 for d in deltas where d.type == .tableReplaced || d.type == .rowsAppended {
                     if let batch = d.data.first {
                         newFeed?.applyLogBatch(batch)
@@ -187,12 +192,15 @@ final class HealthViewModel {
         }
 
         let comparisonWindowMinutes = max(1.0, lastDuration / 60.0)
-        let durationStr = formatDuration(lastDuration)
-        let cutoffNs = UInt64((Date().timeIntervalSince1970 - offsetSeconds) * 1_000_000_000)
+
+        // The prior window `[now - offset - dur, now - offset]`, passed structurally so
+        // the queries stay scope-less templates (no baked `last` / cutoff filter).
+        let priorEnd = Date().addingTimeInterval(-offsetSeconds)
+        let priorStart = priorEnd.addingTimeInterval(-lastDuration)
+        let priorRange = TimeRange.absolute(start: priorStart, end: priorEnd)
 
         let spanQuery =
-            "spans last \(durationStr)\(lastResourceFilter)"
-            + " | where start_time_unix_nano < \(cutoffNs)"
+            "spans\(lastResourceFilter)"
             + " | group by {} {"
             + " count() where status == 2 as error_count,"
             + " count() as total,"
@@ -204,8 +212,7 @@ final class HealthViewModel {
             + " }"
 
         let logQuery =
-            "logs last \(durationStr) | where severity_number >= 9\(lastResourceFilter)"
-            + " | where start_time_unix_nano < \(cutoffNs)"
+            "logs | where severity_number >= 9\(lastResourceFilter)"
             + " | group by {} { count() as error_logs }"
 
         currentFeed.clearComparison()
@@ -224,7 +231,7 @@ final class HealthViewModel {
             let spanSink = SnapshotSink { [weak currentFeed] batch in
                 currentFeed?.applyComparisonSpanBatch(batch, timeWindowMinutes: comparisonWindowMinutes)
             }
-            let _ = try dataSource.executeSeQL(spanQuery, sink: spanSink)
+            let _ = try dataSource.executeSeQL(spanQuery, timeRange: priorRange, sink: spanSink)
         } catch {
             print("🏥 [HealthViewModel] Comparison span query failed: \(error)")
         }
@@ -233,7 +240,7 @@ final class HealthViewModel {
             let logSink = SnapshotSink { [weak currentFeed] batch in
                 currentFeed?.applyComparisonLogBatch(batch, timeWindowMinutes: comparisonWindowMinutes)
             }
-            let _ = try dataSource.executeSeQL(logQuery, sink: logSink)
+            let _ = try dataSource.executeSeQL(logQuery, timeRange: priorRange, sink: logSink)
         } catch {
             print("🏥 [HealthViewModel] Comparison log query failed: \(error)")
         }
@@ -290,14 +297,5 @@ final class HealthViewModel {
         }
         let ids = service.resourceIds.map { String($0) }.joined(separator: ", ")
         return " | where resource_id in [\(ids)]"
-    }
-
-    private func formatDuration(_ duration: TimeInterval) -> String {
-        let hours = Int(duration / 3600)
-        if hours > 0 && hours <= 24 {
-            return "\(hours)h"
-        }
-        let minutes = Int(duration / 60)
-        return "\(max(minutes, 1))m"
     }
 }
