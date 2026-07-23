@@ -1,0 +1,20 @@
+<div id="explore-view" class="flex flex-col h-full overflow-hidden">
+  <div class="shrink-0 border-b border-zinc-700">
+    <textarea
+      rows="3"
+      class="w-full m-0 p-3 bg-zinc-950 text-zinc-100 border-0 border-t border-zinc-700 font-mono text-sm resize-y focus:outline-none box-border"
+      placeholder="spans last 1h"
+      data-bind:query
+      data-on:keydown__prevent="evt.key==='Enter'&&(evt.ctrlKey||evt.metaKey)&&@post('/explore/query')">{{ query }}</textarea>
+    <div class="flex items-center gap-2 px-3 py-2 bg-zinc-900">
+      <button class="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded cursor-pointer border-0"
+        data-on:click="@post('/explore/query')">
+        Run <kbd class="text-[10px] opacity-70">⌘↵</kbd>
+      </button>
+      <span class="ml-auto text-xs text-zinc-500" data-show="$rowCount > 0" data-text="$rowCount + ' rows'"></span>
+    </div>
+  </div>
+  <div id="explore-results" class="overflow-auto flex-1">
+    <div class="flex items-center justify-center h-48 text-zinc-500">Write a SeQL query and press Run</div>
+  </div>
+</div>
