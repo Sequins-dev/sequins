@@ -175,19 +175,19 @@ mod tests {
         let today = parse_with_options("spans today", options).unwrap();
         assert_eq!(
             today.scan.time_range,
-            seql_ast::ast::TimeRange::Absolute {
+            Some(seql_ast::ast::TimeRange::Absolute {
                 start_ns: day_ns * 3,
                 end_ns: day_ns * 4,
-            }
+            })
         );
 
         let yesterday = parse_with_options("spans yesterday", options).unwrap();
         assert_eq!(
             yesterday.scan.time_range,
-            seql_ast::ast::TimeRange::Absolute {
+            Some(seql_ast::ast::TimeRange::Absolute {
                 start_ns: day_ns * 2,
                 end_ns: day_ns * 3,
-            }
+            })
         );
     }
 }

@@ -3,15 +3,16 @@ use crate::expr::{parse_expr, parse_predicate};
 use crate::lexer::{
     identifier, keyword, uint_literal, ws, ws1, KW_AS, KW_ASC, KW_BY, KW_COMPUTE, KW_DESC,
     KW_GROUP, KW_LAST, KW_MERGE, KW_NAVIGATE, KW_OFFSET, KW_PATTERNS, KW_SELECT, KW_SORT, KW_TAKE,
-    KW_UNIQ, KW_WHERE,
+    KW_UNIQ, KW_WHERE, KW_WINDOW,
 };
 use crate::time::{duration_ns, parse_time_scope_at};
 use crate::{ParseError, ParseOptions};
 use seql_ast::ast::{
-    AggregateFn, AggregateStage, Aggregation, AttrScope, CompareExpr, CompareOp, ComputeStage,
-    Derivation, Expr, FieldRef, FilterStage, GroupExpr, LimitStage, Literal, MergeStage,
-    NavigateStage, PatternsStage, Predicate, ProjectField, ProjectStage, QueryAst, QueryMode, Scan,
-    Signal, SortExpr, SortStage, Stage, TimeRange, TimeRangeStage, UniqueStage,
+    AggregateFn, AggregateStage, Aggregation, AttrScope, BinSpec, CompareExpr, CompareOp,
+    ComputeStage, Derivation, Expr, FieldRef, FilterStage, GroupExpr, LimitStage, Literal,
+    MergeStage, NavigateStage, PatternsStage, Predicate, ProjectField, ProjectStage, QueryAst,
+    QueryMode, Scan, Signal, SortExpr, SortStage, Stage, TimeRange, TimeRangeStage, UniqueStage,
+    WindowFn, WindowItem, WindowStage,
 };
 use winnow::combinator::{alt, delimited, opt, preceded, separated};
 use winnow::token::literal;
@@ -41,8 +42,14 @@ fn parse_signal(input: &mut &str) -> ModalResult<Signal> {
 
 fn parse_scan_with_options(input: &mut &str, options: ParseOptions) -> ModalResult<Scan> {
     let signal = parse_signal.parse_next(input)?;
-    ws1.parse_next(input)?;
-    let time_range = parse_time_scope_at(input, options.now_ns)?;
+    // The leading time scope is optional: when present it must be whitespace-
+    // separated; when absent the query is a template whose range is supplied at
+    // execution. `opt` over the (ws1, scope) pair backtracks the whitespace when
+    // there is no scope (e.g. `spans | group by …`), leaving stage parsing intact.
+    let time_range = opt(preceded(ws1, |i: &mut &str| {
+        parse_time_scope_at(i, options.now_ns)
+    }))
+    .parse_next(input)?;
     Ok(Scan { signal, time_range })
 }
 
@@ -103,7 +110,7 @@ fn parse_id_lookup(input: &mut &str) -> ModalResult<QueryAst> {
         bindings: vec![],
         scan: Scan {
             signal,
-            time_range: TimeRange::SlidingWindow { start_ns },
+            time_range: Some(TimeRange::SlidingWindow { start_ns }),
         },
         stages: vec![
             Stage::Filter(FilterStage {
@@ -159,6 +166,38 @@ fn parse_agg_fn(input: &mut &str) -> ModalResult<AggregateFn> {
         preceded(
             literal("p99("),
             (parse_expr, literal(")")).map(|(e, _)| AggregateFn::P99(e)),
+        ),
+        preceded(
+            literal("stddev("),
+            (parse_expr, literal(")")).map(|(e, _)| AggregateFn::Stddev(e)),
+        ),
+        // `variance(` before `var(` — the trailing `(` already disambiguates,
+        // but keep the longer literal first for clarity.
+        preceded(
+            literal("variance("),
+            (parse_expr, literal(")")).map(|(e, _)| AggregateFn::Variance(e)),
+        ),
+        preceded(
+            literal("var("),
+            (parse_expr, literal(")")).map(|(e, _)| AggregateFn::Variance(e)),
+        ),
+        // `percentile(<col>, <q>)` — q is a quantile in 0..=1 (e.g. 0.90). A value
+        // > 1 is treated as a 0–100 percentile and divided by 100.
+        preceded(
+            literal("percentile("),
+            (
+                parse_expr,
+                ws,
+                literal(","),
+                ws,
+                winnow::ascii::float::<_, f64, _>,
+                ws,
+                literal(")"),
+            )
+                .map(|(e, _, _, _, q, _, _)| {
+                    let q = if q > 1.0 { q / 100.0 } else { q };
+                    AggregateFn::Percentile(e, q)
+                }),
         ),
         preceded(
             literal("distinct("),
@@ -230,6 +269,21 @@ fn parse_compute_stage(input: &mut &str) -> ModalResult<Stage> {
     Ok(Stage::Compute(ComputeStage { derivations }))
 }
 
+/// Parse a `ts() bin …` width: `auto`, `<N>%` (a percentage of the query
+/// window), or a fixed `<duration>` like `5m`. Percentage/`auto` are resolved
+/// to a concrete width at compile time so bucketing scales with the range.
+fn parse_bin_spec(input: &mut &str) -> ModalResult<BinSpec> {
+    use winnow::ascii::float;
+    alt((
+        literal("auto").map(|_| BinSpec::Auto),
+        // `<number>%` must be tried before a bare duration: `float` parses the
+        // leading digits and the `%` distinguishes it from `5m`/`30s`.
+        (float::<_, f64, _>, ws, literal("%")).map(|(pct, _, _)| BinSpec::Percent(pct)),
+        duration_ns.map(BinSpec::Fixed),
+    ))
+    .parse_next(input)
+}
+
 fn parse_aggregate_stage(input: &mut &str) -> ModalResult<Stage> {
     literal(KW_GROUP).parse_next(input)?;
     ws1.parse_next(input)?;
@@ -245,14 +299,14 @@ fn parse_aggregate_stage(input: &mut &str) -> ModalResult<Stage> {
                 parse_expr,
                 // ws (not ws1): parse_expr's loops consume trailing whitespace,
                 // so there may be 0 spaces left before "bin" / "as".
-                opt(preceded((ws, literal("bin"), ws1), duration_ns)),
+                opt(preceded((ws, literal("bin"), ws1), parse_bin_spec)),
                 opt(preceded((ws, literal(KW_AS), ws1), identifier)),
                 ws,
             )
-                .map(|(_, expr, bin_ns, alias, _)| GroupExpr {
+                .map(|(_, expr, bin, alias, _)| GroupExpr {
                     expr,
                     alias: alias.map(str::to_string),
-                    bin_ns,
+                    bin,
                 }),
             (ws, literal(","), ws),
         ),
@@ -465,6 +519,62 @@ fn parse_stage(input: &mut &str) -> ModalResult<Stage> {
         parse_unique_stage,
         parse_patterns_stage,
         parse_time_range_stage,
+        parse_window_stage,
+    ))
+    .parse_next(input)
+}
+
+/// `window { <fn> as <alias>, … }` — window functions over the ordered result.
+fn parse_window_stage(input: &mut &str) -> ModalResult<Stage> {
+    keyword(KW_WINDOW).parse_next(input)?;
+    ws.parse_next(input)?;
+    let items: Vec<WindowItem> = delimited(
+        (literal("{"), ws),
+        separated(1.., parse_window_item, (ws, literal(","), ws)),
+        (ws, literal("}")),
+    )
+    .parse_next(input)?;
+    Ok(Stage::Window(WindowStage { items }))
+}
+
+fn parse_window_item(input: &mut &str) -> ModalResult<WindowItem> {
+    let function = parse_window_fn.parse_next(input)?;
+    (ws, keyword(KW_AS), ws1).parse_next(input)?;
+    let alias = identifier.parse_next(input)?;
+    Ok(WindowItem {
+        function,
+        alias: alias.to_string(),
+    })
+}
+
+fn parse_window_fn(input: &mut &str) -> ModalResult<WindowFn> {
+    alt((
+        preceded(
+            literal("moving_avg("),
+            (
+                parse_expr,
+                ws,
+                literal(","),
+                ws,
+                uint_literal,
+                ws,
+                literal(")"),
+            )
+                .map(|(e, _, _, _, n, _, _)| WindowFn::MovingAvg(e, n)),
+        ),
+        // `cumulative(` and `running_sum(` are synonyms.
+        preceded(
+            literal("cumulative("),
+            (parse_expr, literal(")")).map(|(e, _)| WindowFn::Cumulative(e)),
+        ),
+        preceded(
+            literal("running_sum("),
+            (parse_expr, literal(")")).map(|(e, _)| WindowFn::Cumulative(e)),
+        ),
+        preceded(
+            literal("delta("),
+            (parse_expr, literal(")")).map(|(e, _)| WindowFn::Delta(e)),
+        ),
     ))
     .parse_next(input)
 }
@@ -562,9 +672,9 @@ mod tests {
         assert_eq!(ast.scan.signal, Signal::Spans);
         assert_eq!(
             ast.scan.time_range,
-            TimeRange::SlidingWindow {
+            Some(TimeRange::SlidingWindow {
                 start_ns: 3_600_000_000_000
-            }
+            })
         );
         assert!(ast.stages.is_empty());
     }
@@ -644,7 +754,7 @@ mod tests {
         .unwrap();
         if let Stage::Aggregate(agg) = &ast.stages[0] {
             assert_eq!(agg.group_by.len(), 1);
-            assert!(agg.group_by[0].bin_ns.is_some());
+            assert!(agg.group_by[0].bin.is_some());
             assert_eq!(agg.group_by[0].alias.as_deref(), Some("bucket"));
         } else {
             panic!("expected aggregate stage");
@@ -1072,9 +1182,9 @@ mod tests {
         assert_eq!(ast.scan.signal, Signal::Spans);
         assert_eq!(
             ast.scan.time_range,
-            TimeRange::SlidingWindow {
+            Some(TimeRange::SlidingWindow {
                 start_ns: 24 * 60 * 60 * 1_000_000_000
-            }
+            })
         );
         // Should have Filter + Limit
         assert_eq!(ast.stages.len(), 2);

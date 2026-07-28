@@ -39,8 +39,10 @@ pub enum QueryMode {
 pub struct Scan {
     /// Which signal type to scan
     pub signal: Signal,
-    /// Time range to scan
-    pub time_range: TimeRange,
+    /// Time range to scan. `None` marks a **query template** whose range is
+    /// supplied separately at execution (e.g. the dashboard's selected range);
+    /// an inline scope fills this at parse time.
+    pub time_range: Option<TimeRange>,
 }
 
 /// Signal type to query
@@ -118,6 +120,9 @@ pub enum Stage {
     Merge(MergeStage),
     /// Filter by time range (sliding window)
     TimeRange(TimeRangeStage),
+    /// Window functions over the (time-ordered) result — moving averages, running
+    /// totals, period-over-period deltas.
+    Window(WindowStage),
 }
 
 // ── Filter ────────────────────────────────────────────────────────────────────
@@ -417,6 +422,21 @@ pub struct AggregateStage {
     pub aggregations: Vec<Aggregation>,
 }
 
+/// How a time-bucketing `ts() bin …` width is specified.
+///
+/// `Percent`/`Auto` are resolved to a concrete nanosecond width at compile time
+/// from the query's effective time window, so bucketing scales with the selected
+/// range instead of being pinned to a fixed duration.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum BinSpec {
+    /// Fixed width in nanoseconds (`bin 5m`).
+    Fixed(u64),
+    /// Percentage of the query time window (`bin 10%` → ~10 buckets).
+    Percent(f64),
+    /// A "nice"-rounded width derived from the query window (`bin auto`).
+    Auto,
+}
+
 /// An expression used for grouping
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupExpr {
@@ -424,8 +444,9 @@ pub struct GroupExpr {
     pub expr: Expr,
     /// Optional alias for the group key column
     pub alias: Option<String>,
-    /// Optional time bin width in nanoseconds (for time bucketing)
-    pub bin_ns: Option<u64>,
+    /// Optional time bucketing spec (for time series). Resolved to a concrete
+    /// nanosecond width at compile time (see [`BinSpec`]).
+    pub bin: Option<BinSpec>,
 }
 
 /// An aggregation computation
@@ -458,6 +479,13 @@ pub enum AggregateFn {
     P95(Expr),
     /// 99th percentile of a field
     P99(Expr),
+    /// Arbitrary percentile of a field. The `f64` is the quantile in `0.0..=1.0`
+    /// (e.g. `0.90` for p90).
+    Percentile(Expr, f64),
+    /// Standard deviation of a field
+    Stddev(Expr),
+    /// Variance of a field
+    Variance(Expr),
     /// Error rate (fraction of rows with status=Error)
     ErrorRate,
     /// Request throughput (rows per second)
@@ -511,6 +539,35 @@ pub struct NavigateStage {
 pub struct UniqueStage {
     /// Field to deduplicate on
     pub field: FieldRef,
+}
+
+/// Window stage — compute window functions over the ordered result. Applied
+/// after aggregation, ordered by the time-bucket column (or the first temporal
+/// column), so a time series can gain moving averages / running totals / deltas.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowStage {
+    /// The window computations, each producing one new aliased column.
+    pub items: Vec<WindowItem>,
+}
+
+/// One window computation and the column name it produces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowItem {
+    /// The window function to apply.
+    pub function: WindowFn,
+    /// Output column name.
+    pub alias: String,
+}
+
+/// A window function over the ordered result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum WindowFn {
+    /// Moving average of `expr` over a trailing frame of `n` rows (inclusive).
+    MovingAvg(Expr, u64),
+    /// Running (cumulative) sum of `expr` from the first row to the current row.
+    Cumulative(Expr),
+    /// Period-over-period difference: `expr - lag(expr, 1)`.
+    Delta(Expr),
 }
 
 /// Patterns stage — detect patterns in string fields
@@ -572,9 +629,9 @@ mod tests {
             bindings: vec![],
             scan: Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::SlidingWindow {
+                time_range: Some(TimeRange::SlidingWindow {
                     start_ns: 3_600_000_000_000,
-                },
+                }),
             },
             stages: vec![
                 Stage::Filter(FilterStage {
@@ -669,7 +726,7 @@ mod tests {
                     name: "service_name".into(),
                 }),
                 alias: Some("service".into()),
-                bin_ns: None,
+                bin: None,
             }],
             aggregations: vec![
                 Aggregation {
@@ -733,10 +790,10 @@ mod tests {
             name: "errors".into(),
             scan: Scan {
                 signal: Signal::Spans,
-                time_range: TimeRange::Absolute {
+                time_range: Some(TimeRange::Absolute {
                     start_ns: 1_700_000_000_000_000_000,
                     end_ns: 1_700_003_600_000_000_000,
-                },
+                }),
             },
             stages: vec![Stage::Filter(FilterStage {
                 predicate: Predicate::Compare(CompareExpr {

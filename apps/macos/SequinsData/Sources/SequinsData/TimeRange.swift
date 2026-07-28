@@ -28,6 +28,22 @@ public enum TimeRange: Equatable, Sendable {
         return false
     }
 
+    /// The `(range_kind, range_a_ns, range_b_ns)` triple passed to
+    /// `sequins_seql_query[_live]`. Supplying this to a query overrides its inline
+    /// time scope, so a saved visualization runs against the selected range.
+    /// kind 1 = relative sliding window (`a` = duration ns); 2 = absolute
+    /// (`a` = start ns, `b` = end ns).
+    public var ffiScalars: (kind: UInt32, a: UInt64, b: UInt64) {
+        switch self {
+        case .relative(let duration):
+            return (1, UInt64(max(0, duration) * 1_000_000_000), 0)
+        case .absolute(let start, let end):
+            let s = UInt64(max(0, start.timeIntervalSince1970) * 1_000_000_000)
+            let e = UInt64(max(0, end.timeIntervalSince1970) * 1_000_000_000)
+            return (2, s, e)
+        }
+    }
+
     /// The duration of this time range
     public var duration: TimeInterval {
         switch self {

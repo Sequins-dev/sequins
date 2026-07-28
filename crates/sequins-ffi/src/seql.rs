@@ -25,7 +25,6 @@ use seql_ast::ast::QueryAst;
 use seql_parser::{parse, ParseError};
 use sequins_flight::{decode_metadata, SeqlMetadata};
 use sequins_flight::{ipc_to_batch, SchemaFrame};
-use sequins_traits::QueryApi;
 use sequins_traits::QueryError;
 use std::ffi::CStr;
 use std::ffi::CString;
@@ -243,11 +242,15 @@ enum QueryExecutor {
 }
 
 impl QueryExecutor {
-    async fn query(&self, seql: &str) -> Result<sequins_traits::SeqlStream, QueryError> {
+    async fn query_with_range(
+        &self,
+        seql: &str,
+        tr: Option<seql_ast::ast::TimeRange>,
+    ) -> Result<sequins_traits::SeqlStream, QueryError> {
         match self {
             #[cfg(feature = "local")]
-            QueryExecutor::Local(b) => b.query(seql).await,
-            QueryExecutor::Remote(c) => c.query(seql).await,
+            QueryExecutor::Local(b) => b.query_with_range(seql, tr).await,
+            QueryExecutor::Remote(c) => c.query_with_range(seql, tr).await,
         }
     }
 
@@ -256,6 +259,18 @@ impl QueryExecutor {
             #[cfg(feature = "local")]
             QueryExecutor::Local(b) => b.query_live(seql).await,
             QueryExecutor::Remote(c) => c.query_live(seql).await,
+        }
+    }
+
+    async fn query_live_with_range(
+        &self,
+        seql: &str,
+        tr: Option<seql_ast::ast::TimeRange>,
+    ) -> Result<sequins_traits::SeqlStream, QueryError> {
+        match self {
+            #[cfg(feature = "local")]
+            QueryExecutor::Local(b) => b.query_live_with_range(seql, tr).await,
+            QueryExecutor::Remote(c) => c.query_live_with_range(seql, tr).await,
         }
     }
 
@@ -280,6 +295,21 @@ impl QueryExecutor {
                 c.sql(sql).await
             }
         }
+    }
+}
+
+/// Build an optional structured time range from the FFI scalar triple.
+/// `kind`: 0 = none (use the query's inline scope), 1 = relative sliding window
+/// (`a` = duration ns), 2 = absolute (`a` = start ns, `b` = end ns). A supplied
+/// range overrides any inline scope in the query.
+fn ffi_time_range(kind: u32, a: u64, b: u64) -> Option<seql_ast::ast::TimeRange> {
+    match kind {
+        1 => Some(seql_ast::ast::TimeRange::SlidingWindow { start_ns: a }),
+        2 => Some(seql_ast::ast::TimeRange::Absolute {
+            start_ns: a,
+            end_ns: b,
+        }),
+        _ => None,
     }
 }
 
@@ -329,6 +359,9 @@ pub unsafe extern "C" fn sequins_seql_cancel(handle: *mut CStreamHandle) {
 pub unsafe extern "C" fn sequins_seql_query(
     data_source: *mut CDataSource,
     query_text: *const c_char,
+    range_kind: u32,
+    range_a_ns: u64,
+    range_b_ns: u64,
     vtable: CFrameSinkVTable,
     ctx: *mut c_void,
 ) -> *mut CStreamHandle {
@@ -336,6 +369,7 @@ pub unsafe extern "C" fn sequins_seql_query(
     if data_source.is_null() || query_text.is_null() {
         return std::ptr::null_mut();
     }
+    let time_range = ffi_time_range(range_kind, range_a_ns, range_b_ns);
 
     // Convert C string to Rust str
     let query_cstr = CStr::from_ptr(query_text);
@@ -377,8 +411,8 @@ pub unsafe extern "C" fn sequins_seql_query(
     // SAFETY: SinkCtx wraps raw C pointers that the caller guarantees are
     // valid and thread-safe for the lifetime of the stream.
     let task = RUNTIME.spawn(AssertSend(async move {
-        // Use QueryApi to compile and execute in one call
-        let mut stream = match executor.query(&query_str).await {
+        // Use QueryApi to compile and execute in one call (range overrides scope)
+        let mut stream = match executor.query_with_range(&query_str, time_range).await {
             Ok(s) => s,
             Err(e) => {
                 let c_err = CQueryError::from_error(&e);
@@ -628,12 +662,16 @@ pub unsafe extern "C" fn sequins_app_state_query(
 pub unsafe extern "C" fn sequins_seql_query_live(
     data_source: *mut CDataSource,
     query_text: *const c_char,
+    range_kind: u32,
+    range_a_ns: u64,
+    range_b_ns: u64,
     vtable: CFrameSinkVTable,
     ctx: *mut c_void,
 ) -> *mut CStreamHandle {
     if data_source.is_null() || query_text.is_null() {
         return std::ptr::null_mut();
     }
+    let time_range = ffi_time_range(range_kind, range_a_ns, range_b_ns);
 
     let query_cstr = CStr::from_ptr(query_text);
     let query_str = match query_cstr.to_str() {
@@ -671,7 +709,7 @@ pub unsafe extern "C" fn sequins_seql_query_live(
     };
 
     let task = RUNTIME.spawn(AssertSend(async move {
-        let mut stream = match executor.query_live(&query_str).await {
+        let mut stream = match executor.query_live_with_range(&query_str, time_range).await {
             Ok(s) => s,
             Err(e) => {
                 let c_err = CQueryError::from_error(&e);
@@ -1309,7 +1347,8 @@ mod tests {
         };
 
         let query = CString::new("spans last 1h | take 5").unwrap();
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
 
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
 
@@ -1346,7 +1385,8 @@ mod tests {
         };
 
         let query = CString::new("spans last 1h | select trace_id, name | take 3").unwrap();
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
 
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
 
@@ -1395,7 +1435,8 @@ mod tests {
         // Invalid query: unknown field
         let query =
             CString::new("spans last 1h | select invalid_field_that_does_not_exist").unwrap();
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
 
         // For invalid queries, the handle might still be returned, but we get an error frame
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
@@ -1439,8 +1480,9 @@ mod tests {
             on_warning: None,
             on_error: Some(on_error_callback),
         };
-        let result =
-            unsafe { sequins_seql_query(std::ptr::null_mut(), query.as_ptr(), vtable1, ctx) };
+        let result = unsafe {
+            sequins_seql_query(std::ptr::null_mut(), query.as_ptr(), 0, 0, 0, vtable1, ctx)
+        };
         assert!(result.is_null(), "Should return null for null data_source");
 
         // Test null query
@@ -1453,7 +1495,8 @@ mod tests {
             on_warning: None,
             on_error: Some(on_error_callback),
         };
-        let result = unsafe { sequins_seql_query(data_source, std::ptr::null(), vtable2, ctx) };
+        let result =
+            unsafe { sequins_seql_query(data_source, std::ptr::null(), 0, 0, 0, vtable2, ctx) };
         assert!(result.is_null(), "Should return null for null query");
 
         // Cleanup
@@ -1479,7 +1522,8 @@ mod tests {
 
         // UTF-8 query with special characters
         let query = CString::new("spans | where name = 'test-✓' | take 5").unwrap();
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
 
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
 
@@ -1516,7 +1560,8 @@ mod tests {
         let query = CString::new("spans last 1h | take 5").unwrap();
 
         // Create stream handle
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
 
         // Cancel the stream
@@ -1561,7 +1606,8 @@ mod tests {
         };
 
         let query = CString::new("spans last 1h | take 5").unwrap();
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
 
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
 
@@ -1599,7 +1645,8 @@ mod tests {
         };
 
         let query = CString::new("spans last 1h | take 10").unwrap();
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
 
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
 
