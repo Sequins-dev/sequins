@@ -200,7 +200,7 @@ pub fn otlp_profiles_to_batches(
             // Build mappings from mapping_table
             for (i, m) in dict.mapping_table.iter().enumerate() {
                 let filename = get_str(m.filename_strindex);
-                let mapping_id = fnv1a_64(format!("{}{}", i, &filename).as_bytes());
+                let mapping_id = fnv1a_64(format!("{}{}", i, filename).as_bytes());
                 mapping_map.entry(mapping_id).or_insert(MappingData {
                     filename,
                     build_id: None,
