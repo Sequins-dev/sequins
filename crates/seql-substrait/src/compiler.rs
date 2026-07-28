@@ -2292,7 +2292,10 @@ mod tests {
                       http_error_score__value, latency_score, latency_score__value";
         // Scope-less template: a range is injected at execution (as a dashboard does).
         let ast = seql_parser::parse(q).expect("health dashboard query should parse");
-        assert_eq!(ast.scan.time_range, None, "template carries no inline scope");
+        assert_eq!(
+            ast.scan.time_range, None,
+            "template carries no inline scope"
+        );
         let bytes = compile_ast_with_range(
             ast,
             Some(TimeRange::SlidingWindow {
@@ -2345,7 +2348,8 @@ mod tests {
                 count() where attr.http_status_code >= 500 as c5xx }",
         ];
         for q in queries {
-            let ast = seql_parser::parse(q).unwrap_or_else(|e| panic!("parse failed for `{q}`: {e:?}"));
+            let ast =
+                seql_parser::parse(q).unwrap_or_else(|e| panic!("parse failed for `{q}`: {e:?}"));
             let bytes = compile_ast_with_range(
                 ast,
                 Some(TimeRange::SlidingWindow {
