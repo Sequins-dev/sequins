@@ -729,7 +729,8 @@ mod tests {
         };
 
         let query = CString::new("spans last 1h | take 5").unwrap();
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
 
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
 
@@ -824,7 +825,8 @@ mod tests {
             on_warning: None,
             on_error: Some(on_error),
         };
-        let handle1 = unsafe { sequins_seql_query(data_source, query1.as_ptr(), vtable1, ctx1) };
+        let handle1 =
+            unsafe { sequins_seql_query(data_source, query1.as_ptr(), 0, 0, 0, vtable1, ctx1) };
 
         // Start second query concurrently
         let ctx2 = &result2 as *const _ as *mut std::ffi::c_void;
@@ -838,7 +840,8 @@ mod tests {
             on_warning: None,
             on_error: Some(on_error),
         };
-        let handle2 = unsafe { sequins_seql_query(data_source, query2.as_ptr(), vtable2, ctx2) };
+        let handle2 =
+            unsafe { sequins_seql_query(data_source, query2.as_ptr(), 0, 0, 0, vtable2, ctx2) };
 
         assert!(!handle1.is_null(), "First stream handle should not be null");
         assert!(

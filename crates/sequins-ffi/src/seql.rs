@@ -1347,7 +1347,8 @@ mod tests {
         };
 
         let query = CString::new("spans last 1h | take 5").unwrap();
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
 
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
 
@@ -1384,7 +1385,8 @@ mod tests {
         };
 
         let query = CString::new("spans last 1h | select trace_id, name | take 3").unwrap();
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
 
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
 
@@ -1433,7 +1435,8 @@ mod tests {
         // Invalid query: unknown field
         let query =
             CString::new("spans last 1h | select invalid_field_that_does_not_exist").unwrap();
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
 
         // For invalid queries, the handle might still be returned, but we get an error frame
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
@@ -1477,8 +1480,9 @@ mod tests {
             on_warning: None,
             on_error: Some(on_error_callback),
         };
-        let result =
-            unsafe { sequins_seql_query(std::ptr::null_mut(), query.as_ptr(), vtable1, ctx) };
+        let result = unsafe {
+            sequins_seql_query(std::ptr::null_mut(), query.as_ptr(), 0, 0, 0, vtable1, ctx)
+        };
         assert!(result.is_null(), "Should return null for null data_source");
 
         // Test null query
@@ -1491,7 +1495,8 @@ mod tests {
             on_warning: None,
             on_error: Some(on_error_callback),
         };
-        let result = unsafe { sequins_seql_query(data_source, std::ptr::null(), vtable2, ctx) };
+        let result =
+            unsafe { sequins_seql_query(data_source, std::ptr::null(), 0, 0, 0, vtable2, ctx) };
         assert!(result.is_null(), "Should return null for null query");
 
         // Cleanup
@@ -1517,7 +1522,8 @@ mod tests {
 
         // UTF-8 query with special characters
         let query = CString::new("spans | where name = 'test-✓' | take 5").unwrap();
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
 
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
 
@@ -1554,7 +1560,8 @@ mod tests {
         let query = CString::new("spans last 1h | take 5").unwrap();
 
         // Create stream handle
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
 
         // Cancel the stream
@@ -1599,7 +1606,8 @@ mod tests {
         };
 
         let query = CString::new("spans last 1h | take 5").unwrap();
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
 
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
 
@@ -1637,7 +1645,8 @@ mod tests {
         };
 
         let query = CString::new("spans last 1h | take 10").unwrap();
-        let stream_handle = unsafe { sequins_seql_query(data_source, query.as_ptr(), vtable, ctx) };
+        let stream_handle =
+            unsafe { sequins_seql_query(data_source, query.as_ptr(), 0, 0, 0, vtable, ctx) };
 
         assert!(!stream_handle.is_null(), "Stream handle should not be null");
 
