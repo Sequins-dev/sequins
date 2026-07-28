@@ -7,7 +7,9 @@
 
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+pub mod assistant;
 mod compat;
+pub mod dashboard;
 pub mod data_source;
 pub mod logging;
 pub mod management;

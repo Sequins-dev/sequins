@@ -33,6 +33,13 @@ impl Storage {
         &self.wal
     }
 
+    /// The durable app-state store (chat conversations + dashboards). Shared with
+    /// the DataFusion backend (to project it into queryable tables) and the
+    /// assistant's Responses endpoint (to persist conversations).
+    pub fn app_state(&self) -> &Arc<sequins_metadata::AppStateStore> {
+        &self.app_state
+    }
+
     /// Get the live query broadcast sender (for publishing RecordBatches to live subscribers)
     pub fn live_broadcast_tx(&self) -> broadcast::Sender<(Signal, Arc<RecordBatch>)> {
         self.live_broadcast.clone()

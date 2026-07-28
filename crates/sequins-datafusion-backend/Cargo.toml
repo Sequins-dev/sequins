@@ -21,6 +21,8 @@ sequins-types      = { workspace = true }
 sequins-attribute-codec = { workspace = true, features = ["datafusion"] }
 sequins-live-query = { workspace = true }
 sequins-traits     = { workspace = true }
+sequins-metadata   = { workspace = true }
+serde_json         = { workspace = true }
 
 # Arrow + DataFusion
 arrow                = { workspace = true }

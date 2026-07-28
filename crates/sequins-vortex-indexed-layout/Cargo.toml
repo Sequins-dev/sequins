@@ -28,3 +28,8 @@ tempfile = { workspace = true }
 # Arrow (for reader expression handling)
 arrow = { workspace = true }
 datafusion = { workspace = true }
+
+[dev-dependencies]
+# `test-util` exposes the deterministic-seed bloom constructor the pruning
+# tests need; random seeds make specific false-positive assertions flaky.
+sequins-companion-index = { workspace = true, features = ["test-util"] }

@@ -55,8 +55,22 @@ impl Storage {
                     let ct = cold_tier_ref.read().await;
                     match ct.write_signal(signal, (*batch).clone()).await {
                         Ok(()) => true,
+                        // Permanent: the cold format can't encode this batch's schema
+                        // (e.g. a Map column). Retrying never helps, so report success
+                        // to EVICT it from the hot tier — otherwise it accumulates
+                        // forever and OOM-kills the process. Data is dropped (logged).
+                        Err(e) if e.is_unsupported_for_cold() => {
+                            tracing::warn!(
+                                "dropping {:?} batch that cold storage cannot encode \
+                                 (not persisted): {}",
+                                signal,
+                                e
+                            );
+                            true
+                        }
+                        // Transient (I/O, etc.): retain so it retries on the next pass.
                         Err(e) => {
-                            tracing::error!("cold flush for {:?} failed: {}", signal, e);
+                            tracing::error!("cold flush for {:?} failed (retained): {}", signal, e);
                             false
                         }
                     }
@@ -73,6 +87,25 @@ impl Storage {
 
         // Load persisted retention policy from object storage if it exists.
         let retention_policy = Self::load_retention_policy(&store, &config.cold_tier.uri).await?;
+
+        // App state (conversations + dashboards) lives under a *shared* `app_state`
+        // prefix of the cold root (no node id) so the whole cluster/team sees the
+        // same dashboards and conversations. Hydrate it from durable storage.
+        let app_base =
+            sequins_cold_tier::store_base_path(&config.cold_tier.uri).trim_end_matches('/');
+        let app_state_prefix = if app_base.is_empty() {
+            "app_state".to_string()
+        } else {
+            format!("{app_base}/app_state")
+        };
+        let app_state = Arc::new(sequins_metadata::AppStateStore::new(
+            store.clone(),
+            app_state_prefix,
+        ));
+        app_state
+            .load()
+            .await
+            .map_err(|e| crate::error::Error::Storage(format!("Failed to load app state: {e}")))?;
 
         // Initialize the WAL under this node's private sub-prefix of the shared
         // cold root (bucket-relative for s3://gs://az://, the local path for
@@ -107,6 +140,7 @@ impl Storage {
             live_query_manager,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             retention_policy: Arc::new(RwLock::new(retention_policy)),
+            app_state,
             clock,
             replay_seq: std::sync::atomic::AtomicU64::new(0),
         };

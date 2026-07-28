@@ -5,7 +5,9 @@
 //! Returns a `SeqlStream` of `FlightData` for the caller to process.
 
 use arrow_flight::flight_service_client::FlightServiceClient;
-use arrow_flight::sql::{CommandStatementSubstraitPlan, ProstMessageExt, SubstraitPlan};
+use arrow_flight::sql::{
+    CommandStatementQuery, CommandStatementSubstraitPlan, ProstMessageExt, SubstraitPlan,
+};
 use arrow_flight::{FlightDescriptor, Ticket};
 use async_trait::async_trait;
 use datafusion::execution::context::SessionContext;
@@ -29,6 +31,11 @@ pub struct RemoteClient {
     /// Optional bearer token sent as `authorization: Bearer <token>` on every
     /// request. `None` = no auth header (the default; a keyless server ignores it).
     token: Option<String>,
+    /// Base URL of the Pro management API (e.g. `http://host:8081`), used for the
+    /// dashboard REST endpoints. `None` disables the remote dashboard interface.
+    management_url: Option<String>,
+    /// HTTP client for the management REST endpoints (dashboards).
+    http: reqwest::Client,
 }
 
 impl RemoteClient {
@@ -54,7 +61,16 @@ impl RemoteClient {
             endpoint,
             schema_ctx: Arc::new(schema_ctx),
             token,
+            management_url: None,
+            http: reqwest::Client::new(),
         })
+    }
+
+    /// Configure the Pro management API base URL (e.g. `http://host:8081`) so the
+    /// dashboard REST endpoints work. Without it, [`DashboardApi`] calls error.
+    pub fn with_management_url(mut self, url: Option<String>) -> Self {
+        self.management_url = url.map(|u| u.trim_end_matches('/').to_string());
+        self
     }
 
     /// Wrap `msg` in a request, adding the `authorization: Bearer <token>` header
@@ -90,6 +106,17 @@ impl RemoteClient {
         Self::new("http://localhost:4319")
     }
 
+    /// Execute a **read-only** plain SQL query over Flight SQL's standard
+    /// `CommandStatementQuery` path and return the resulting `SeqlStream`.
+    async fn execute_sql(&self, sql: String) -> Result<SeqlStream, QueryError> {
+        let cmd = CommandStatementQuery {
+            query: sql,
+            transaction_id: None,
+        };
+        self.get_flight_info_and_do_get(cmd.as_any().encode_to_vec())
+            .await
+    }
+
     /// Send Substrait plan bytes to the server via `DoGet` and return the
     /// resulting `SeqlStream`.
     ///
@@ -99,13 +126,6 @@ impl RemoteClient {
     /// 2. Extract the ticket from the first endpoint.
     /// 3. Call `DoGet(ticket)` to open the streaming result.
     async fn execute_plan(&self, plan_bytes: Vec<u8>) -> Result<SeqlStream, QueryError> {
-        // connect_lazy() must be called from an async context (needs a tokio reactor).
-        // execute_plan() is always called from an async context, so this is safe.
-        let channel = self.endpoint.clone().connect_lazy();
-        let mut client =
-            FlightServiceClient::new(channel).max_decoding_message_size(64 * 1024 * 1024);
-
-        // Step 1: GetFlightInfo → get ticket
         let cmd = CommandStatementSubstraitPlan {
             plan: Some(SubstraitPlan {
                 plan: plan_bytes.clone().into(),
@@ -113,7 +133,21 @@ impl RemoteClient {
             }),
             transaction_id: None,
         };
-        let descriptor = FlightDescriptor::new_cmd(cmd.as_any().encode_to_vec());
+        self.get_flight_info_and_do_get(cmd.as_any().encode_to_vec())
+            .await
+    }
+
+    /// Shared Flight SQL round-trip: `GetFlightInfo(cmd)` → first endpoint ticket →
+    /// `DoGet(ticket)` → mapped `SeqlStream`.
+    async fn get_flight_info_and_do_get(&self, cmd_any: Vec<u8>) -> Result<SeqlStream, QueryError> {
+        // connect_lazy() must be called from an async context (needs a tokio reactor).
+        // This is always called from an async context, so this is safe.
+        let channel = self.endpoint.clone().connect_lazy();
+        let mut client =
+            FlightServiceClient::new(channel).max_decoding_message_size(64 * 1024 * 1024);
+
+        // Step 1: GetFlightInfo → get ticket
+        let descriptor = FlightDescriptor::new_cmd(cmd_any);
         let info = client
             .get_flight_info(self.authed(descriptor)?)
             .await
@@ -159,12 +193,96 @@ impl QueryApi for RemoteClient {
         let plan_bytes = compile(seql, &self.schema_ctx).await?;
         self.execute_plan(plan_bytes).await
     }
+
+    async fn sql(&self, sql: &str) -> Result<SeqlStream, QueryError> {
+        self.execute_sql(sql.to_string()).await
+    }
 }
 
 #[async_trait]
 impl QueryExec for RemoteClient {
     async fn execute(&self, plan_bytes: Vec<u8>) -> Result<SeqlStream, QueryError> {
         self.execute_plan(plan_bytes).await
+    }
+}
+
+// ---- Remote dashboards (REST over the management API) ----------------------
+
+impl RemoteClient {
+    fn dashboards_url(&self, suffix: &str) -> sequins_metadata::Result<String> {
+        let base = self.management_url.as_ref().ok_or_else(|| {
+            sequins_metadata::MetadataError::Other(
+                "remote management URL not configured".to_string(),
+            )
+        })?;
+        Ok(format!("{base}/api/dashboards{suffix}"))
+    }
+
+    fn bearer(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.token {
+            Some(t) => rb.bearer_auth(t),
+            None => rb,
+        }
+    }
+}
+
+fn meta_err<E: std::fmt::Display>(e: E) -> sequins_metadata::MetadataError {
+    sequins_metadata::MetadataError::Other(e.to_string())
+}
+
+#[async_trait::async_trait]
+impl sequins_metadata::DashboardApi for RemoteClient {
+    async fn list_dashboards(&self) -> sequins_metadata::Result<Vec<sequins_metadata::Dashboard>> {
+        let url = self.dashboards_url("")?;
+        let resp = self
+            .bearer(self.http.get(&url))
+            .send()
+            .await
+            .map_err(meta_err)?
+            .error_for_status()
+            .map_err(meta_err)?;
+        resp.json().await.map_err(meta_err)
+    }
+
+    async fn get_dashboard(
+        &self,
+        id: &str,
+    ) -> sequins_metadata::Result<Option<sequins_metadata::Dashboard>> {
+        let url = self.dashboards_url(&format!("/{id}"))?;
+        let resp = self
+            .bearer(self.http.get(&url))
+            .send()
+            .await
+            .map_err(meta_err)?
+            .error_for_status()
+            .map_err(meta_err)?;
+        resp.json().await.map_err(meta_err)
+    }
+
+    async fn save_dashboard(
+        &self,
+        dashboard: sequins_metadata::Dashboard,
+    ) -> sequins_metadata::Result<sequins_metadata::Dashboard> {
+        let url = self.dashboards_url("")?;
+        let resp = self
+            .bearer(self.http.post(&url).json(&dashboard))
+            .send()
+            .await
+            .map_err(meta_err)?
+            .error_for_status()
+            .map_err(meta_err)?;
+        resp.json().await.map_err(meta_err)
+    }
+
+    async fn delete_dashboard(&self, id: &str) -> sequins_metadata::Result<()> {
+        let url = self.dashboards_url(&format!("/{id}"))?;
+        self.bearer(self.http.delete(&url))
+            .send()
+            .await
+            .map_err(meta_err)?
+            .error_for_status()
+            .map_err(meta_err)?;
+        Ok(())
     }
 }
 

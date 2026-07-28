@@ -27,12 +27,15 @@ sequins-datafusion-backend = { workspace = true }
 sequins-server             = { workspace = true }
 sequins-client             = { workspace = true }
 sequins-traits             = { workspace = true }
+sequins-assistant          = { workspace = true }
+sequins-metadata           = { workspace = true }
 
 # Async
 tokio     = { workspace = true }
 futures   = { workspace = true }
 
 # Serialization
+serde      = { workspace = true }
 serde_json = { workspace = true }
 base64     = { workspace = true }
 

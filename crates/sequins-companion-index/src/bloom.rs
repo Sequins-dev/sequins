@@ -49,6 +49,32 @@ impl BloomFilterSet {
         self.filters.insert(field_name, bloom);
     }
 
+    /// Build a bloom filter for a field from a fixed `seed`, producing a
+    /// bit-for-bit reproducible filter.
+    ///
+    /// [`build`](Self::build) draws random sip keys per filter, so *which*
+    /// non-members collide as false positives varies from run to run. A test
+    /// asserting that one specific absent value is pruned is therefore flaky
+    /// against `build` — pinning the seed makes that assertion deterministic.
+    ///
+    /// Only the hash keys are pinned; the false-positive rate itself is
+    /// unchanged, so callers still must not treat a `true` result as proof of
+    /// membership.
+    #[cfg(feature = "test-util")]
+    pub fn build_with_seed<I>(&mut self, field_name: String, values: I, fpr: f64, seed: &[u8; 32])
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let values_vec: Vec<String> = values.into_iter().collect();
+        let mut bloom = Bloom::new_for_fp_rate_with_seed(values_vec.len(), fpr, seed);
+
+        for value in values_vec {
+            bloom.set(&value);
+        }
+
+        self.filters.insert(field_name, bloom);
+    }
+
     /// Check if a value might be in the filter for a given field
     ///
     /// Returns:

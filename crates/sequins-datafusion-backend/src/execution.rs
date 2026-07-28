@@ -5,7 +5,7 @@ use arrow::array::AsArray;
 use arrow::compute::{concat_batches, filter_record_batch};
 use arrow_flight::FlightData;
 use datafusion::common::DFSchema;
-use datafusion::execution::context::{ExecutionProps, SessionContext};
+use datafusion::execution::context::{ExecutionProps, SQLOptions, SessionContext};
 use datafusion::logical_expr::{Expr, LogicalPlan, Operator};
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_plan::PhysicalExpr;
@@ -88,6 +88,17 @@ fn get_rel(plan_rel: &plan_rel::RelType) -> Option<&datafusion_substrait::substr
     }
 }
 
+/// The output column names carried on a Substrait `Root` (the SeQL aliases). Empty for
+/// a bare `Rel` (no root names). `consume_rel` drops these, so we reapply them to the
+/// result schema in [`execute_logical_plan_to_batch`] — this is what makes result
+/// columns use the user's `as <name>` aliases instead of raw DataFusion expression text.
+fn plan_rel_names(plan_rel: &plan_rel::RelType) -> &[String] {
+    match plan_rel {
+        plan_rel::RelType::Rel(_) => &[],
+        plan_rel::RelType::Root(root) => root.names.as_slice(),
+    }
+}
+
 /// Convert a signal name string back to `Signal` enum.
 ///
 /// Used in the live path to subscribe to the correct WAL broadcast channel.
@@ -147,6 +158,7 @@ pub(crate) async fn execute_snapshot(
     if let Some(plan_rel) = plan.relations.first() {
         if let Some(rel_type) = &plan_rel.rel_type {
             if let Some(rel) = get_rel(rel_type) {
+                let names = plan_rel_names(rel_type);
                 let ctx_state = ctx.state();
                 let consumer = DefaultSubstraitConsumer::new(&primary_extensions, &ctx_state);
                 let logical_plan = consumer.consume_rel(rel).await.map_err(|e| {
@@ -154,7 +166,7 @@ pub(crate) async fn execute_snapshot(
                 })?;
 
                 let (arrow_schema, batch) =
-                    execute_logical_plan_to_batch(&ctx, logical_plan).await?;
+                    execute_logical_plan_to_batch(&ctx, logical_plan, names).await?;
                 let col_defs = crate::arrow_convert::schema_to_col_defs(&arrow_schema);
 
                 all_frames.push(Ok(schema_flight_data(
@@ -188,6 +200,68 @@ pub(crate) async fn execute_snapshot(
     Ok(Box::pin(stream::iter(all_frames)))
 }
 
+/// Read-only SQL options: allow queries (SELECT/DQL) but deny DDL, DML, and
+/// statements — so ad-hoc SQL can scan the registered tables but never mutate.
+/// Mirrors the assistant's `run_sql` guard.
+pub(crate) fn read_only_sql_options() -> SQLOptions {
+    SQLOptions::new()
+        .with_allow_ddl(false)
+        .with_allow_dml(false)
+        .with_allow_statements(false)
+}
+
+/// Execute a **read-only** plain SQL query over `ctx`, framing the result as a
+/// `Table`-shaped snapshot (`Schema` + `Data` (if non-empty) + `Complete`) — the
+/// same `FlightData` framing the SeQL snapshot path emits, so existing clients
+/// decode it unchanged.
+pub(crate) async fn execute_sql_snapshot(
+    ctx: SessionContext,
+    sql: &str,
+    watermark_ns: u64,
+) -> Result<SeqlStream, QueryError> {
+    let start = Instant::now();
+
+    let df = ctx
+        .sql_with_options(sql, read_only_sql_options())
+        .await
+        .map_err(|e| exec_err(format!("SQL error: {}", e)))?;
+
+    let arrow_schema = Arc::new(df.schema().as_arrow().clone());
+    let batches = df
+        .collect()
+        .await
+        .map_err(|e| exec_err(format!("SQL execution error: {}", e)))?;
+    let batch = if batches.is_empty() {
+        arrow::record_batch::RecordBatch::new_empty(arrow_schema.clone())
+    } else {
+        concat_batches(&arrow_schema, &batches)
+            .map_err(|e| exec_err(format!("Failed to concat batches: {}", e)))?
+    };
+    let col_defs = crate::arrow_convert::schema_to_col_defs(&arrow_schema);
+
+    let mut frames: Vec<Result<FlightData, QueryError>> = Vec::new();
+    frames.push(Ok(schema_flight_data(
+        None,
+        arrow_schema,
+        seql_ast::schema::ResponseShape::Table,
+        col_defs,
+        watermark_ns,
+    )));
+    let total_rows = batch.num_rows() as u64;
+    if batch.num_rows() > 0 {
+        frames.push(Ok(data_flight_data(None, &batch)));
+    }
+    frames.push(Ok(complete_flight_data(QueryStats {
+        execution_time_us: start.elapsed().as_micros() as u64,
+        rows_scanned: total_rows,
+        bytes_read: 0,
+        rows_returned: total_rows,
+        warning_count: 0,
+    })));
+
+    Ok(Box::pin(stream::iter(frames)))
+}
+
 /// Decode a serialised Substrait `Plan`, consume the first relation, execute it,
 /// and return the result as a single concatenated `RecordBatch`.
 ///
@@ -206,6 +280,7 @@ async fn consume_and_execute_root(
         .first()
         .and_then(|pr| pr.rel_type.as_ref())
         .ok_or_else(|| exec_err("Plan has no relations"))?;
+    let names = plan_rel_names(rel_type);
     let rel = get_rel(rel_type).ok_or_else(|| exec_err("First relation has no Rel"))?;
     let ctx_state = ctx.state();
     let consumer = DefaultSubstraitConsumer::new(&extensions, &ctx_state);
@@ -213,7 +288,7 @@ async fn consume_and_execute_root(
         .consume_rel(rel)
         .await
         .map_err(|e| exec_err(format!("consume_rel: {}", e)))?;
-    let (_schema, batch) = execute_logical_plan_to_batch(ctx, logical_plan).await?;
+    let (_schema, batch) = execute_logical_plan_to_batch(ctx, logical_plan, names).await?;
     Ok(batch)
 }
 
@@ -248,11 +323,13 @@ async fn consume_execute_root(
         .map_err(|e| exec_err(format!("consume_execute_root: decode: {}", e)))?;
     let extensions = Extensions::try_from(&plan.extensions)
         .map_err(|e| exec_err(format!("consume_execute_root: extensions: {}", e)))?;
-    let rel = plan
+    let rel_type = plan
         .relations
         .first()
         .and_then(|pr| pr.rel_type.as_ref())
-        .and_then(get_rel)
+        .ok_or_else(|| exec_err("consume_execute_root: plan has no primary relation"))?;
+    let names = plan_rel_names(rel_type);
+    let rel = get_rel(rel_type)
         .ok_or_else(|| exec_err("consume_execute_root: plan has no primary relation"))?;
     let ctx_state = ctx.state();
     let consumer = DefaultSubstraitConsumer::new(&extensions, &ctx_state);
@@ -266,7 +343,7 @@ async fn consume_execute_root(
         logical_plan = strip_plan_time_upper_bound(logical_plan, strip_time_col)?;
     }
 
-    let (schema, batch) = execute_logical_plan_to_batch(ctx, logical_plan).await?;
+    let (schema, batch) = execute_logical_plan_to_batch(ctx, logical_plan, names).await?;
     let col_defs = crate::arrow_convert::schema_to_col_defs(&schema);
     Ok(RootResult {
         schema,
@@ -435,12 +512,15 @@ async fn execute_aux_plans(
             ))
         })?;
 
-        let rel = aux_plan
+        let rel_type = aux_plan
             .relations
             .first()
-            .and_then(|pr| pr.rel_type.as_ref())
-            .and_then(|rt| get_rel(rt));
-        let Some(rel) = rel else { continue };
+            .and_then(|pr| pr.rel_type.as_ref());
+        let Some(rel_type) = rel_type else { continue };
+        let names = plan_rel_names(rel_type);
+        let Some(rel) = get_rel(rel_type) else {
+            continue;
+        };
 
         let ctx_state = ctx.state();
         let consumer = DefaultSubstraitConsumer::new(&aux_extensions, &ctx_state);
@@ -451,7 +531,7 @@ async fn execute_aux_plans(
             ))
         })?;
 
-        let (arrow_schema, batch) = execute_logical_plan_to_batch(ctx, logical_plan).await?;
+        let (arrow_schema, batch) = execute_logical_plan_to_batch(ctx, logical_plan, names).await?;
         let col_defs = crate::arrow_convert::schema_to_col_defs(&arrow_schema);
 
         frames.push(Ok(schema_flight_data(
@@ -474,6 +554,7 @@ async fn execute_aux_plans(
 async fn execute_logical_plan_to_batch(
     ctx: &SessionContext,
     logical_plan: LogicalPlan,
+    names: &[String],
 ) -> Result<
     (
         Arc<arrow::datatypes::Schema>,
@@ -500,7 +581,42 @@ async fn execute_logical_plan_to_batch(
             .map_err(|e| exec_err(format!("Failed to concat batches: {}", e)))?
     };
 
-    Ok((arrow_schema, batch))
+    // Reapply the SeQL aliases (Substrait `Root.names`) that `consume_rel` dropped, so
+    // output columns read `total_spans`/`bucket`/`n` rather than the raw expression text.
+    // Guarded on an exact count match (names are in output order); otherwise leave as-is.
+    apply_column_names(arrow_schema, batch, names)
+}
+
+/// Rename a batch's columns to `names` when the count matches (names-only change, so the
+/// data is untouched). No-op when `names` is empty or the length differs.
+fn apply_column_names(
+    schema: Arc<arrow::datatypes::Schema>,
+    batch: arrow::record_batch::RecordBatch,
+    names: &[String],
+) -> Result<
+    (
+        Arc<arrow::datatypes::Schema>,
+        arrow::record_batch::RecordBatch,
+    ),
+    QueryError,
+> {
+    use arrow::datatypes::{Field, Schema};
+    if names.is_empty() || names.len() != schema.fields().len() {
+        return Ok((schema, batch));
+    }
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .zip(names)
+        .map(|(f, name)| Field::new(name, f.data_type().clone(), f.is_nullable()))
+        .collect();
+    let renamed = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
+    // Rebuild with the same column arrays under the renamed schema (arrays carry no
+    // names; `with_schema` would reject a name change as incompatible).
+    let batch =
+        arrow::record_batch::RecordBatch::try_new(renamed.clone(), batch.columns().to_vec())
+            .map_err(|e| exec_err(format!("Failed to rename columns: {}", e)))?;
+    Ok((renamed, batch))
 }
 
 /// Execute a live (streaming) query.
@@ -550,6 +666,7 @@ async fn execute_live(
     if let Some(plan_rel) = plan.relations.first() {
         if let Some(rel_type) = &plan_rel.rel_type {
             if let Some(rel) = get_rel(rel_type) {
+                let names = plan_rel_names(rel_type);
                 let ctx_state = ctx.state();
                 let consumer = DefaultSubstraitConsumer::new(&primary_extensions, &ctx_state);
                 let logical_plan = consumer.consume_rel(rel).await.map_err(|e| {
@@ -573,7 +690,7 @@ async fn execute_live(
                     });
 
                 let (arrow_schema, batch) =
-                    execute_logical_plan_to_batch(&ctx, logical_plan).await?;
+                    execute_logical_plan_to_batch(&ctx, logical_plan, names).await?;
                 let col_defs = crate::arrow_convert::schema_to_col_defs(&arrow_schema);
 
                 historical_frames.push(Ok(schema_flight_data(

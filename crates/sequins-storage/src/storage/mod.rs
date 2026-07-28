@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 
 // Module declarations
 mod accessors;
+mod app_state;
 mod background;
 mod checkpoint;
 mod constructor;
@@ -40,6 +41,10 @@ pub struct Storage {
     pub(super) shutdown_notify: Arc<tokio::sync::Notify>,
     /// Persisted retention policy (overrides config defaults)
     pub(super) retention_policy: Arc<RwLock<Option<RetentionPolicy>>>,
+    /// Durable app-state (chat conversations + dashboards) on the shared object
+    /// store — shared across the cluster like the cold tier, so Pro teams share
+    /// dashboards and conversations.
+    pub(super) app_state: Arc<sequins_metadata::AppStateStore>,
     /// Wall-clock time provider (injectable for deterministic testing)
     pub(crate) clock: Arc<dyn NowTime>,
     /// WAL sequence to use for the entry currently being replayed on startup.

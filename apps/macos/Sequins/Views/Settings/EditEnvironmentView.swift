@@ -7,6 +7,9 @@ struct EditEnvironmentView: View {
     @Bindable var environment: ConnectionEnvironment
 
     @State private var needsReconnect = false
+    /// The assistant API key / bearer token — loaded from and saved to the Keychain
+    /// (never stored in the SwiftData model).
+    @State private var assistantSecret = ""
 
     private var isValid: Bool {
         if environment.isLocal {
@@ -59,6 +62,9 @@ struct EditEnvironmentView: View {
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
+            .task {
+                assistantSecret = KeychainStore.shared.assistantSecret(environmentId: environment.id) ?? ""
+            }
 
             Divider()
 
@@ -86,7 +92,7 @@ struct EditEnvironmentView: View {
             }
             .padding()
         }
-        .frame(width: 500, height: environment.isLocal ? 400 : 350)
+        .frame(width: 500, height: environment.isLocal ? 580 : 520)
     }
 
     @ViewBuilder
@@ -154,6 +160,8 @@ struct EditEnvironmentView: View {
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
         }
+
+        assistantSection
     }
 
     @ViewBuilder
@@ -188,10 +196,48 @@ struct EditEnvironmentView: View {
                 .textFieldStyle(.roundedBorder)
             }
         }
+
+        assistantSection
+    }
+
+    /// Assistant (AI) configuration. Base URL + model persist on the environment; the
+    /// secret is stored in the Keychain.
+    @ViewBuilder
+    private var assistantSection: some View {
+        Section("Assistant (AI)") {
+            LabeledContent(environment.isLocal ? "Provider Base URL" : "Daemon /v1 URL") {
+                TextField(
+                    environment.isLocal ? "https://api.openai.com/v1" : "http://host:8082/v1",
+                    text: optionalBinding(\.assistantBaseURL)
+                )
+                .textFieldStyle(.roundedBorder)
+            }
+
+            LabeledContent(environment.isLocal ? "API Key" : "Bearer Token") {
+                SecureField("", text: $assistantSecret)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            Text(environment.isLocal
+                ? "Stored securely in your Keychain. Pick a model from the list in the Assistant tab."
+                : "Bearer token for the daemon's assistant endpoint. Stored in your Keychain. Pick a model in the Assistant tab.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func optionalBinding(
+        _ keyPath: ReferenceWritableKeyPath<ConnectionEnvironment, String?>
+    ) -> Binding<String> {
+        Binding(
+            get: { environment[keyPath: keyPath] ?? "" },
+            set: { environment[keyPath: keyPath] = $0.isEmpty ? nil : $0 }
+        )
     }
 
     private func save() {
         appState.environmentManager.updateEnvironment(environment)
+        KeychainStore.shared.setAssistantSecret(assistantSecret, environmentId: environment.id)
 
         if needsReconnect && environment.isSelected {
             appState.reconnect()

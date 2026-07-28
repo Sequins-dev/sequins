@@ -76,6 +76,11 @@ pub struct CSchemaFrame {
     pub column_count: c_uint,
     /// Column names (null-terminated strings)
     pub column_names: *mut *mut c_char,
+    /// Per-column semantic role codes (parallel to `column_names`), so renderers can
+    /// tell dimensions (group keys/fields) from measures (aggregations/computed):
+    /// 0=group_key, 1=aggregation, 2=field, 3=computed, 4=navigation, 5=trace_group,
+    /// 6=row_id.
+    pub column_roles: *mut u32,
     /// Watermark at query start (nanoseconds since epoch)
     pub initial_watermark_ns: u64,
     /// Table name for multi-table responses (null = primary table, non-null = auxiliary table alias)
@@ -95,6 +100,15 @@ impl CSchemaFrame {
         let names_ptr = boxed_names.as_mut_ptr();
         std::mem::forget(boxed_names);
 
+        let roles: Vec<u32> = schema
+            .columns
+            .iter()
+            .map(|c| column_role_code(c.role))
+            .collect();
+        let mut boxed_roles = roles.into_boxed_slice();
+        let roles_ptr = boxed_roles.as_mut_ptr();
+        std::mem::forget(boxed_roles);
+
         let table_ptr = table
             .and_then(|t| CString::new(t).ok())
             .map(|s| s.into_raw())
@@ -104,9 +118,25 @@ impl CSchemaFrame {
             shape: CResponseShape::from(&schema.shape),
             column_count: count as c_uint,
             column_names: names_ptr,
+            column_roles: roles_ptr,
             initial_watermark_ns: schema.initial_watermark_ns,
             table: table_ptr,
         })
+    }
+}
+
+/// Stable numeric code for a column's semantic role (kept in sync with the Swift
+/// `SeQLColumnRole` enum and the `column_roles` doc on [`CSchemaFrame`]).
+fn column_role_code(role: seql_ast::schema::ColumnRole) -> u32 {
+    use seql_ast::schema::ColumnRole::*;
+    match role {
+        GroupKey => 0,
+        Aggregation => 1,
+        Field => 2,
+        Computed => 3,
+        Navigation => 4,
+        TraceGroup => 5,
+        RowId => 6,
     }
 }
 
@@ -392,6 +422,13 @@ pub unsafe extern "C" fn c_schema_frame_free(frame: *mut CSchemaFrame) {
         frame.column_count as usize,
         frame.column_count as usize,
     ));
+    if !frame.column_roles.is_null() {
+        drop(Vec::from_raw_parts(
+            frame.column_roles,
+            frame.column_count as usize,
+            frame.column_count as usize,
+        ));
+    }
     if !frame.table.is_null() {
         drop(CString::from_raw(frame.table));
     }

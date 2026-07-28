@@ -19,11 +19,43 @@ public enum ResponseShape: Int {
     case scalar = 6
 }
 
+/// Semantic role of a result column, so renderers can tell dimensions (group
+/// keys/fields) from measures (aggregations/computed). Raw values match the FFI
+/// `CSchemaFrame.column_roles` codes.
+public enum SeQLColumnRole: UInt32, Sendable {
+    case groupKey = 0
+    case aggregation = 1
+    case field = 2
+    case computed = 3
+    case navigation = 4
+    case traceGroup = 5
+    case rowId = 6
+
+    /// A numeric value to plot (an aggregate/derived quantity), not a category.
+    public var isMeasure: Bool { self == .aggregation || self == .computed }
+    /// A category/key to group or split by (group keys and projected fields).
+    public var isDimension: Bool { self == .groupKey || self == .field }
+}
+
 /// Schema received before data rows
 public struct SeQLSchema {
     public let shape: ResponseShape
     public let columnNames: [String]
+    /// Per-column semantic role (parallel to `columnNames`), empty if unavailable.
+    public let columnRoles: [SeQLColumnRole]
     public let initialWatermarkNs: UInt64
+
+    public init(
+        shape: ResponseShape,
+        columnNames: [String],
+        columnRoles: [SeQLColumnRole] = [],
+        initialWatermarkNs: UInt64
+    ) {
+        self.shape = shape
+        self.columnNames = columnNames
+        self.columnRoles = columnRoles
+        self.initialWatermarkNs = initialWatermarkNs
+    }
 }
 
 /// Query execution statistics
@@ -339,6 +371,68 @@ func decodeIPC(data dataPtr: UnsafeMutablePointer<UInt8>?, length: Int) -> [Reco
     }
 }
 
+// MARK: - Frame Decode Helpers
+//
+// Each takes a borrowed C frame pointer, builds the Swift value, and frees the frame
+// where the C side heap-allocated it (schema/warning/error frames; the complete frame is
+// stack-allocated and needs no free). Shared by the snapshot (`executeFramedSQL`) and
+// live (`executeLiveSeQL`) callback vtables so the decode + ownership rules live in one
+// place.
+
+/// Decode and free a schema frame into a `SeQLSchema`.
+func decodeSchemaFrame(_ framePtr: UnsafePointer<CSchemaFrame>) -> SeQLSchema {
+    let frame = framePtr.pointee
+    var names: [String] = []
+    var roles: [SeQLColumnRole] = []
+    for i in 0..<Int(frame.column_count) {
+        if let cstr = frame.column_names?[i] {
+            names.append(String(cString: cstr))
+        }
+        if let rolePtr = frame.column_roles {
+            roles.append(SeQLColumnRole(rawValue: rolePtr[i]) ?? .field)
+        }
+    }
+    let shape = ResponseShape(rawValue: Int(frame.shape.rawValue)) ?? .table
+    let schema = SeQLSchema(
+        shape: shape,
+        columnNames: names,
+        columnRoles: roles,
+        initialWatermarkNs: frame.initial_watermark_ns
+    )
+    c_schema_frame_free(UnsafeMutablePointer(mutating: framePtr))
+    return schema
+}
+
+/// Read a complete frame into `SeQLStats` (stack-allocated frame; no free).
+func decodeStatsFrame(_ framePtr: UnsafePointer<CCompleteFrame>) -> SeQLStats {
+    let frame = framePtr.pointee
+    return SeQLStats(
+        executionTimeUs: frame.execution_time_us,
+        rowsScanned: frame.rows_scanned,
+        bytesRead: frame.bytes_read,
+        rowsReturned: frame.rows_returned,
+        warningCount: frame.warning_count
+    )
+}
+
+/// Decode and free a warning frame into its `(code, message)`.
+func decodeWarningFrame(_ framePtr: UnsafePointer<CWarningFrame>) -> (code: UInt32, message: String) {
+    let frame = framePtr.pointee
+    let code = UInt32(frame.code)
+    let message = frame.message.map { String(cString: $0) } ?? "warning"
+    c_warning_frame_free(UnsafeMutablePointer(mutating: framePtr))
+    return (code, message)
+}
+
+/// Decode and free a query-error frame into its `(code, message)`.
+func decodeErrorFrame(_ framePtr: UnsafePointer<CQueryError>) -> (code: UInt32, message: String) {
+    let frame = framePtr.pointee
+    let code = UInt32(frame.code)
+    let message = frame.message.map { String(cString: $0) } ?? "query error"
+    c_query_error_free(UnsafeMutablePointer(mutating: framePtr))
+    return (code, message)
+}
+
 // MARK: - DataSource Extension
 
 extension DataSource {
@@ -379,119 +473,12 @@ extension DataSource {
     /// - Throws: `SequinsError` on failures (parse errors are reported via sink.onError)
     @discardableResult
     public func executeSeQL(_ query: String, sink: any SeQLSink) throws -> SeQLStream {
-        return try withSpan("DataSource.executeSeQL") { _ in
-        let context = SeQLContext(sink: sink)
-        let ctxRaw = Unmanaged.passUnretained(context).toOpaque()
-
-        var vtable = CFrameSinkVTable()
-
-        // Schema callback — decode synchronously, free C memory, then call sink
-        vtable.on_schema = {
-            (framePtr: UnsafePointer<CSchemaFrame>?, ctxPtr: UnsafeMutableRawPointer?) -> Void in
-            guard let framePtr, let ctxPtr else { return }
-            let frame = framePtr.pointee
-
-            var names: [String] = []
-            for i in 0..<Int(frame.column_count) {
-                if let cstr = frame.column_names?[i] {
-                    names.append(String(cString: cstr))
-                }
-            }
-            let shapeVal = Int(frame.shape.rawValue)
-            let shape = ResponseShape(rawValue: shapeVal) ?? .table
-            let schema = SeQLSchema(
-                shape: shape,
-                columnNames: names,
-                initialWatermarkNs: frame.initial_watermark_ns
-            )
-            c_schema_frame_free(UnsafeMutablePointer(mutating: framePtr))
-
-            let ctx = Unmanaged<SeQLContext>.fromOpaque(ctxPtr).takeUnretainedValue()
-            ctx.sink?.onSchema(schema)
+        // The SeQL snapshot path shares the exact schema→data→complete callback vtable
+        // with the plain-SQL path, so it reuses the shared framed driver — the only
+        // difference is the FFI entry point (`sequins_seql_query`).
+        try withSpan("DataSource.executeSeQL") { _ in
+            try executeFramedSQL(query, sink: sink, invoke: sequins_seql_query, label: "SeQL")
         }
-
-        // Data callback — decode Arrow IPC bytes, deliver as RecordBatch to sink
-        vtable.on_data = {
-            (framePtr: UnsafePointer<CDataFrame>?, ctxPtr: UnsafeMutableRawPointer?) -> Void in
-            guard let framePtr, let ctxPtr else { return }
-            let frame = framePtr.pointee
-            let table: String? = frame.table.map { String(cString: $0) }
-            let batches = decodeIPC(data: frame.ipc_data, length: Int(frame.ipc_len))
-            c_data_frame_free(UnsafeMutablePointer(mutating: framePtr))
-
-            let ctx = Unmanaged<SeQLContext>.fromOpaque(ctxPtr).takeUnretainedValue()
-            for batch in batches {
-                ctx.sink?.onBatch(batch, table: table)
-            }
-        }
-
-        // Complete callback — stack-allocated frame, no free needed
-        vtable.on_complete = {
-            (framePtr: UnsafePointer<CCompleteFrame>?, ctxPtr: UnsafeMutableRawPointer?) -> Void in
-            guard let framePtr, let ctxPtr else { return }
-            let frame = framePtr.pointee
-
-            let stats = SeQLStats(
-                executionTimeUs: frame.execution_time_us,
-                rowsScanned: frame.rows_scanned,
-                bytesRead: frame.bytes_read,
-                rowsReturned: frame.rows_returned,
-                warningCount: frame.warning_count
-            )
-
-            let ctx = Unmanaged<SeQLContext>.fromOpaque(ctxPtr).takeUnretainedValue()
-            ctx.sink?.onComplete(stats)
-        }
-
-        // Warning callback — heap-allocated, must free
-        vtable.on_warning = {
-            (framePtr: UnsafePointer<CWarningFrame>?, ctxPtr: UnsafeMutableRawPointer?) -> Void in
-            guard let framePtr, let ctxPtr else { return }
-            let frame = framePtr.pointee
-
-            let code = UInt32(frame.code)
-            let message: String
-            if let cStr = frame.message {
-                message = String(cString: cStr)
-            } else {
-                message = "warning"
-            }
-            c_warning_frame_free(UnsafeMutablePointer(mutating: framePtr))
-
-            let ctx = Unmanaged<SeQLContext>.fromOpaque(ctxPtr).takeUnretainedValue()
-            ctx.sink?.onWarning(code: code, message: message)
-        }
-
-        // Error callback — heap-allocated, must free
-        vtable.on_error = {
-            (framePtr: UnsafePointer<CQueryError>?, ctxPtr: UnsafeMutableRawPointer?) -> Void in
-            guard let framePtr, let ctxPtr else { return }
-            let frame = framePtr.pointee
-
-            let code = UInt32(frame.code)
-            let message: String
-            if let cStr = frame.message {
-                message = String(cString: cStr)
-            } else {
-                message = "query error"
-            }
-            c_query_error_free(UnsafeMutablePointer(mutating: framePtr))
-
-            let ctx = Unmanaged<SeQLContext>.fromOpaque(ctxPtr).takeUnretainedValue()
-            ctx.sink?.onError(code: code, message: message)
-        }
-
-        // Convert Swift String to C string explicitly
-        let streamHandle = query.withCString { queryPtr in
-            sequins_seql_query(rawPointer, queryPtr, vtable, ctxRaw)
-        }
-
-        guard let streamHandle else {
-            throw SequinsError.ffiError("failed to start SeQL query stream")
-        }
-
-        return SeQLStream(streamHandle, context: context)
-        } // end withSpan("DataSource.executeSeQL")
     }
 
     /// Execute a SeQL query in live streaming mode, returning an observable stream.
@@ -514,23 +501,7 @@ extension DataSource {
         // Schema callback
         vtable.on_schema = { (framePtr, ctxPtr) in
             guard let framePtr, let ctxPtr else { return }
-            let frame = framePtr.pointee
-
-            var names: [String] = []
-            for i in 0..<Int(frame.column_count) {
-                if let cstr = frame.column_names?[i] {
-                    names.append(String(cString: cstr))
-                }
-            }
-            let shapeVal = Int(frame.shape.rawValue)
-            let shape = ResponseShape(rawValue: shapeVal) ?? .table
-            let schema = SeQLSchema(
-                shape: shape,
-                columnNames: names,
-                initialWatermarkNs: frame.initial_watermark_ns
-            )
-            c_schema_frame_free(UnsafeMutablePointer(mutating: framePtr))
-
+            let schema = decodeSchemaFrame(framePtr)
             let ctx = Unmanaged<LiveSeQLContext>.fromOpaque(ctxPtr).takeUnretainedValue()
             DispatchQueue.main.async { ctx.stream?.applySchema(schema) }
         }
@@ -594,14 +565,7 @@ extension DataSource {
         // Complete callback
         vtable.on_complete = { (framePtr, ctxPtr) in
             guard let framePtr, let ctxPtr else { return }
-            let frame = framePtr.pointee
-            let stats = SeQLStats(
-                executionTimeUs: frame.execution_time_us,
-                rowsScanned: frame.rows_scanned,
-                bytesRead: frame.bytes_read,
-                rowsReturned: frame.rows_returned,
-                warningCount: frame.warning_count
-            )
+            let stats = decodeStatsFrame(framePtr)
             let ctx = Unmanaged<LiveSeQLContext>.fromOpaque(ctxPtr).takeUnretainedValue()
             DispatchQueue.main.async { ctx.stream?.applyComplete(stats) }
         }
@@ -609,29 +573,14 @@ extension DataSource {
         // Warning callback
         vtable.on_warning = { (framePtr, _) in
             guard let framePtr else { return }
-            let frame = framePtr.pointee
-            let message: String
-            if let cStr = frame.message {
-                message = String(cString: cStr)
-            } else {
-                message = "warning"
-            }
-            c_warning_frame_free(UnsafeMutablePointer(mutating: framePtr))
+            let (_, message) = decodeWarningFrame(framePtr)
             logger.warning("LiveSeQL warning", metadata: ["message": "\(message)"])
         }
 
         // Error callback
         vtable.on_error = { (framePtr, ctxPtr) in
             guard let framePtr, let ctxPtr else { return }
-            let frame = framePtr.pointee
-            let code = UInt32(frame.code)
-            let message: String
-            if let cStr = frame.message {
-                message = String(cString: cStr)
-            } else {
-                message = "query error"
-            }
-            c_query_error_free(UnsafeMutablePointer(mutating: framePtr))
+            let (code, message) = decodeErrorFrame(framePtr)
             let ctx = Unmanaged<LiveSeQLContext>.fromOpaque(ctxPtr).takeUnretainedValue()
             DispatchQueue.main.async { ctx.stream?.applyError(code: code, message: message) }
         }

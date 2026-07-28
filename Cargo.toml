@@ -21,9 +21,11 @@ members = [
     "crates/sequins-cold-tier",
     "crates/sequins-storage",
     "crates/sequins-datafusion-backend",
+    "crates/sequins-metadata",
     "crates/sequins-view",
     "crates/sequins-client",
     "crates/sequins-server",
+    "crates/sequins-assistant",
     "crates/sequins-ffi",
     "crates/sequins-cli",
     "apps/linux",
@@ -60,9 +62,11 @@ sequins-hot-tier   = { path = "crates/sequins-hot-tier" }
 sequins-cold-tier  = { path = "crates/sequins-cold-tier" }
 sequins-storage              = { path = "crates/sequins-storage" }
 sequins-datafusion-backend   = { path = "crates/sequins-datafusion-backend" }
+sequins-metadata             = { path = "crates/sequins-metadata" }
 sequins-view                 = { path = "crates/sequins-view" }
 sequins-client     = { path = "crates/sequins-client" }
 sequins-server     = { path = "crates/sequins-server" }
+sequins-assistant  = { path = "crates/sequins-assistant" }
 sequins-ffi        = { path = "crates/sequins-ffi" }
 
 # OpenTelemetry
@@ -149,6 +153,14 @@ tracing-appender   = "0.2"
 # Query language
 winnow   = "0.6"
 indexmap = { version = "2", features = ["serde"] }
+
+# AI assistant — Rig agent framework + Model Context Protocol.
+# Imported as `rig` (rig-core's lib name is `rig_core`) to match Rig's docs.
+# rmcp/schemars versions are pinned to what `rig-core`'s `rmcp` feature resolves,
+# so MCP tool types line up across the Rig ↔ rmcp boundary.
+rig = { version = "0.39", package = "rig-core", features = ["rmcp"] }
+rmcp     = { version = "1.8", features = ["client", "server", "macros", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+schemars = "1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

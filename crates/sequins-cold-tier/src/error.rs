@@ -16,6 +16,12 @@ pub enum Error {
     #[error("Vortex error: {0}")]
     Vortex(String),
 
+    /// The batch's Arrow schema cannot be encoded to the cold format (e.g. a
+    /// `Map` column Vortex 0.76 doesn't support). This is PERMANENT for that batch —
+    /// retrying never helps — so callers should drop it rather than retain it forever.
+    #[error("Unsupported for cold storage: {0}")]
+    UnsupportedForCold(String),
+
     #[error("Serialization error: {0}")]
     Serialization(String),
 
@@ -36,6 +42,15 @@ pub enum Error {
 
     #[error("Series index error: {0}")]
     SeriesIndex(#[from] sequins_series_index::error::Error),
+}
+
+impl Error {
+    /// True if this batch can never be written to cold (a permanent schema
+    /// incompatibility), so it should be dropped rather than retried — otherwise it
+    /// accumulates in the hot tier forever and eventually OOMs the process.
+    pub fn is_unsupported_for_cold(&self) -> bool {
+        matches!(self, Error::UnsupportedForCold(_))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

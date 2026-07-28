@@ -18,6 +18,14 @@ final class ConnectionEnvironment {
     var remoteQueryURL: String?
     var remoteManagementURL: String?
 
+    // Assistant (AI) settings — the API key / bearer token is stored in the Keychain
+    // (keyed by this environment's id), NOT here.
+    /// Local: the OpenAI-compatible provider base URL (nil = api.openai.com).
+    /// Remote: the daemon's assistant `/v1` base URL (e.g. `http://host:8082/v1`).
+    var assistantBaseURL: String?
+    /// The model id to use (required for local; optional for remote).
+    var assistantModel: String?
+
     init(
         id: UUID = UUID(),
         name: String,
@@ -27,7 +35,9 @@ final class ConnectionEnvironment {
         grpcPort: Int? = nil,
         httpPort: Int? = nil,
         remoteQueryURL: String? = nil,
-        remoteManagementURL: String? = nil
+        remoteManagementURL: String? = nil,
+        assistantBaseURL: String? = nil,
+        assistantModel: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -39,6 +49,8 @@ final class ConnectionEnvironment {
         self.httpPort = httpPort
         self.remoteQueryURL = remoteQueryURL
         self.remoteManagementURL = remoteManagementURL
+        self.assistantBaseURL = assistantBaseURL
+        self.assistantModel = assistantModel
     }
 
     /// The fixed UUID for the local environment - never changes

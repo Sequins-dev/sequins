@@ -3,6 +3,7 @@ import SwiftUI
 /// Main application window containing the navigation split view and tab content
 struct MainWindow: View {
     @Environment(AppStateViewModel.self) private var appState
+    @Environment(\.openSettings) private var openSettings
     @State private var selectedTab: NavigationItem
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
@@ -13,6 +14,8 @@ struct MainWindow: View {
     @State private var logsViewModel = LogsViewModel()
     @State private var healthViewModel = HealthViewModel()
     @State private var exploreViewModel = ExploreViewModel()
+    @State private var assistantViewModel = AssistantViewModel()
+    @State private var dashboardsViewModel = DashboardsViewModel()
     @State private var logsSearchText = ""
     @State private var metricsSearchText = ""
 
@@ -28,14 +31,16 @@ struct MainWindow: View {
                 .navigationSplitViewColumnWidth(min: 160, ideal: 220, max: 300)
         } detail: {
             VStack(spacing: 0) {
-                if let service = appState.selectedService {
-                    // Expandable resource attributes panel
-                    if appState.isServiceAttributesExpanded {
-                        ResourceAttributesPanel(service: service)
-                        Divider()
-                    }
+                // Expandable resource attributes panel (service tabs only)
+                if let service = appState.selectedService, appState.isServiceAttributesExpanded {
+                    ResourceAttributesPanel(service: service)
+                    Divider()
+                }
 
-                    // Unified filter bar (universal + tab-specific controls)
+                // Unified filter bar (universal + tab-specific controls). Shown for the
+                // service tabs and for Dashboards (which uses the universal live +
+                // time-range controls). Not shown for Assistant.
+                if appState.selectedService != nil || selectedTab == .dashboards {
                     UnifiedFilterBar(
                         selectedTab: selectedTab,
                         tracesViewModel: tracesViewModel,
@@ -60,6 +65,8 @@ struct MainWindow: View {
                     logsViewModel: logsViewModel,
                     healthViewModel: healthViewModel,
                     exploreViewModel: exploreViewModel,
+                    assistantViewModel: assistantViewModel,
+                    dashboardsViewModel: dashboardsViewModel,
                     logsSearchText: $logsSearchText,
                     metricsSearchText: $metricsSearchText
                 )
@@ -136,9 +143,18 @@ struct MainWindow: View {
                 appState.connectToDataSource()
             }
         }
+        .onAppear {
+            // Reload dashboards after an assistant turn that edited them server-side, so a
+            // dashboard the user is viewing updates live.
+            assistantViewModel.onDashboardsChanged = {
+                if let ds = appState.dataSource {
+                    dashboardsViewModel.refresh(dataSource: ds)
+                }
+            }
+        }
         .alert("Connection Error", isPresented: .constant(appState.dataSourceError != nil)) {
             Button("Retry") { appState.reconnect() }
-            Button("Settings") { appState.showSettings = true }
+            Button("Settings") { openSettings() }
             Button("OK") { appState.dataSourceError = nil }
         } message: {
             if let error = appState.dataSourceError {
@@ -160,13 +176,20 @@ struct DetailContentView: View {
     @Bindable var logsViewModel: LogsViewModel
     @Bindable var healthViewModel: HealthViewModel
     @Bindable var exploreViewModel: ExploreViewModel
+    @Bindable var assistantViewModel: AssistantViewModel
+    @Bindable var dashboardsViewModel: DashboardsViewModel
     @Binding var logsSearchText: String
     @Binding var metricsSearchText: String
 
+    /// Tabs that work without a selected service.
+    private var serviceOptional: Bool {
+        selectedTab == .explore || selectedTab == .assistant || selectedTab == .dashboards
+    }
+
     var body: some View {
         Group {
-            if appState.selectedService == nil && selectedTab != .explore {
-                // No service selected - show empty state (Explore doesn't need a service)
+            if appState.selectedService == nil && !serviceOptional {
+                // No service selected - show empty state (some tabs don't need a service)
                 NoServiceSelectedView()
             } else {
                 switch selectedTab {
@@ -182,6 +205,10 @@ struct DetailContentView: View {
                     ProfilesContentOnly(viewModel: profilesViewModel)
                 case .explore:
                     ExploreContentOnly(viewModel: exploreViewModel)
+                case .assistant:
+                    AssistantContentOnly(viewModel: assistantViewModel)
+                case .dashboards:
+                    DashboardsContentOnly(viewModel: dashboardsViewModel)
                 }
             }
         }

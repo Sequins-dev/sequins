@@ -58,6 +58,10 @@ struct UnifiedFilterBar: View {
                 ProfilesFilterControls(viewModel: profilesViewModel)
             case .explore:
                 ExploreFilterControls(viewModel: exploreViewModel)
+            case .assistant, .dashboards:
+                // Assistant has no tab-specific filters; Dashboards uses the universal
+                // live + time-range controls above.
+                EmptyView()
             }
 
             Spacer()

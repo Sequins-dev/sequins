@@ -169,7 +169,7 @@ pub struct CStreamHandle {
 // ── Internal context wrapper ──────────────────────────────────────────────────
 
 /// Newtype wrapper for raw pointers that are send-safe by caller guarantee
-struct SendPtr(*mut std::ffi::c_void);
+pub(crate) struct SendPtr(pub(crate) *mut std::ffi::c_void);
 // SAFETY: Caller guarantees the pointer is valid and thread-safe for the stream lifetime.
 unsafe impl Send for SendPtr {}
 
@@ -188,7 +188,7 @@ unsafe impl Send for SinkCtx {}
 /// Caller must ensure that all data accessed across `.await` points is actually
 /// thread-safe. Used here because the raw pointer in `SinkCtx.ctx` is wrapped
 /// in `SendPtr` but Rust's async future analysis still sees the inner `*mut c_void`.
-struct AssertSend<F>(F);
+pub(crate) struct AssertSend<F>(pub(crate) F);
 impl<F: std::future::Future> std::future::Future for AssertSend<F> {
     type Output = F::Output;
     fn poll(
@@ -232,6 +232,64 @@ pub struct CFrameSinkVTable {
 // The caller guarantees the context pointer is valid for the lifetime of the stream.
 unsafe impl Send for CFrameSinkVTable {}
 unsafe impl Sync for CFrameSinkVTable {}
+
+/// Query backend for a data source — Local (in-process) or Remote (over the wire).
+/// Both `DataFusionBackend` and `RemoteClient` implement `QueryApi`, but that trait
+/// isn't `dyn`-safe (native `async fn`), so we dispatch with a small enum.
+enum QueryExecutor {
+    #[cfg(feature = "local")]
+    Local(Arc<sequins_datafusion_backend::DataFusionBackend>),
+    Remote(Arc<sequins_client::RemoteClient>),
+}
+
+impl QueryExecutor {
+    async fn query(&self, seql: &str) -> Result<sequins_traits::SeqlStream, QueryError> {
+        match self {
+            #[cfg(feature = "local")]
+            QueryExecutor::Local(b) => b.query(seql).await,
+            QueryExecutor::Remote(c) => c.query(seql).await,
+        }
+    }
+
+    async fn query_live(&self, seql: &str) -> Result<sequins_traits::SeqlStream, QueryError> {
+        match self {
+            #[cfg(feature = "local")]
+            QueryExecutor::Local(b) => b.query_live(seql).await,
+            QueryExecutor::Remote(c) => c.query_live(seql).await,
+        }
+    }
+
+    async fn sql(&self, sql: &str) -> Result<sequins_traits::SeqlStream, QueryError> {
+        use sequins_traits::QueryApi;
+        match self {
+            #[cfg(feature = "local")]
+            QueryExecutor::Local(b) => b.sql(sql).await,
+            QueryExecutor::Remote(c) => c.sql(sql).await,
+        }
+    }
+
+    /// Read the app-state tables (`conversations`/`messages`/`dashboards`) via a
+    /// telemetry-free context locally, so the read never depends on cold-tier health.
+    /// Remote goes over the normal Flight SQL path (the daemon owns its own tiers).
+    async fn app_state_sql(&self, sql: &str) -> Result<sequins_traits::SeqlStream, QueryError> {
+        match self {
+            #[cfg(feature = "local")]
+            QueryExecutor::Local(b) => b.execute_app_state_sql(sql).await,
+            QueryExecutor::Remote(c) => {
+                use sequins_traits::QueryApi;
+                c.sql(sql).await
+            }
+        }
+    }
+}
+
+fn query_executor(ds: &DataSourceImpl) -> QueryExecutor {
+    match ds {
+        #[cfg(feature = "local")]
+        DataSourceImpl::Local { backend, .. } => QueryExecutor::Local(Arc::clone(backend)),
+        DataSourceImpl::Remote { client } => QueryExecutor::Remote(Arc::clone(client)),
+    }
+}
 
 /// Cancel a running SeQL stream
 ///
@@ -304,12 +362,9 @@ pub unsafe extern "C" fn sequins_seql_query(
         }
     };
 
-    // Get the shared DataFusionBackend from the data source
+    // Resolve the query backend (Local in-process or Remote over Flight).
     let ds = &*(data_source as *const DataSourceImpl);
-    let backend = match ds {
-        DataSourceImpl::Local { backend, .. } => Arc::clone(backend),
-        DataSourceImpl::Remote { .. } => return std::ptr::null_mut(),
-    };
+    let executor = query_executor(ds);
 
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
@@ -323,7 +378,7 @@ pub unsafe extern "C" fn sequins_seql_query(
     // valid and thread-safe for the lifetime of the stream.
     let task = RUNTIME.spawn(AssertSend(async move {
         // Use QueryApi to compile and execute in one call
-        let mut stream = match backend.query(&query_str).await {
+        let mut stream = match executor.query(&query_str).await {
             Ok(s) => s,
             Err(e) => {
                 let c_err = CQueryError::from_error(&e);
@@ -353,6 +408,199 @@ pub unsafe extern "C" fn sequins_seql_query(
                 continue;
             };
             dispatch_flight_metadata(metadata, &fd.data_body, &sink_ctx);
+        }
+    }));
+
+    Box::into_raw(Box::new(CStreamHandle {
+        cancel,
+        _task: task,
+    }))
+}
+
+/// Execute a **read-only** plain SQL query (SELECT only) and stream the framed
+/// result through the same `CFrameSinkVTable` as [`sequins_seql_query`].
+///
+/// This is how clients read the app-state tables (`conversations`, `messages`,
+/// `dashboards`) and any other registered DataFusion table that SeQL does not
+/// address. Local runs it in-process (`sql_with_options`, read-only); Remote sends
+/// it over Flight SQL's standard `CommandStatementQuery`. Results arrive as a
+/// `Table`-shaped snapshot (schema + data + complete). DDL/DML are rejected.
+///
+/// # Safety
+/// Same contract as [`sequins_seql_query`].
+#[no_mangle]
+#[tracing::instrument(skip_all, name = "sql_query")]
+pub unsafe extern "C" fn sequins_sql_query(
+    data_source: *mut CDataSource,
+    sql_text: *const c_char,
+    vtable: CFrameSinkVTable,
+    ctx: *mut c_void,
+) -> *mut CStreamHandle {
+    if data_source.is_null() || sql_text.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let sql_str = match CStr::from_ptr(sql_text).to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            tracing::error!("Invalid UTF-8 in SQL text");
+            if let Some(cb) = vtable.on_error {
+                let err = QueryError::InvalidAst {
+                    message: "Invalid UTF-8 in SQL text".to_string(),
+                };
+                cb(Box::into_raw(CQueryError::from_error(&err)), ctx);
+            }
+            return std::ptr::null_mut();
+        }
+    };
+
+    let ds = &*(data_source as *const DataSourceImpl);
+    let executor = query_executor(ds);
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_clone = cancel.clone();
+
+    let sink_ctx = SinkCtx {
+        vtable,
+        ctx: SendPtr(ctx),
+    };
+
+    let task = RUNTIME.spawn(AssertSend(async move {
+        let mut stream = match executor.sql(&sql_str).await {
+            Ok(s) => s,
+            Err(e) => {
+                if let Some(cb) = sink_ctx.vtable.on_error {
+                    unsafe { cb(Box::into_raw(CQueryError::from_error(&e)), sink_ctx.ctx.0) };
+                }
+                return;
+            }
+        };
+
+        while let Some(frame_result) = stream.next().await {
+            if cancel_clone.load(Ordering::Relaxed) {
+                break;
+            }
+            let fd = match frame_result {
+                Ok(fd) => fd,
+                Err(e) => {
+                    if let Some(cb) = sink_ctx.vtable.on_error {
+                        unsafe { cb(Box::into_raw(CQueryError::from_error(&e)), sink_ctx.ctx.0) };
+                    }
+                    break;
+                }
+            };
+            let Some(metadata) = decode_metadata(&fd.app_metadata) else {
+                tracing::warn!("Failed to decode frame metadata");
+                continue;
+            };
+            dispatch_flight_metadata(metadata, &fd.data_body, &sink_ctx);
+        }
+    }));
+
+    Box::into_raw(Box::new(CStreamHandle {
+        cancel,
+        _task: task,
+    }))
+}
+
+/// Execute a **read-only** plain SQL query against *only* the app-state tables
+/// (`conversations`, `messages`, `dashboards`), streaming the framed result through
+/// the same `CFrameSinkVTable` as [`sequins_sql_query`].
+///
+/// Prefer this over [`sequins_sql_query`] for reading chat history and dashboards:
+/// it uses a telemetry-free context, so the read can't be blocked or destabilised by
+/// a signal/cold-tier problem (and it skips the cold-listing overhead). If the query
+/// task panics, an error frame is delivered rather than leaving the client hanging.
+///
+/// # Safety
+/// Same contract as [`sequins_seql_query`].
+#[no_mangle]
+#[tracing::instrument(skip_all, name = "app_state_query")]
+pub unsafe extern "C" fn sequins_app_state_query(
+    data_source: *mut CDataSource,
+    sql_text: *const c_char,
+    vtable: CFrameSinkVTable,
+    ctx: *mut c_void,
+) -> *mut CStreamHandle {
+    if data_source.is_null() || sql_text.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let sql_str = match CStr::from_ptr(sql_text).to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            tracing::error!("Invalid UTF-8 in SQL text");
+            if let Some(cb) = vtable.on_error {
+                let err = QueryError::InvalidAst {
+                    message: "Invalid UTF-8 in SQL text".to_string(),
+                };
+                cb(Box::into_raw(CQueryError::from_error(&err)), ctx);
+            }
+            return std::ptr::null_mut();
+        }
+    };
+
+    let ds = &*(data_source as *const DataSourceImpl);
+    let executor = query_executor(ds);
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_clone = cancel.clone();
+
+    let sink_ctx = SinkCtx {
+        vtable,
+        ctx: SendPtr(ctx),
+    };
+    // Captured for the panic guard (both are `Copy`), so a swallowed panic in the
+    // spawned task still reaches the client instead of hanging it forever.
+    let panic_on_error = sink_ctx.vtable.on_error;
+    let panic_ctx = ctx;
+
+    let task = RUNTIME.spawn(AssertSend(async move {
+        let body = async move {
+            let mut stream = match executor.app_state_sql(&sql_str).await {
+                Ok(s) => s,
+                Err(e) => {
+                    if let Some(cb) = sink_ctx.vtable.on_error {
+                        unsafe { cb(Box::into_raw(CQueryError::from_error(&e)), sink_ctx.ctx.0) };
+                    }
+                    return;
+                }
+            };
+
+            while let Some(frame_result) = stream.next().await {
+                if cancel_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+                let fd = match frame_result {
+                    Ok(fd) => fd,
+                    Err(e) => {
+                        if let Some(cb) = sink_ctx.vtable.on_error {
+                            unsafe {
+                                cb(Box::into_raw(CQueryError::from_error(&e)), sink_ctx.ctx.0)
+                            };
+                        }
+                        break;
+                    }
+                };
+                let Some(metadata) = decode_metadata(&fd.app_metadata) else {
+                    tracing::warn!("Failed to decode frame metadata");
+                    continue;
+                };
+                dispatch_flight_metadata(metadata, &fd.data_body, &sink_ctx);
+            }
+        };
+
+        if futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(body))
+            .await
+            .is_err()
+        {
+            tracing::error!("app-state query task panicked");
+            if let Some(cb) = panic_on_error {
+                let err = QueryError::Execution {
+                    message: "internal error while reading app-state tables".to_string(),
+                };
+                unsafe { cb(Box::into_raw(CQueryError::from_error(&err)), panic_ctx) };
+            }
         }
     }));
 
@@ -412,10 +660,7 @@ pub unsafe extern "C" fn sequins_seql_query_live(
     };
 
     let ds = &*(data_source as *const DataSourceImpl);
-    let backend = match ds {
-        DataSourceImpl::Local { backend, .. } => Arc::clone(backend),
-        DataSourceImpl::Remote { .. } => return std::ptr::null_mut(),
-    };
+    let executor = query_executor(ds);
 
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
@@ -426,7 +671,7 @@ pub unsafe extern "C" fn sequins_seql_query_live(
     };
 
     let task = RUNTIME.spawn(AssertSend(async move {
-        let mut stream = match backend.query_live(&query_str).await {
+        let mut stream = match executor.query_live(&query_str).await {
             Ok(s) => s,
             Err(e) => {
                 let c_err = CQueryError::from_error(&e);
@@ -706,10 +951,7 @@ pub unsafe extern "C" fn sequins_view_create(
     };
 
     let ds = &*(data_source as *const DataSourceImpl);
-    let backend = match ds {
-        DataSourceImpl::Local { backend, .. } => Arc::clone(backend),
-        DataSourceImpl::Remote { .. } => return std::ptr::null_mut(),
-    };
+    let executor = query_executor(ds);
 
     let retention = if retention_ns == 0 {
         3_600_000_000_000u64 // default: 1 hour
@@ -726,7 +968,7 @@ pub unsafe extern "C" fn sequins_view_create(
     };
 
     let task = RUNTIME.spawn(AssertSend(async move {
-        let seql_stream = match backend.query_live(&query_str).await {
+        let seql_stream = match executor.query_live(&query_str).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = %e, "View query failed");
@@ -977,6 +1219,77 @@ mod tests {
     }
 
     // ── SeQL Query FFI Tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sequins_sql_query_reads_app_state_tables() {
+        let (data_source, _dir) = create_test_data_source();
+
+        let mut collector = FrameCollector::default();
+        let ctx = &mut collector as *mut _ as *mut c_void;
+        let vtable = CFrameSinkVTable {
+            on_schema: Some(on_schema_callback),
+            on_data: Some(on_data_callback),
+            on_delta: None,
+            on_heartbeat: None,
+            on_complete: Some(on_complete_callback),
+            on_warning: None,
+            on_error: Some(on_error_callback),
+        };
+
+        // The `conversations` app-state table is registered even when empty, and is
+        // reachable only via plain SQL (SeQL does not address it).
+        let sql = CString::new(
+            "SELECT id, title, updated_at_ns, item_count FROM conversations ORDER BY updated_at_ns DESC",
+        )
+        .unwrap();
+        let stream_handle = unsafe { sequins_sql_query(data_source, sql.as_ptr(), vtable, ctx) };
+        assert!(
+            !stream_handle.is_null(),
+            "SQL stream handle should not be null"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        assert_eq!(
+            collector.error_count, 0,
+            "read-only SELECT should not error"
+        );
+        assert_eq!(
+            collector.schema_count, 1,
+            "should emit exactly one schema frame"
+        );
+        assert!(collector.complete_count > 0, "should emit a complete frame");
+
+        unsafe { sequins_seql_stream_free(stream_handle) };
+
+        // A mutating statement must be rejected by the read-only SQL options.
+        let mut ddl_collector = FrameCollector::default();
+        let ddl_ctx = &mut ddl_collector as *mut _ as *mut c_void;
+        let ddl_vtable = CFrameSinkVTable {
+            on_schema: Some(on_schema_callback),
+            on_data: Some(on_data_callback),
+            on_delta: None,
+            on_heartbeat: None,
+            on_complete: Some(on_complete_callback),
+            on_warning: None,
+            on_error: Some(on_error_callback),
+        };
+        let ddl = CString::new("CREATE TABLE evil (x INT)").unwrap();
+        let ddl_handle =
+            unsafe { sequins_sql_query(data_source, ddl.as_ptr(), ddl_vtable, ddl_ctx) };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            ddl_collector.error_count > 0,
+            "DDL must be rejected read-only"
+        );
+        assert_eq!(ddl_collector.complete_count, 0, "DDL must not complete");
+
+        unsafe {
+            if !ddl_handle.is_null() {
+                sequins_seql_stream_free(ddl_handle);
+            }
+            sequins_data_source_free(data_source);
+        }
+    }
 
     #[test]
     fn test_sequins_seql_query_valid_query() {

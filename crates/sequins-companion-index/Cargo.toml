@@ -20,5 +20,10 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 bincode    = { workspace = true }
 
+[features]
+# Deterministic-seed index constructors, for tests that need reproducible
+# filters. Not enabled in production builds.
+test-util = []
+
 [dev-dependencies]
 tempfile = { workspace = true }

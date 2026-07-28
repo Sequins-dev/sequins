@@ -350,17 +350,40 @@ mod tests {
         assert!(bloom_may_match_equalities(&bloom, &equalities));
     }
 
+    /// Fixed seed under which `trace-404` is not a false positive against
+    /// `{trace-1, trace-2}`. With `build`'s random seeds it collides ~3% of the
+    /// time, which made this test fail intermittently in CI.
+    const PRUNING_SEED: [u8; 32] = [0u8; 32];
+
     #[test]
     fn bloom_pruning_rejects_missing_values_for_bloom_fields() {
         let mut bloom = BloomFilterSet::new();
-        bloom.build(
+        bloom.build_with_seed(
             "trace_id".to_string(),
             vec!["trace-1".to_string(), "trace-2".to_string()],
             0.01,
+            &PRUNING_SEED,
         );
 
         let equalities = vec![("trace_id".to_string(), "trace-404".to_string())];
 
         assert!(!bloom_may_match_equalities(&bloom, &equalities));
+    }
+
+    #[test]
+    fn bloom_pruning_keeps_present_values_for_bloom_fields() {
+        let mut bloom = BloomFilterSet::new();
+        bloom.build_with_seed(
+            "trace_id".to_string(),
+            vec!["trace-1".to_string(), "trace-2".to_string()],
+            0.01,
+            &PRUNING_SEED,
+        );
+
+        // Bloom filters admit false positives but never false negatives, so an
+        // inserted value must always survive pruning — seed independent.
+        let equalities = vec![("trace_id".to_string(), "trace-1".to_string())];
+
+        assert!(bloom_may_match_equalities(&bloom, &equalities));
     }
 }

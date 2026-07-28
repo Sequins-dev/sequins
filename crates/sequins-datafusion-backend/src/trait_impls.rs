@@ -28,6 +28,10 @@ impl QueryApi for DataFusionBackend {
         let plan_bytes = compile(seql, &ctx).await?;
         self.execute(plan_bytes).await
     }
+
+    async fn sql(&self, sql: &str) -> Result<SeqlStream, QueryError> {
+        self.execute_sql_query(sql).await
+    }
 }
 
 #[async_trait]
@@ -37,5 +41,9 @@ impl QueryExec for DataFusionBackend {
         let scope = crate::execution::decode_plan_scope(&plan_bytes);
         let storage = self.storage.clone();
         execute_plan(&storage, plan_bytes, self.session_ctx_for_scope(scope)).await
+    }
+
+    async fn execute_sql(&self, sql: String) -> Result<SeqlStream, QueryError> {
+        self.execute_sql_query(&sql).await
     }
 }

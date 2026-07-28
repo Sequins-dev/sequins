@@ -349,3 +349,12 @@ private func formatDouble(_ d: Double) -> String {
     }
     return String(format: "%g", d)
 }
+
+extension RecordBatch {
+    /// The semantic [`NodeTypeLabel`] for each column, derived from its Arrow field type
+    /// and name. Lets chart renderers choose temporal/duration/numeric axes and format
+    /// cells without sniffing values. Order matches `toRows()` columns.
+    public func columnTypeLabels() -> [NodeTypeLabel] {
+        schema.fields.map { nodeTypeLabel(for: $0.name, arrowType: $0.type) }
+    }
+}
