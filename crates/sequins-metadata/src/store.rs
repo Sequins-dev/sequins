@@ -148,10 +148,9 @@ impl AppStateStore {
             if conv.title.is_none() {
                 conv.title = title;
             }
-            let mut position = conv.items.len() as u32;
-            for mut item in input_items.into_iter().chain(output_items) {
+            let start = conv.items.len() as u32;
+            for (position, mut item) in (start..).zip(input_items.into_iter().chain(output_items)) {
                 item.position = position;
-                position += 1;
                 conv.items.push(item);
             }
             conv.updated_at_ns = now;
