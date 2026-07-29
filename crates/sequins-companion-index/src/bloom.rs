@@ -60,7 +60,7 @@ impl BloomFilterSet {
     /// Only the hash keys are pinned; the false-positive rate itself is
     /// unchanged, so callers still must not treat a `true` result as proof of
     /// membership.
-    #[cfg(feature = "test-util")]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn build_with_seed<I>(&mut self, field_name: String, values: I, fpr: f64, seed: &[u8; 32])
     where
         I: IntoIterator<Item = String>,
@@ -267,12 +267,15 @@ mod tests {
     fn test_multiple_filters() {
         let mut bloom_set = BloomFilterSet::new();
 
-        // Use 1000+ items to avoid false positives
         let trace_ids: Vec<String> = (0..1000).map(|i| format!("trace{}", i)).collect();
         let user_ids: Vec<String> = (0..1000).map(|i| format!("user{}", i)).collect();
 
-        bloom_set.build("trace_id".to_string(), trace_ids, 0.01);
-        bloom_set.build("user_id".to_string(), user_ids, 0.01);
+        // Seeded: 1000 items makes the nominal 1% false-positive rate *accurate*,
+        // it does not make it zero — the two cross-field assertions below fail
+        // ~1.9% of runs against `build`'s random keys (measured over 3000 trials).
+        // This seed is verified to prune both cross-field values.
+        bloom_set.build_with_seed("trace_id".to_string(), trace_ids, 0.01, &[0u8; 32]);
+        bloom_set.build_with_seed("user_id".to_string(), user_ids, 0.01, &[0u8; 32]);
 
         assert_eq!(bloom_set.len(), 2);
         assert!(bloom_set.check("trace_id", "trace0"));
