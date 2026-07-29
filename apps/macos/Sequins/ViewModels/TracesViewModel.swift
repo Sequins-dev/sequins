@@ -342,17 +342,8 @@ final class TracesViewModel {
         self.timeRange = timeRange
         self.currentServiceName = selectedService?.name ?? "unknown"
 
-        let duration = timeRange.bounds.end.timeIntervalSince(timeRange.bounds.start)
-        let hours = Int(duration / 3600)
-        let query: String
-        if hours > 0 && hours <= 24 {
-            query = "spans last \(hours)h"
-        } else {
-            let minutes = Int(duration / 60)
-            query = "spans last \(max(minutes, 1))m"
-        }
-
-        var fullQuery = query
+        // Scope-less template — `timeRange` is applied structurally at execution.
+        var fullQuery = "spans"
         if let filter = buildResourceIdFilter(selectedService) {
             fullQuery += filter
         }
@@ -368,7 +359,7 @@ final class TracesViewModel {
         tableView = tv
 
         do {
-            try tv.startSnapshot(dataSource: dataSource, query: fullQuery)
+            try tv.startSnapshot(dataSource: dataSource, query: fullQuery, timeRange: timeRange)
             isLoading = false
 
             try? await Task.sleep(nanoseconds: 200_000_000)
@@ -398,17 +389,8 @@ final class TracesViewModel {
         self.dataSource = dataSource
         self.currentServiceName = serviceName
 
-        let duration = timeRange.bounds.end.timeIntervalSince(timeRange.bounds.start)
-        let hours = Int(duration / 3600)
-        let timeSpec: String
-        if hours > 0 && hours <= 24 {
-            timeSpec = "spans last \(hours)h"
-        } else {
-            let minutes = Int(duration / 60)
-            timeSpec = "spans last \(max(minutes, 1))m"
-        }
-
-        var query = timeSpec
+        // Scope-less template — `timeRange` is applied structurally at execution.
+        var query = "spans"
         if let filter = buildResourceIdFilter(selectedService) {
             query += filter
         }
@@ -420,7 +402,7 @@ final class TracesViewModel {
         tableView = tv
 
         do {
-            try tv.start(dataSource: dataSource, query: query)
+            try tv.start(dataSource: dataSource, query: query, timeRange: timeRange)
         } catch {
             self.error = "Live stream failed: \(error.localizedDescription)"
         }

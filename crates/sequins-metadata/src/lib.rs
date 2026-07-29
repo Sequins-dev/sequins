@@ -8,10 +8,12 @@
 
 pub mod error;
 pub mod store;
+pub mod templates;
 pub mod types;
 
 pub use error::{MetadataError, Result};
 pub use store::{AppStateStore, DashboardApi};
+pub use templates::{builtin_templates, template_by_id, DashboardTemplate, SYSTEM_HEALTH_ID};
 pub use types::{
     Conversation, ConversationItem, Dashboard, DashboardRow, RowPanel, SavedVisualization,
     Threshold, VisualizationOptions, DEFAULT_ROW_HEIGHT,

@@ -5,12 +5,139 @@ use crate::lexer::{
     LIT_PRODUCER, LIT_SERVER, LIT_TRACE, LIT_UNSET, LIT_WARN,
 };
 use seql_ast::ast::{
-    ArithOp, CompareExpr, CompareOp, Expr, Literal, Predicate, ScalarFn, SeverityLiteral,
-    SpanKindLiteral, StatusLiteral,
+    ArithOp, CaseBranch, CompareExpr, CompareOp, Expr, Literal, Predicate, ScalarFn,
+    SeverityLiteral, SpanKindLiteral, StatusLiteral,
 };
 use winnow::combinator::{alt, delimited, opt, preceded, separated};
-use winnow::token::literal;
+use winnow::error::{ContextError, ErrMode};
+use winnow::token::{literal, take_while};
 use winnow::{ModalResult, Parser};
+
+// ── AST construction helpers (used by score()/grade() desugaring) ───────────────
+
+fn e_lit(x: f64) -> Expr {
+    Expr::Literal(Literal::Float(x))
+}
+
+fn e_bin(left: Expr, op: ArithOp, right: Expr) -> Expr {
+    Expr::BinaryOp {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    }
+}
+
+fn p_cmp(left: Expr, op: CompareOp, right: Expr) -> Predicate {
+    Predicate::Compare(CompareExpr { left, op, right })
+}
+
+fn e_call(function: ScalarFn, args: Vec<Expr>) -> Expr {
+    Expr::FunctionCall { function, args }
+}
+
+/// Map a lowercase identifier to a built-in scalar function, or `None` if it isn't one.
+fn scalar_fn_by_name(name: &str) -> Option<ScalarFn> {
+    Some(match name {
+        "abs" => ScalarFn::Abs,
+        "round" => ScalarFn::Round,
+        "ceil" => ScalarFn::Ceil,
+        "floor" => ScalarFn::Floor,
+        "to_millis" => ScalarFn::ToMillis,
+        "to_seconds" => ScalarFn::ToSeconds,
+        "to_string" => ScalarFn::ToString,
+        "len" => ScalarFn::Len,
+        "lower" => ScalarFn::Lower,
+        "upper" => ScalarFn::Upper,
+        "exp" => ScalarFn::Exp,
+        "coalesce" => ScalarFn::Coalesce,
+        "least" => ScalarFn::Least,
+        "greatest" => ScalarFn::Greatest,
+        "float" => ScalarFn::ToFloat,
+        "int" => ScalarFn::ToInt,
+        _ => return None,
+    })
+}
+
+/// Expand `score(value, warn, err)` into the health scoring piecewise CASE (higher
+/// value = worse): linear 1.0→0.7 below `warn`, linear 0.7→0.3 between `warn` and
+/// `err`, then `greatest(0, 0.3·exp(-(value-err)/err))` above `err`. Pure sugar over
+/// `Expr::Case` + arithmetic + `exp()`, so it stays plain-SQL-expressible.
+fn build_score_expr(v: Expr, w: Expr, e: Expr) -> Expr {
+    // 1.0 - (v / w) * 0.3
+    let healthy = e_bin(
+        e_lit(1.0),
+        ArithOp::Sub,
+        e_bin(
+            e_bin(v.clone(), ArithOp::Div, w.clone()),
+            ArithOp::Mul,
+            e_lit(0.3),
+        ),
+    );
+    // 0.7 - ((v - w) / (e - w)) * 0.4
+    let degraded = e_bin(
+        e_lit(0.7),
+        ArithOp::Sub,
+        e_bin(
+            e_bin(
+                e_bin(v.clone(), ArithOp::Sub, w.clone()),
+                ArithOp::Div,
+                e_bin(e.clone(), ArithOp::Sub, w.clone()),
+            ),
+            ArithOp::Mul,
+            e_lit(0.4),
+        ),
+    );
+    // greatest(0.0, 0.3 * exp((e - v) / e))   [ = 0.3 * exp(-(v-e)/e) ]
+    let unhealthy = e_call(
+        ScalarFn::Greatest,
+        vec![
+            e_lit(0.0),
+            e_bin(
+                e_lit(0.3),
+                ArithOp::Mul,
+                e_call(
+                    ScalarFn::Exp,
+                    vec![e_bin(
+                        e_bin(e.clone(), ArithOp::Sub, v.clone()),
+                        ArithOp::Div,
+                        e.clone(),
+                    )],
+                ),
+            ),
+        ],
+    );
+    Expr::Case {
+        branches: vec![
+            CaseBranch {
+                condition: p_cmp(v.clone(), CompareOp::Lte, w),
+                result: healthy,
+            },
+            CaseBranch {
+                condition: p_cmp(v, CompareOp::Lte, e),
+                result: degraded,
+            },
+        ],
+        otherwise: Some(Box::new(unhealthy)),
+    }
+}
+
+/// Expand `grade(value, warn, err)` into a CASE yielding `'healthy'` / `'degraded'`
+/// / `'unhealthy'` — the status label matching `score()`'s thresholds.
+fn build_grade_expr(v: Expr, w: Expr, e: Expr) -> Expr {
+    Expr::Case {
+        branches: vec![
+            CaseBranch {
+                condition: p_cmp(v.clone(), CompareOp::Lte, w),
+                result: Expr::Literal(Literal::String("healthy".into())),
+            },
+            CaseBranch {
+                condition: p_cmp(v, CompareOp::Lte, e),
+                result: Expr::Literal(Literal::String("degraded".into())),
+            },
+        ],
+        otherwise: Some(Box::new(Expr::Literal(Literal::String("unhealthy".into())))),
+    }
+}
 
 // ── Literals ─────────────────────────────────────────────────────────────────
 
@@ -118,12 +245,107 @@ fn parse_ts_fn(input: &mut &str) -> ModalResult<Expr> {
     })
 }
 
-/// Parse a primary expression (literal, ts() call, or field reference)
+/// Parse a parenthesised sub-expression: `( <expr> )` — arithmetic grouping.
+fn parse_paren_expr(input: &mut &str) -> ModalResult<Expr> {
+    delimited((literal("("), ws), parse_expr, (ws, literal(")"))).parse_next(input)
+}
+
+/// Parse a built-in scalar function call `name(arg, …)` (abs, round, exp, coalesce,
+/// least, greatest, float, int, …). Backtracks when `name` isn't a known function so a
+/// same-named field still parses as a field reference.
+fn parse_scalar_call(input: &mut &str) -> ModalResult<Expr> {
+    let name = take_while(1.., |c: char| c.is_ascii_lowercase() || c == '_').parse_next(input)?;
+    let Some(function) = scalar_fn_by_name(name) else {
+        return Err(ErrMode::Backtrack(ContextError::new()));
+    };
+    ws.parse_next(input)?;
+    literal("(").parse_next(input)?;
+    let args: Vec<Expr> =
+        separated(0.., delimited(ws, parse_expr, ws), literal(",")).parse_next(input)?;
+    ws.parse_next(input)?;
+    literal(")").parse_next(input)?;
+    Ok(Expr::FunctionCall { function, args })
+}
+
+/// Parse the `score(value, warn, err)` / `grade(value, warn, err)` sugar and expand it
+/// into an `Expr::Case`. Both take exactly three arguments.
+fn parse_score_grade(input: &mut &str) -> ModalResult<Expr> {
+    let name = take_while(1.., |c: char| c.is_ascii_lowercase()).parse_next(input)?;
+    let is_score = match name {
+        "score" => true,
+        "grade" => false,
+        _ => return Err(ErrMode::Backtrack(ContextError::new())),
+    };
+    ws.parse_next(input)?;
+    literal("(").parse_next(input)?;
+    let args: Vec<Expr> =
+        separated(1.., delimited(ws, parse_expr, ws), literal(",")).parse_next(input)?;
+    ws.parse_next(input)?;
+    literal(")").parse_next(input)?;
+    if args.len() != 3 {
+        // A hard error (not a backtrack) so the arity mistake surfaces clearly.
+        return Err(ErrMode::Cut(ContextError::new()));
+    }
+    let mut it = args.into_iter();
+    let v = it.next().expect("3 args");
+    let w = it.next().expect("3 args");
+    let e = it.next().expect("3 args");
+    Ok(if is_score {
+        build_score_expr(v, w, e)
+    } else {
+        build_grade_expr(v, w, e)
+    })
+}
+
+/// Parse a `CASE WHEN <predicate> THEN <expr> … [ELSE <expr>] END` expression.
+fn parse_case(input: &mut &str) -> ModalResult<Expr> {
+    keyword_ci("case").parse_next(input)?;
+    ws1.parse_next(input)?;
+
+    // Sub-parsers (parse_predicate / parse_expr) consume their own surrounding
+    // whitespace, so inter-token spacing here is `ws` (zero-or-more), not `ws1`.
+    let mut branches = Vec::new();
+    loop {
+        ws.parse_next(input)?;
+        if opt(keyword_ci("when")).parse_next(input)?.is_none() {
+            break;
+        }
+        let condition = parse_predicate.parse_next(input)?;
+        ws.parse_next(input)?;
+        keyword_ci("then").parse_next(input)?;
+        let result = parse_expr.parse_next(input)?;
+        branches.push(CaseBranch { condition, result });
+    }
+    if branches.is_empty() {
+        return Err(ErrMode::Cut(ContextError::new()));
+    }
+
+    ws.parse_next(input)?;
+    let otherwise = if opt(keyword_ci("else")).parse_next(input)?.is_some() {
+        Some(Box::new(parse_expr.parse_next(input)?))
+    } else {
+        None
+    };
+    ws.parse_next(input)?;
+    keyword_ci("end").parse_next(input)?;
+
+    Ok(Expr::Case {
+        branches,
+        otherwise,
+    })
+}
+
+/// Parse a primary expression: CASE, `score`/`grade` sugar, a parenthesised
+/// sub-expression, a scalar function call, `ts()`, a literal, or a field reference.
 fn parse_primary(input: &mut &str) -> ModalResult<Expr> {
     ws.parse_next(input)?;
     alt((
-        literal_value.map(Expr::Literal),
+        parse_case,
+        parse_score_grade,
+        parse_paren_expr,
         parse_ts_fn,
+        parse_scalar_call,
+        literal_value.map(Expr::Literal),
         field_ref.map(Expr::Field),
     ))
     .parse_next(input)
@@ -439,6 +661,121 @@ mod tests {
             matches!(expr, Expr::Field(_)),
             "ts without () should parse as a field ref"
         );
+    }
+
+    #[test]
+    fn parse_paren_grouping() {
+        // Parentheses force grouping against the default precedence.
+        let expr = parse_expr.parse("(a + b) * c").unwrap();
+        assert!(
+            matches!(
+                expr,
+                Expr::BinaryOp {
+                    op: ArithOp::Mul,
+                    ..
+                }
+            ),
+            "top op should be Mul over the parenthesised sum, got {:?}",
+            expr
+        );
+    }
+
+    #[test]
+    fn parse_scalar_call_exp() {
+        let expr = parse_expr.parse("exp(x)").unwrap();
+        assert!(matches!(
+            expr,
+            Expr::FunctionCall {
+                function: ScalarFn::Exp,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_scalar_call_variadic_greatest() {
+        let expr = parse_expr.parse("greatest(0.0, x, y)").unwrap();
+        match expr {
+            Expr::FunctionCall {
+                function: ScalarFn::Greatest,
+                args,
+            } => assert_eq!(args.len(), 3),
+            other => panic!("expected greatest() call, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn known_fn_name_as_bare_field_still_parses() {
+        // `exp` without parentheses is a plain field, not a call.
+        let expr = parse_expr.parse("exp").unwrap();
+        assert!(matches!(expr, Expr::Field(_)));
+    }
+
+    #[test]
+    fn parse_case_expression() {
+        let expr = parse_expr
+            .parse("case when x <= 1 then 1.0 when x <= 2 then 0.5 else 0.0 end")
+            .unwrap();
+        match expr {
+            Expr::Case {
+                branches,
+                otherwise,
+            } => {
+                assert_eq!(branches.len(), 2);
+                assert!(otherwise.is_some());
+            }
+            other => panic!("expected Case, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_case_without_else() {
+        let expr = parse_expr.parse("case when x <= 1 then 1.0 end").unwrap();
+        match expr {
+            Expr::Case {
+                branches,
+                otherwise,
+            } => {
+                assert_eq!(branches.len(), 1);
+                assert!(otherwise.is_none());
+            }
+            other => panic!("expected Case, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn score_desugars_to_case() {
+        let expr = parse_expr.parse("score(rate, 0.01, 0.05)").unwrap();
+        match expr {
+            Expr::Case {
+                branches,
+                otherwise,
+            } => {
+                // Two thresholds → two WHEN branches + an exp-decay ELSE.
+                assert_eq!(branches.len(), 2);
+                assert!(otherwise.is_some());
+            }
+            other => panic!("score() should expand to Case, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn grade_desugars_to_case_of_strings() {
+        let expr = parse_expr.parse("grade(rate, 0.01, 0.05)").unwrap();
+        match expr {
+            Expr::Case { branches, .. } => {
+                assert!(matches!(
+                    branches[0].result,
+                    Expr::Literal(Literal::String(_))
+                ));
+            }
+            other => panic!("grade() should expand to Case, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn score_wrong_arity_is_error() {
+        assert!(parse_expr.parse("score(rate, 0.01)").is_err());
     }
 
     #[test]

@@ -1652,9 +1652,103 @@ pub fn ast_expr_to_df_expr(
                     }
                     Ok(datafusion::prelude::upper(arg_exprs[0].clone()))
                 }
+                ScalarFn::Exp => {
+                    if arg_exprs.len() != 1 {
+                        return Err(QueryError::Execution {
+                            message: "exp() expects 1 argument".into(),
+                        });
+                    }
+                    // Cast to float so integer inputs don't truncate the exponent.
+                    scalar_udf_call(
+                        ctx,
+                        "exp",
+                        vec![cast(arg_exprs[0].clone(), ArrowDataType::Float64)],
+                    )
+                }
+                ScalarFn::Coalesce => {
+                    if arg_exprs.is_empty() {
+                        return Err(QueryError::Execution {
+                            message: "coalesce() expects at least 1 argument".into(),
+                        });
+                    }
+                    scalar_udf_call(ctx, "coalesce", arg_exprs)
+                }
+                ScalarFn::Least => {
+                    if arg_exprs.is_empty() {
+                        return Err(QueryError::Execution {
+                            message: "least() expects at least 1 argument".into(),
+                        });
+                    }
+                    scalar_udf_call(ctx, "least", arg_exprs)
+                }
+                ScalarFn::Greatest => {
+                    if arg_exprs.is_empty() {
+                        return Err(QueryError::Execution {
+                            message: "greatest() expects at least 1 argument".into(),
+                        });
+                    }
+                    scalar_udf_call(ctx, "greatest", arg_exprs)
+                }
+                ScalarFn::ToFloat => {
+                    if arg_exprs.len() != 1 {
+                        return Err(QueryError::Execution {
+                            message: "float() expects 1 argument".into(),
+                        });
+                    }
+                    Ok(cast(arg_exprs[0].clone(), ArrowDataType::Float64))
+                }
+                ScalarFn::ToInt => {
+                    if arg_exprs.len() != 1 {
+                        return Err(QueryError::Execution {
+                            message: "int() expects 1 argument".into(),
+                        });
+                    }
+                    Ok(cast(arg_exprs[0].clone(), ArrowDataType::Int64))
+                }
             }
         }
+        AstExpr::Case {
+            branches,
+            otherwise,
+        } => {
+            if branches.is_empty() {
+                return Err(QueryError::Execution {
+                    message: "CASE requires at least one WHEN branch".into(),
+                });
+            }
+            let mut iter = branches.iter();
+            let first = iter.next().expect("branches is non-empty");
+            let first_cond = predicate_to_expr(&first.condition, _schema, signal, ctx)?;
+            let first_res = ast_expr_to_df_expr(&first.result, _schema, signal, ctx)?;
+            let mut builder = when(first_cond, first_res);
+            for b in iter {
+                let cond = predicate_to_expr(&b.condition, _schema, signal, ctx)?;
+                let res = ast_expr_to_df_expr(&b.result, _schema, signal, ctx)?;
+                builder = builder.when(cond, res);
+            }
+            let built = match otherwise {
+                Some(e) => builder.otherwise(ast_expr_to_df_expr(e, _schema, signal, ctx)?),
+                None => builder.end(),
+            };
+            built.map_err(|e| QueryError::Execution {
+                message: format!("CASE lowering failed: {e}"),
+            })
+        }
     }
+}
+
+/// Call a built-in scalar function registered on the session context by name
+/// (e.g. `exp`, `coalesce`, `least`, `greatest`). Keeps us off version-specific
+/// `expr_fn` import paths — the functions are standard SQL.
+fn scalar_udf_call(
+    ctx: &SessionContext,
+    name: &str,
+    args: Vec<DfExpr>,
+) -> Result<DfExpr, QueryError> {
+    let udf = ctx.udf(name).map_err(|e| QueryError::Execution {
+        message: format!("scalar function `{name}` is not available: {e}"),
+    })?;
+    Ok(udf.call(args))
 }
 
 fn literal_to_df_lit(lit_val: &Literal) -> Result<DfExpr, QueryError> {
@@ -2089,6 +2183,184 @@ mod tests {
         .await
         .expect("stddev/variance/percentile should compile");
         assert!(!bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_case_exp_and_scalar_fns_compile() {
+        let ctx = schema_context().expect("schema_context");
+        let bytes = compile(
+            "spans last 1h | group by {} { count() as n } \
+             | compute greatest(0.0, least(1.0, float(n) * 0.001)) as clamped, \
+                       exp(0.0 - float(n) / 100.0) as decay, \
+                       coalesce(n, 0) as safe, \
+                       case when n > 100 then 1.0 when n > 10 then 0.5 else 0.0 end as bucket",
+            &ctx,
+        )
+        .await
+        .expect("CASE + exp/least/greatest/float/coalesce should compile");
+        assert!(!bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_score_query_compiles() {
+        let ctx = schema_context().expect("schema_context");
+        // A health-style scoring query: rate → score → weighted overall with
+        // missing-data-aware weighting (via `!= null`).
+        let bytes = compile(
+            "spans last 1h | group by {} { \
+                count() where status == 2 as errs, count() as total, \
+                p95(duration_ns) as p95_ns } \
+             | compute float(errs) / float(total) as err_rate, p95_ns as latency \
+             | compute score(err_rate, 0.01, 0.05) as err_score, \
+                       score(latency, 200000000, 500000000) as lat_score, \
+                       grade(err_rate, 0.01, 0.05) as err_status \
+             | compute (err_score * 0.4 + coalesce(lat_score, 0.0) * 0.2) \
+                       / (0.4 + case when lat_score != null then 0.2 else 0.0 end) as overall",
+            &ctx,
+        )
+        .await
+        .expect("scoring query should compile");
+        assert!(!bytes.is_empty());
+    }
+
+    /// A `score()`/CASE/exp query must survive the full Substrait round-trip — the
+    /// backend executes by consuming the produced plan, so a producer that emits CASE
+    /// but a consumer that rejects it would break local execution silently.
+    #[tokio::test]
+    async fn test_score_query_compiles_and_consumes() {
+        use datafusion_substrait::extensions::Extensions;
+        use datafusion_substrait::logical_plan::consumer::{
+            DefaultSubstraitConsumer, SubstraitConsumer,
+        };
+        use datafusion_substrait::substrait::proto::{plan_rel, Plan};
+
+        let ctx = schema_context().expect("schema_context");
+        let bytes = compile(
+            "spans last 1h | group by {} { count() where status == 2 as errs, count() as total } \
+             | compute float(errs) / float(total) as err_rate \
+             | compute score(err_rate, 0.01, 0.05) as err_score, \
+                       grade(err_rate, 0.01, 0.05) as err_status",
+            &ctx,
+        )
+        .await
+        .expect("scoring query should compile");
+
+        let plan: Plan = prost::Message::decode(&bytes[..]).expect("decode");
+        let extensions = Extensions::try_from(&plan.extensions).expect("extensions");
+        let state = ctx.state();
+        let consumer = DefaultSubstraitConsumer::new(&extensions, &state);
+        let rel = match plan.relations[0].rel_type.as_ref().expect("rel_type") {
+            plan_rel::RelType::Root(root) => root.input.as_ref().expect("root input"),
+            plan_rel::RelType::Rel(rel) => rel,
+        };
+        let consumed = consumer.consume_rel(rel).await;
+        assert!(
+            consumed.is_ok(),
+            "backend consumer rejected the scoring plan: {:?}",
+            consumed.err()
+        );
+    }
+
+    /// The real System Health dashboard scoreBar query (span factors + missing-data
+    /// aware weighted overall) compiles and survives the Substrait round-trip.
+    #[tokio::test]
+    async fn test_health_dashboard_query_compiles_and_consumes() {
+        use datafusion_substrait::extensions::Extensions;
+        use datafusion_substrait::logical_plan::consumer::{
+            DefaultSubstraitConsumer, SubstraitConsumer,
+        };
+        use datafusion_substrait::substrait::proto::{plan_rel, Plan};
+
+        let ctx = schema_context().expect("schema_context");
+        let q = "spans | group by {} { \
+                count() where status == 2 as errs, count() as total, \
+                count() where attr.http_status_code >= 500 as http_5xx, \
+                count() where attr.http_status_code > 0 as http_total, \
+                p95(duration_ns) as p95_ns } \
+             | compute float(errs) / float(total) as span_error_rate, \
+                       case when http_total > 0 then float(http_5xx) / float(http_total) else null end as http_error_rate, \
+                       p95_ns as latency_p95 \
+             | compute score(span_error_rate, 0.01, 0.05) as span_error_score, \
+                       case when http_error_rate != null then score(http_error_rate, 0.05, 0.15) else null end as http_error_score, \
+                       score(latency_p95, 200000000, 500000000) as latency_score, \
+                       span_error_rate * 100.0 as span_error_score__value, \
+                       http_error_rate * 100.0 as http_error_score__value, \
+                       p95_ns / 1000000.0 as latency_score__value \
+             | compute (span_error_score * 0.40 + coalesce(http_error_score, 0.0) * 0.25 + latency_score * 0.20) \
+                       / (0.40 + case when http_error_score != null then 0.25 else 0.0 end + 0.20) as overall \
+             | select overall, span_error_score, span_error_score__value, http_error_score, \
+                      http_error_score__value, latency_score, latency_score__value";
+        // Scope-less template: a range is injected at execution (as a dashboard does).
+        let ast = seql_parser::parse(q).expect("health dashboard query should parse");
+        assert_eq!(
+            ast.scan.time_range, None,
+            "template carries no inline scope"
+        );
+        let bytes = compile_ast_with_range(
+            ast,
+            Some(TimeRange::SlidingWindow {
+                start_ns: 3_600_000_000_000,
+            }),
+            &ctx,
+        )
+        .await
+        .expect("health dashboard query should compile with an injected range");
+
+        let plan: Plan = prost::Message::decode(&bytes[..]).expect("decode");
+        let extensions = Extensions::try_from(&plan.extensions).expect("extensions");
+        let state = ctx.state();
+        let consumer = DefaultSubstraitConsumer::new(&extensions, &state);
+        let rel = match plan.relations[0].rel_type.as_ref().expect("rel_type") {
+            plan_rel::RelType::Root(root) => root.input.as_ref().expect("root input"),
+            plan_rel::RelType::Rel(rel) => rel,
+        };
+        assert!(
+            consumer.consume_rel(rel).await.is_ok(),
+            "backend consumer rejected the health dashboard plan"
+        );
+    }
+
+    /// The remaining System Health dashboard panel queries (stat cards, trend lines,
+    /// HTTP-class stacked bar) all parse and compile with an injected range.
+    #[tokio::test]
+    async fn test_health_dashboard_panel_queries_compile() {
+        let ctx = schema_context().expect("schema_context");
+        let queries = [
+            // Error-rate stat card.
+            "spans | group by {} { count() where status == 2 as e, count() as t } \
+             | compute float(e) / float(t) * 100.0 as error_rate_pct",
+            // p95 latency stat card.
+            "spans | group by {} { p95(duration_ns) as p95_ns } | compute p95_ns / 1000000.0 as p95_ms",
+            // Error-log stat card.
+            "logs | where severity_number >= 9 | group by {} { count() as error_logs }",
+            // Error-rate trend line (rate from raw counts + select to plot one series).
+            "spans | group by { ts() bin 10% as bucket } { count() where status == 2 as e, count() as t } \
+             | compute float(e) / float(t) * 100.0 as error_rate_pct | select bucket, error_rate_pct",
+            // Latency-percentile trend lines (ns → ms).
+            "spans | group by { ts() bin 10% as bucket } \
+                { p50(duration_ns) as p50, p95(duration_ns) as p95, p99(duration_ns) as p99 } \
+             | compute p50 / 1000000.0 as p50_ms, p95 / 1000000.0 as p95_ms, p99 / 1000000.0 as p99_ms \
+             | select bucket, p50_ms, p95_ms, p99_ms",
+            // HTTP status-class stacked bar over time (compound per-aggregate filters).
+            "spans | where attr.http_status_code > 0 | group by { ts() bin 10% as bucket } { \
+                count() where attr.http_status_code >= 200 and attr.http_status_code < 300 as c2xx, \
+                count() where attr.http_status_code >= 400 and attr.http_status_code < 500 as c4xx, \
+                count() where attr.http_status_code >= 500 as c5xx }",
+        ];
+        for q in queries {
+            let ast =
+                seql_parser::parse(q).unwrap_or_else(|e| panic!("parse failed for `{q}`: {e:?}"));
+            let bytes = compile_ast_with_range(
+                ast,
+                Some(TimeRange::SlidingWindow {
+                    start_ns: 3_600_000_000_000,
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("compile failed for `{q}`: {e:?}"));
+            assert!(!bytes.is_empty(), "empty plan for `{q}`");
+        }
     }
 
     /// `percentile(col, 90)` (a 0–100 form) is normalized to the 0..1 quantile.

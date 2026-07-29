@@ -7,6 +7,7 @@ struct DashboardListPanel: View {
     @Bindable var viewModel: DashboardsViewModel
 
     @State private var showingNew = false
+    @State private var showingGallery = false
     @State private var newName = ""
 
     var body: some View {
@@ -15,13 +16,24 @@ struct DashboardListPanel: View {
                 Text("Dashboards")
                     .font(.headline)
                 Spacer()
-                Button {
-                    newName = ""
-                    showingNew = true
+                Menu {
+                    Button {
+                        newName = ""
+                        showingNew = true
+                    } label: {
+                        Label("New Dashboard", systemImage: "square.grid.2x2")
+                    }
+                    Button {
+                        showingGallery = true
+                    } label: {
+                        Label("New from Template…", systemImage: "rectangle.stack.badge.plus")
+                    }
                 } label: {
                     Image(systemName: "plus")
                 }
-                .buttonStyle(.borderless)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
                 .help("New dashboard")
             }
             .padding(.horizontal, 10)
@@ -68,6 +80,9 @@ struct DashboardListPanel: View {
                 }
             }
             Button("Cancel", role: .cancel) {}
+        }
+        .sheet(isPresented: $showingGallery) {
+            TemplateGallerySheet(viewModel: viewModel, dataSource: appState.dataSource)
         }
     }
 

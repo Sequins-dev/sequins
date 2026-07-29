@@ -1600,6 +1600,31 @@ bool sequins_dashboard_save(struct CDataSource *data_source,
 bool sequins_dashboard_delete(struct CDataSource *data_source, const char *id, char **error_out);
 
 /**
+ * List the built-in dashboard templates as a JSON array of `{id, title, description}`.
+ * Templates are compiled in, so this is identical for Local and Remote; the data
+ * source is accepted for ABI consistency but unused.
+ *
+ * # Safety
+ * `out_json`/`error_out` are out-params.
+ */
+bool sequins_dashboard_templates_list(struct CDataSource *_data_source,
+                                      char **out_json,
+                                      char **error_out);
+
+/**
+ * Instantiate a built-in template by id: build a **fresh** dashboard (a new id, so the
+ * gallery always creates a new copy) and persist it via the data source (Local or
+ * Remote). Writes the stored dashboard to `out_json`.
+ *
+ * # Safety
+ * `data_source`/`template_id` must be valid; `out_json`/`error_out` are out-params.
+ */
+bool sequins_dashboard_instantiate_template(struct CDataSource *data_source,
+                                            const char *template_id,
+                                            char **out_json,
+                                            char **error_out);
+
+/**
  * Delete a persisted conversation by id (in-memory + durable). Local only; remote
  * connections report an error until the daemon exposes conversation deletion.
  *
@@ -2099,7 +2124,11 @@ void sequins_seql_stream_free(struct CStreamHandle *handle);
  *
  * # Parameters
  * - `data_source`   — local data source (remote not yet supported)
- * - `query`         — SeQL query text
+ * - `query`         — SeQL query text (may be a scope-less template)
+ * - `range_kind`    — structured time range selector: 0 = honor the query's inline
+ *   scope, 1 = sliding window (`range_a_ns` = start offset), 2 = absolute
+ *   (`range_a_ns`..`range_b_ns`). A non-zero range overrides any inline scope.
+ * - `range_a_ns` / `range_b_ns` — range bounds, interpreted per `range_kind`.
  * - `strategy`      — [`CViewStrategy`] variant
  * - `retention_ns`  — retention window in nanoseconds; if 0, defaults to 1 hour.
  *   Only meaningful for `Flamegraph` strategy.
@@ -2118,6 +2147,9 @@ void sequins_seql_stream_free(struct CStreamHandle *handle);
  */
 struct CViewHandle *sequins_view_create(struct CDataSource *data_source,
                                         const char *query,
+                                        uint32_t range_kind,
+                                        uint64_t range_a_ns,
+                                        uint64_t range_b_ns,
                                         uint32_t strategy,
                                         uint64_t retention_ns,
                                         void (*on_deltas)(struct CViewDelta*, uint32_t, void*),

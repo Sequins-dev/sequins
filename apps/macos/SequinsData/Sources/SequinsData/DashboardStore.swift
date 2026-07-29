@@ -156,6 +156,14 @@ public struct VizThreshold: Codable, Hashable, Sendable {
     }
 }
 
+/// A built-in dashboard template listed in the "New from template" gallery
+/// (mirrors the FFI `CTemplateInfo`).
+public struct DashboardTemplateInfo: Codable, Hashable, Sendable, Identifiable {
+    public var id: String
+    public var title: String
+    public var description: String
+}
+
 /// Default dashboard row height, in points (mirrors `DEFAULT_ROW_HEIGHT` in Rust).
 public let defaultRowHeight: Double = 280
 
@@ -306,6 +314,25 @@ extension DataSource {
         let json = try jsonIn.withCString { inPtr in
             try callJSON { out, err in
                 sequins_dashboard_save(rawPointer, inPtr, out, err)
+            }
+        }
+        return try DashboardJSON.decoder.decode(Dashboard.self, from: Data(json.utf8))
+    }
+
+    /// List the built-in dashboard templates available to instantiate.
+    public func listDashboardTemplates() throws -> [DashboardTemplateInfo] {
+        let json = try callJSON { out, err in
+            sequins_dashboard_templates_list(rawPointer, out, err)
+        }
+        return try DashboardJSON.decoder.decode([DashboardTemplateInfo].self, from: Data(json.utf8))
+    }
+
+    /// Instantiate a template by id, creating a fresh dashboard. Returns the stored copy.
+    @discardableResult
+    public func instantiateTemplate(id: String) throws -> Dashboard {
+        let json = try id.withCString { idPtr in
+            try callJSON { out, err in
+                sequins_dashboard_instantiate_template(rawPointer, idPtr, out, err)
             }
         }
         return try DashboardJSON.decoder.decode(Dashboard.self, from: Data(json.utf8))

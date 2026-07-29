@@ -165,6 +165,8 @@ struct VizRenderer: View {
             HeatmapChartView(columns: columns, rows: rows, columnTypes: columnTypes)
         case .trace:
             TraceVizView(columns: columns, rows: rows)
+        case .scoreBar:
+            ScoreBarView(columns: columns, rows: rows, columnTypes: columnTypes, columnRoles: columnRoles, options: options)
         }
     }
 }

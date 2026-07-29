@@ -17,7 +17,7 @@ use object_store::path::Path as ObjPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use tokio::sync::RwLock;
 
-use crate::error::Result;
+use crate::error::{MetadataError, Result};
 use crate::types::{Conversation, ConversationItem, Dashboard};
 
 fn now_ns() -> u64 {
@@ -237,6 +237,27 @@ impl AppStateStore {
     /// Fetch a dashboard by id.
     pub async fn get_dashboard(&self, id: &str) -> Option<Dashboard> {
         self.dashboards.read().await.get(id).cloned()
+    }
+
+    /// Instantiate a built-in template by id, persisting it as a dashboard and
+    /// returning the stored value. Errors if the template id is unknown.
+    pub async fn instantiate_template(&self, template_id: &str) -> Result<Dashboard> {
+        let template = crate::templates::template_by_id(template_id).ok_or_else(|| {
+            MetadataError::Other(format!("unknown dashboard template `{template_id}`"))
+        })?;
+        self.upsert_dashboard(template.build()).await
+    }
+
+    /// Seed the default built-in dashboards, but only into a **fresh** (empty) store, so
+    /// a first run lands on a useful dashboard while a user who later deletes it isn't
+    /// nagged by it reappearing. Idempotent once any dashboard exists.
+    pub async fn seed_builtin_dashboards(&self) -> Result<()> {
+        if !self.dashboards.read().await.is_empty() {
+            return Ok(());
+        }
+        self.upsert_dashboard(crate::templates::system_health())
+            .await?;
+        Ok(())
     }
 }
 

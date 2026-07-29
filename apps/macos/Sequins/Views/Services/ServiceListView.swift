@@ -121,7 +121,8 @@ struct ServiceListView: View {
         isLoading = true
 
         do {
-            let stream = try dataSource.executeLiveSeQL("resources last 24h")
+            let stream = try dataSource.executeLiveSeQL(
+                "resources", timeRange: .relative(duration: 86_400))
 
             stream.onSchemaCallback = { _ in
                 Task { @MainActor in

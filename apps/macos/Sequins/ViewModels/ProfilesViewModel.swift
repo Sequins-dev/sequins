@@ -52,12 +52,12 @@ final class ProfilesViewModel {
         self.dataSource = dataSource
 
         let duration = timeRange.bounds.end.timeIntervalSince(timeRange.bounds.start)
-        let durationStr = formatDuration(duration)
         let retentionNs = UInt64(duration * 1_000_000_000)
         let resourceFilter = buildResourceIdFilter(selectedService)
         let valueTypeFilter = selectedValueType.map { " | where value_type = '\($0)'" } ?? ""
 
-        let query = "samples last \(durationStr)\(resourceFilter)\(valueTypeFilter) <- stacks <- frames"
+        // Scope-less template — the range is applied structurally to the `samples` scan.
+        let query = "samples\(resourceFilter)\(valueTypeFilter) <- stacks <- frames"
 
         cancel()
         error = nil
@@ -68,6 +68,7 @@ final class ProfilesViewModel {
         do {
             viewHandle = try dataSource.executeView(
                 query,
+                timeRange: timeRange,
                 strategy: .flamegraph,
                 retentionNs: retentionNs
             ) { [weak newFeed] deltas in
@@ -179,14 +180,5 @@ final class ProfilesViewModel {
         }
         let ids = service.resourceIds.map { String($0) }.joined(separator: ", ")
         return " | where resource_id in [\(ids)]"
-    }
-
-    private func formatDuration(_ duration: TimeInterval) -> String {
-        let hours = Int(duration / 3600)
-        if hours > 0 && hours <= 24 {
-            return "\(hours)h"
-        }
-        let minutes = Int(duration / 60)
-        return "\(max(minutes, 1))m"
     }
 }

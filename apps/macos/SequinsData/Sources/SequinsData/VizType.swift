@@ -19,6 +19,7 @@ public enum VizType: String, CaseIterable, Codable, Sendable {
     case table
     case heatmap
     case trace
+    case scoreBar
 
     /// Human-readable label for pickers.
     public var displayName: String {
@@ -33,6 +34,7 @@ public enum VizType: String, CaseIterable, Codable, Sendable {
         case .table: return "Table"
         case .heatmap: return "Heatmap"
         case .trace: return "Trace"
+        case .scoreBar: return "Score Bars"
         }
     }
 
@@ -49,6 +51,7 @@ public enum VizType: String, CaseIterable, Codable, Sendable {
         case .table: return "tablecells"
         case .heatmap: return "square.grid.3x3.fill"
         case .trace: return "arrow.triangle.branch"
+        case .scoreBar: return "chart.bar.xaxis"
         }
     }
 
@@ -77,7 +80,7 @@ public enum VizType: String, CaseIterable, Codable, Sendable {
     /// column means it can't render and should fall back to a table).
     public var plotsMeasures: Bool {
         switch self {
-        case .line, .area, .bar, .stackedBar, .pie, .gauge, .heatmap: return true
+        case .line, .area, .bar, .stackedBar, .pie, .gauge, .heatmap, .scoreBar: return true
         case .stat, .table, .trace: return false
         }
     }

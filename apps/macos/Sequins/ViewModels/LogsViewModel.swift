@@ -215,15 +215,8 @@ final class LogsViewModel {
 
         self.dataSource = dataSource
 
-        let hours = Int(timeRange.bounds.end.timeIntervalSince(timeRange.bounds.start) / 3600)
-        var query: String
-        if hours > 0 && hours <= 24 {
-            query = "logs last \(hours)h"
-        } else {
-            let startNs = Int64(timeRange.bounds.start.timeIntervalSince1970 * 1_000_000_000)
-            let endNs = Int64(timeRange.bounds.end.timeIntervalSince1970 * 1_000_000_000)
-            query = "logs between(\(startNs), \(endNs))"
-        }
+        // Scope-less template — `timeRange` is applied structurally at execution.
+        var query = "logs"
 
         if let filter = buildResourceIdFilter(selectedService) {
             query += filter
@@ -251,7 +244,7 @@ final class LogsViewModel {
         tableView = tv
 
         do {
-            try tv.startSnapshot(dataSource: dataSource, query: query)
+            try tv.startSnapshot(dataSource: dataSource, query: query, timeRange: timeRange)
             isLoading = false
         } catch {
             NSLog("📋 SeQL execution error: \(error)")
@@ -271,7 +264,7 @@ final class LogsViewModel {
 
         cancel()
 
-        var query = "logs last 1h"
+        var query = "logs"
         if let filter = buildResourceIdFilter(selectedService) {
             query += filter
         }
@@ -291,7 +284,8 @@ final class LogsViewModel {
         tableView = tv
 
         do {
-            try tv.start(dataSource: dataSource, query: query)
+            // Live mode uses a 1h initial window, applied structurally.
+            try tv.start(dataSource: dataSource, query: query, timeRange: .relative(duration: 3600))
         } catch {
             NSLog("📋 [LogsViewModel] Live stream failed to start: \(error)")
             self.error = "Query failed: \(error.localizedDescription)"

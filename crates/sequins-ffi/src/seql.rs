@@ -254,14 +254,6 @@ impl QueryExecutor {
         }
     }
 
-    async fn query_live(&self, seql: &str) -> Result<sequins_traits::SeqlStream, QueryError> {
-        match self {
-            #[cfg(feature = "local")]
-            QueryExecutor::Local(b) => b.query_live(seql).await,
-            QueryExecutor::Remote(c) => c.query_live(seql).await,
-        }
-    }
-
     async fn query_live_with_range(
         &self,
         seql: &str,
@@ -945,7 +937,11 @@ unsafe impl Send for ViewSinkCtx {}
 ///
 /// # Parameters
 /// - `data_source`   — local data source (remote not yet supported)
-/// - `query`         — SeQL query text
+/// - `query`         — SeQL query text (may be a scope-less template)
+/// - `range_kind`    — structured time range selector: 0 = honor the query's inline
+///   scope, 1 = sliding window (`range_a_ns` = start offset), 2 = absolute
+///   (`range_a_ns`..`range_b_ns`). A non-zero range overrides any inline scope.
+/// - `range_a_ns` / `range_b_ns` — range bounds, interpreted per `range_kind`.
 /// - `strategy`      — [`CViewStrategy`] variant
 /// - `retention_ns`  — retention window in nanoseconds; if 0, defaults to 1 hour.
 ///   Only meaningful for `Flamegraph` strategy.
@@ -966,6 +962,9 @@ unsafe impl Send for ViewSinkCtx {}
 pub unsafe extern "C" fn sequins_view_create(
     data_source: *mut CDataSource,
     query: *const c_char,
+    range_kind: u32,
+    range_a_ns: u64,
+    range_b_ns: u64,
     strategy: u32,
     retention_ns: u64,
     on_deltas: Option<
@@ -982,6 +981,7 @@ pub unsafe extern "C" fn sequins_view_create(
         Some(cb) => cb,
         None => return std::ptr::null_mut(),
     };
+    let time_range = ffi_time_range(range_kind, range_a_ns, range_b_ns);
 
     let query_str = match CStr::from_ptr(query).to_str() {
         Ok(s) => s.to_string(),
@@ -1006,7 +1006,7 @@ pub unsafe extern "C" fn sequins_view_create(
     };
 
     let task = RUNTIME.spawn(AssertSend(async move {
-        let seql_stream = match executor.query_live(&query_str).await {
+        let seql_stream = match executor.query_live_with_range(&query_str, time_range).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = %e, "View query failed");
