@@ -62,9 +62,10 @@ async fn create_conflicts_and_update_enforces_the_etag() {
         return;
     };
 
+    let support = sequins_object_store::conditional_write_support(&uri);
     assert!(
-        sequins_object_store::supports_conditional_put(&uri),
-        "{uri} should be declared CAS-capable"
+        support.create && support.update,
+        "{uri} should support both modes"
     );
 
     let store = build(&uri, &config).expect("store should build");
@@ -152,6 +153,75 @@ async fn create_conflicts_and_update_enforces_the_etag() {
     assert_ne!(
         first.e_tag, second.e_tag,
         "each generation should get a distinct ETag"
+    );
+
+    store.delete(&path).await.ok();
+}
+
+/// The same one-winner property the local backend proves in the unit tests,
+/// against a real S3-compatible endpoint. This is the primitive the
+/// create-only generation strategy relies on, so it is worth confirming the
+/// remote implementation agrees with the local one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_create_has_exactly_one_winner() {
+    let Some((uri, config)) = config_from_env() else {
+        eprintln!("SEQUINS_TEST_S3_URI unset — skipping S3 create-race test");
+        return;
+    };
+
+    let store = build(&uri, &config).expect("store should build");
+    let path = unique_key("race");
+
+    const RACERS: usize = 16;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(RACERS));
+
+    let mut tasks = Vec::with_capacity(RACERS);
+    for racer in 0..RACERS {
+        let store = std::sync::Arc::clone(&store);
+        let path = path.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .put_opts(
+                    &path,
+                    bytes::Bytes::from(format!("claimed-by-{racer}")).into(),
+                    PutOptions {
+                        mode: PutMode::Create,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map(|_| racer)
+        }));
+    }
+
+    let mut winners = Vec::new();
+    let mut losers = 0usize;
+    for task in tasks {
+        match task.await.expect("task should not panic") {
+            Ok(racer) => winners.push(racer),
+            Err(OsError::AlreadyExists { .. }) => losers += 1,
+            Err(other) => panic!("losers must see AlreadyExists, got {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one writer should win, got {winners:?}"
+    );
+    assert_eq!(
+        losers,
+        RACERS - 1,
+        "every other writer should see AlreadyExists"
+    );
+
+    let stored = store.get(&path).await.unwrap().bytes().await.unwrap();
+    assert_eq!(
+        stored,
+        bytes::Bytes::from(format!("claimed-by-{}", winners[0])),
+        "the winner's bytes must be the ones that persisted"
     );
 
     store.delete(&path).await.ok();
