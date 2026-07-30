@@ -159,9 +159,9 @@ async fn create_conflicts_and_update_enforces_the_etag() {
 }
 
 /// The same one-winner property the local backend proves in the unit tests,
-/// against a real S3-compatible endpoint. This is the primitive the
-/// create-only generation strategy relies on, so it is worth confirming the
-/// remote implementation agrees with the local one.
+/// against a real S3-compatible endpoint. Immutable content-addressed writes
+/// depend on it on every backend, so it is worth confirming the remote
+/// implementation agrees with the local one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_create_has_exactly_one_winner() {
     let Some((uri, config)) = config_from_env() else {

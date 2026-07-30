@@ -20,16 +20,21 @@
 //!   S3, GCS, and Azure but **not** `LocalFileSystem`, which returns
 //!   `Error::NotImplemented`.
 //!
-//! Build linearizable state transitions on `Create`, not `Update`. Instead of
-//! mutating one pointer object under a CAS, write an immutable
-//! `.../{next_generation}` key with `Create`: exactly one writer wins, the
-//! losers get `AlreadyExists` and retry against the new state. That is a single
-//! code path that behaves identically on a laptop and in production, which
-//! matters more than the round-trip a mutable pointer would save.
+//! **`Update` is the right primitive for a mutable pointer, and deployments
+//! that have it should use it.** A single conditional write advances the
+//! pointer, and one read returns the current value — no probing, no scan. Build
+//! the production path on that.
 //!
-//! `Update` remains available as an optimisation where a caller knows it is on
-//! a cloud backend — see [`conditional_write_support`] — but nothing should
-//! *require* it, or local deployments break.
+//! `LocalFileSystem` cannot, so a caller that needs a mutable pointer supplies
+//! a second, cheaper path for `file://` — serialising its own read-modify-write
+//! rather than relying on the store. Local deployments are single-node and
+//! low-traffic, so the weaker guarantee is an acceptable trade there and only
+//! there. `file://` must keep working; it does not have to be fast or
+//! multi-writer safe.
+//!
+//! Use [`conditional_write_support`] to choose between the two. Note the
+//! distinction is *only* about mutable pointers: immutable content-addressed
+//! objects use `Create` everywhere and need no fallback.
 
 use std::sync::Arc;
 
@@ -121,7 +126,8 @@ pub struct ConditionalWriteSupport {
     /// winner with the rest receiving `Error::AlreadyExists`.
     ///
     /// True for every supported backend. `LocalFileSystem` implements it with
-    /// `link(2)`, which is atomic on POSIX.
+    /// `link(2)`, which is atomic on POSIX. Immutable content-addressed writes
+    /// can therefore use `Create` everywhere without a fallback.
     pub create: bool,
 
     /// Compare-and-swap against an existing object (`PutMode::Update`).
@@ -139,12 +145,13 @@ pub struct ConditionalWriteSupport {
 
 /// Report the conditional write modes available for `uri`.
 ///
-/// Use this to *select a strategy*, never to reject a store. Every backend
-/// supports `create`, so any state machine that can be expressed as
-/// create-exclusive transitions runs everywhere — including a plain `file://`
-/// directory on a developer laptop. Requiring `update` would make local
-/// deployments impossible, which is not an acceptable trade for one saved
-/// round-trip.
+/// Use this to *select an implementation*, never to reject a store.
+///
+/// A caller maintaining a mutable pointer should take the `update` path when it
+/// is available — that is the correct mechanism, and it is what production
+/// deployments will run. When `update` is false the caller supplies its own
+/// serialisation for `file://`, accepting weaker concurrency guarantees on a
+/// backend where that does not matter.
 pub fn conditional_write_support(uri: &str) -> ConditionalWriteSupport {
     let is_local = uri.starts_with("file://") || uri.starts_with('/');
     ConditionalWriteSupport {
@@ -356,10 +363,11 @@ mod tests {
         );
     }
 
-    /// The property the whole create-only CAS strategy rests on: when many
-    /// writers race to claim the same generation key, exactly one wins and
-    /// every loser is told so. Verified here on the local backend, because
-    /// that is the one whose atomicity is easiest to get wrong.
+    /// Immutable content-addressed writes rely on `Create` being atomic on
+    /// every backend: when writers race to publish the same key, one wins and
+    /// the rest are told so rather than silently clobbering it. Verified on the
+    /// local backend because that is the one whose atomicity is easiest to
+    /// doubt — it goes through `link(2)` rather than a server-side condition.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn concurrent_create_has_exactly_one_winner_locally() {
         use object_store::{path::Path, Error as OsError, ObjectStoreExt, PutMode, PutOptions};
