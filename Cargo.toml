@@ -18,6 +18,7 @@ members = [
     "crates/sequins-live-query",
     "crates/sequins-batch-chain",
     "crates/sequins-hot-tier",
+    "crates/sequins-object-store",
     "crates/sequins-cold-tier",
     "crates/sequins-storage",
     "crates/sequins-datafusion-backend",
@@ -53,6 +54,7 @@ sequins-companion-index       = { path = "crates/sequins-companion-index" }
 sequins-vortex-indexed-layout = { path = "crates/sequins-vortex-indexed-layout" }
 sequins-attribute-codec       = { path = "crates/sequins-attribute-codec" }
 sequins-series-index          = { path = "crates/sequins-series-index" }
+sequins-object-store          = { path = "crates/sequins-object-store" }
 sequins-types      = { path = "crates/sequins-types" }
 sequins-otlp       = { path = "crates/sequins-otlp" }
 sequins-query      = { path = "crates/sequins-query" }

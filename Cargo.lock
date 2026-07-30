@@ -6139,6 +6139,7 @@ dependencies = [
  "parking_lot",
  "sequins-arrow-schema",
  "sequins-companion-index",
+ "sequins-object-store",
  "sequins-series-index",
  "sequins-types",
  "sequins-vortex-indexed-layout",
@@ -6149,7 +6150,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
- "url",
  "uuid",
  "vortex",
  "vortex-datafusion",
@@ -6328,6 +6328,19 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "sequins-object-store"
+version = "0.4.0"
+dependencies = [
+ "bytes",
+ "object_store",
+ "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
 ]
 
 [[package]]

@@ -107,132 +107,15 @@ impl ColdTier {
 
     /// Create an object store from the cold-tier config.
     ///
-    /// Supports:
-    /// - Local filesystem: `file:///path` or `/path`
-    /// - AWS S3 (and S3-compatibles): `s3://bucket/path`
-    /// - Google Cloud Storage: `gs://bucket/path`
-    /// - Azure Blob Storage: `az://container/path` or `azure://container/path`
-    ///
-    /// Connection settings for cloud stores (region, endpoint, HTTP, addressing,
-    /// optional static credentials) come from [`ColdTierConfig::object_store`].
-    /// Credentials default to the provider's standard chain — instance profile,
-    /// IRSA / workload identity — so a properly-configured pod needs no static
-    /// credentials in config.
+    /// Delegates to [`sequins_object_store::build`], which is shared with other
+    /// subsystems that need their own bucket or prefix. Connection settings come
+    /// from [`ColdTierConfig::object_store`]; credentials default to the
+    /// provider's standard chain.
     fn create_store(config: &ColdTierConfig) -> Result<Arc<dyn ObjectStore>> {
-        use object_store::local::LocalFileSystem;
-
-        let uri = config.uri.as_str();
-        let os = &config.object_store;
-
-        // Local filesystem
-        if uri.starts_with("file://") || uri.starts_with('/') {
-            let path = uri.strip_prefix("file://").unwrap_or(uri);
-
-            // Create the directory if it doesn't exist
-            std::fs::create_dir_all(path).map_err(|e| {
-                Error::Storage(format!("Failed to create storage directory: {}", e))
-            })?;
-
-            // Use LocalFileSystem without prefix - we'll use full paths in queries
-            let store = LocalFileSystem::new();
-            return Ok(Arc::new(store));
-        }
-
-        // AWS S3
-        if uri.starts_with("s3://") {
-            use object_store::aws::AmazonS3Builder;
-
-            let url = url::Url::parse(uri)
-                .map_err(|e| Error::Config(format!("Invalid S3 URI '{}': {}", uri, e)))?;
-
-            let bucket = url
-                .host_str()
-                .ok_or_else(|| Error::Config(format!("S3 URI missing bucket name: {}", uri)))?;
-
-            // Base on `from_env` so the default AWS credential chain (instance
-            // profile, IRSA / web-identity, the credentials injected by the
-            // platform) is picked up with no configuration. Connection settings
-            // come from the cold-tier config, not the environment.
-            let mut builder = AmazonS3Builder::from_env().with_bucket_name(bucket);
-            if let Some(region) = &os.region {
-                builder = builder.with_region(region);
-            }
-            if let Some(endpoint) = &os.endpoint {
-                builder = builder.with_endpoint(endpoint);
-            }
-            if os.allow_http {
-                builder = builder.with_allow_http(true);
-            }
-            if let Some(vhost) = os.virtual_hosted_style {
-                builder = builder.with_virtual_hosted_style_request(vhost);
-            }
-            if let (Some(key), Some(secret)) = (&os.access_key_id, &os.secret_access_key) {
-                builder = builder
-                    .with_access_key_id(key)
-                    .with_secret_access_key(secret);
-            }
-
-            let store = builder
-                .build()
-                .map_err(|e| Error::Config(format!("Failed to create S3 store: {}", e)))?;
-
-            return Ok(Arc::new(store));
-        }
-
-        // Google Cloud Storage
-        if uri.starts_with("gs://") {
-            use object_store::gcp::GoogleCloudStorageBuilder;
-
-            let url = url::Url::parse(uri)
-                .map_err(|e| Error::Config(format!("Invalid GCS URI '{}': {}", uri, e)))?;
-
-            let bucket = url
-                .host_str()
-                .ok_or_else(|| Error::Config(format!("GCS URI missing bucket name: {}", uri)))?;
-
-            // `from_env` picks up GOOGLE_APPLICATION_CREDENTIALS and the default
-            // workload-identity credential chain; the bucket comes from the URI.
-            let store = GoogleCloudStorageBuilder::from_env()
-                .with_bucket_name(bucket)
-                .build()
-                .map_err(|e| Error::Config(format!("Failed to create GCS store: {}", e)))?;
-
-            return Ok(Arc::new(store));
-        }
-
-        // Azure Blob Storage
-        if uri.starts_with("az://") || uri.starts_with("azure://") {
-            use object_store::azure::MicrosoftAzureBuilder;
-
-            let stripped_uri = uri
-                .strip_prefix("az://")
-                .or_else(|| uri.strip_prefix("azure://"))
-                .unwrap();
-
-            let url = url::Url::parse(&format!("https://{}", stripped_uri))
-                .map_err(|e| Error::Config(format!("Invalid Azure URI '{}': {}", uri, e)))?;
-
-            let container = url.host_str().ok_or_else(|| {
-                Error::Config(format!("Azure URI missing container name: {}", uri))
-            })?;
-
-            // `from_env` picks up AZURE_STORAGE_* and the default credential chain
-            // (managed / workload identity); the container comes from the URI.
-            let mut builder = MicrosoftAzureBuilder::from_env().with_container_name(container);
-            if os.allow_http {
-                builder = builder.with_allow_http(true);
-            }
-            let store = builder
-                .build()
-                .map_err(|e| Error::Config(format!("Failed to create Azure store: {}", e)))?;
-
-            return Ok(Arc::new(store));
-        }
-
-        Err(Error::Config(format!(
-            "Unsupported object store URI: {}. Supported: file://, s3://, gs://, az://",
-            uri
-        )))
+        Ok(sequins_object_store::build(
+            &config.uri,
+            &config.object_store,
+        )?)
     }
 
     /// Dispatch a hot-tier flush to the appropriate per-signal write path.

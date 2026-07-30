@@ -13,6 +13,7 @@ sequins-arrow-schema          = { workspace = true }
 sequins-types                 = { workspace = true }
 sequins-companion-index       = { workspace = true }
 sequins-series-index          = { workspace = true }
+sequins-object-store          = { workspace = true }
 sequins-vortex-indexed-layout = { workspace = true }
 
 # Arrow / DataFusion
@@ -41,7 +42,6 @@ serde_json = { workspace = true }
 # Utilities
 chrono      = { workspace = true }
 uuid        = { workspace = true }
-url         = { workspace = true }
 hex         = { workspace = true }
 base64      = { workspace = true }
 bytes       = { workspace = true }

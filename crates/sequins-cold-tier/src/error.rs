@@ -44,6 +44,18 @@ pub enum Error {
     SeriesIndex(#[from] sequins_series_index::error::Error),
 }
 
+/// Flatten store-construction failures onto the existing variants so the
+/// messages callers already match on are unchanged by the move to
+/// `sequins-object-store`.
+impl From<sequins_object_store::Error> for Error {
+    fn from(err: sequins_object_store::Error) -> Self {
+        match err {
+            sequins_object_store::Error::Config(msg) => Error::Config(msg),
+            io @ sequins_object_store::Error::Io(_) => Error::Storage(io.to_string()),
+        }
+    }
+}
+
 impl Error {
     /// True if this batch can never be written to cold (a permanent schema
     /// incompatibility), so it should be dropped rather than retried — otherwise it
