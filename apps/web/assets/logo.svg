@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
+  <defs>
+    <clipPath id="ru"><polygon points="0,58.7 0,120 120,120 120,39.7"/></clipPath>
+    <clipPath id="ro"><polygon points="0,0 120,0 120,39.7 0,58.7"/></clipPath>
+    <mask id="hole">
+      <rect width="120" height="120" fill="white"/>
+      <circle cx="60" cy="60" r="13" fill="black"/>
+    </mask>
+  </defs>
+  <g mask="url(#hole)">
+    <circle cx="76" cy="44" r="26" fill="#E8472A" stroke="white" stroke-width="6" paint-order="stroke fill" clip-path="url(#ru)"/>
+    <circle cx="76" cy="76" r="26" fill="#E8832A" stroke="white" stroke-width="6" paint-order="stroke fill"/>
+    <circle cx="44" cy="76" r="26" fill="#3DA874" stroke="white" stroke-width="6" paint-order="stroke fill"/>
+    <circle cx="44" cy="44" r="26" fill="#2A7BE8" stroke="white" stroke-width="6" paint-order="stroke fill"/>
+    <circle cx="76" cy="44" r="26" fill="#E8472A" stroke="white" stroke-width="6" paint-order="stroke fill" clip-path="url(#ro)"/>
+  </g>
+  <circle cx="60" cy="60" r="14.5" fill="none" stroke="white" stroke-width="3"/>
+</svg>

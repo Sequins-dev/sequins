@@ -1,0 +1,86 @@
+<div id="traces-view" class="flex flex-col h-full overflow-hidden" data-init="initTraceResize()">
+  <!-- Top: waterfall — starts at 50%, vertically resizable -->
+  <div id="trace-waterfall" class="overflow-hidden border-b border-zinc-700 bg-zinc-950 flex flex-col" style="flex:0 0 50%;min-height:80px">
+    <div class="flex items-center justify-center flex-1 text-zinc-500 text-xs">Select a trace to view the waterfall</div>
+  </div>
+  <!-- Vertical resize handle -->
+  <div id="tr-resize-v" class="h-1 bg-zinc-700 hover:bg-blue-500 cursor-row-resize shrink-0 transition-colors"></div>
+  <!-- Bottom: three resizable panels -->
+  <div class="flex overflow-hidden" style="flex:1;min-height:80px">
+    <!-- Left: trace list -->
+    <div id="trace-list" class="flex flex-col overflow-hidden border-r border-zinc-700" style="width:220px;flex:none">
+      <div class="flex items-center justify-center flex-1 text-zinc-500 text-xs">Loading…</div>
+    </div>
+    <!-- Resize handle 1 -->
+    <div id="tr-resize-1" class="w-1 bg-zinc-700 hover:bg-blue-500 cursor-col-resize shrink-0 transition-colors"></div>
+    <!-- Middle: trace info -->
+    <div id="trace-info" class="flex-1 overflow-y-auto border-r border-zinc-700 p-3" style="min-width:200px">
+      <div class="flex flex-col items-center justify-center h-full text-zinc-500 text-xs">
+        <span>Select a trace to view details</span>
+      </div>
+    </div>
+    <!-- Resize handle 2 -->
+    <div id="tr-resize-2" class="w-1 bg-zinc-700 hover:bg-blue-500 cursor-col-resize shrink-0 transition-colors"></div>
+    <!-- Right: span details -->
+    <div id="span-details" class="overflow-y-auto p-3" style="width:240px;flex:none">
+      <div class="flex flex-col items-center justify-center h-full text-zinc-500 text-xs">
+        <span>Select a span</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+/* Waterfall rows */
+.wf-row {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid #27272a;
+  min-height: 22px;
+  cursor: pointer;
+}
+.wf-row:hover { background: #18181b; }
+.wf-row.wf-selected { background: #1e3a5f !important; }
+.wf-row.wf-error .wf-bar { outline: 1px solid #f87171; }
+.wf-timeline {
+  flex: 1;
+  position: relative;
+  height: 22px;
+}
+.wf-bar-label {
+  font-size: 0.65rem;
+  font-family: monospace;
+  color: rgba(255,255,255,0.92);
+  padding-left: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Trace list rows */
+.trace-row {
+  padding: 5px 8px;
+  border-bottom: 1px solid #27272a;
+  cursor: pointer;
+  font-size: 0.72rem;
+}
+.trace-row:hover { background: #18181b; }
+.trace-row.tr-selected { background: #1e3a5f; }
+/* Timeline ruler */
+.wf-ruler {
+  display: flex;
+  border-bottom: 1px solid #3f3f46;
+  background: #18181b;
+  font-size: 0.62rem;
+  font-family: monospace;
+  color: #71717a;
+  height: 18px;
+  align-items: center;
+  position: relative;
+  flex-shrink: 0;
+}
+.wf-ruler-tick {
+  position: absolute;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+</style>

@@ -1,0 +1,162 @@
+<div id="metrics-view" class="flex flex-col h-full overflow-hidden">
+  <div id="metric-cards" class="flex-1 overflow-y-auto p-3 grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); align-content: start;">
+    <div class="flex items-center justify-center h-24 text-zinc-500 text-sm col-span-full">Loading…</div>
+  </div>
+</div>
+
+<style>
+.metric-card {
+  background: #18181b;
+  border: 1px solid #3f3f46;
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem 0.5rem;
+}
+.metric-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.3rem;
+}
+.metric-card-name {
+  font-size: 0.82rem;
+  font-family: monospace;
+  color: #f4f4f5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.metric-unit {
+  font-size: 0.72rem;
+  color: #a1a1aa;
+  font-family: monospace;
+}
+.metric-type-badge {
+  font-size: 0.7rem;
+  background: #27272a;
+  color: #a1a1aa;
+  border-radius: 3px;
+  padding: 0.1rem 0.35rem;
+}
+.metric-chart { line-height: 0; }
+</style>
+
+<div id="metric-tooltip" style="position:fixed;pointer-events:none;display:none;background:#1c1c1e;border:1px solid #3f3f46;border-radius:5px;padding:5px 8px;font-family:monospace;z-index:1000;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.5)"></div>
+
+<script>
+(function() {
+  var tip = document.getElementById('metric-tooltip');
+
+  function fmtTime(sec) {
+    var d = new Date(sec * 1000);
+    var h = d.getUTCHours().toString().padStart(2,'0');
+    var m = d.getUTCMinutes().toString().padStart(2,'0');
+    var s = d.getUTCSeconds().toString().padStart(2,'0');
+    return h+':'+m+':'+s;
+  }
+
+  function fmtVal(v) {
+    var a = Math.abs(v);
+    if (a >= 1e6) return (v/1e6).toFixed(2)+'M';
+    if (a >= 1e3) return (v/1e3).toFixed(2)+'k';
+    if (v % 1 === 0) return v.toFixed(0);
+    return v.toFixed(2);
+  }
+
+  // Get the current slide offset (dx) for a given SVG element.
+  function getSlideOffset(svg) {
+    var g = svg.querySelector('.chart-slide');
+    if (!g) return 0;
+    var t = g.getAttribute('transform');
+    if (!t) return 0;
+    var m = t.match(/translate\(([-\d.]+)/);
+    return m ? parseFloat(m[1]) : 0;
+  }
+
+  document.addEventListener('mousemove', function(e) {
+    var svg = e.target.closest('svg[data-pts]');
+    if (!svg) { tip.style.display = 'none'; return; }
+    var raw = svg.getAttribute('data-pts');
+    var pts;
+    try { pts = JSON.parse(raw); } catch(_) { tip.style.display='none'; return; }
+    if (!pts.length) { tip.style.display='none'; return; }
+
+    var unit = svg.getAttribute('data-unit') || '';
+    var rect = svg.getBoundingClientRect();
+    var scaleX = rect.width / 400;
+    var scaleY = rect.height / 120;
+    var mouseX = (e.clientX - rect.left) / scaleX;
+
+    // Adjust for the current slide offset so the nearest-point search
+    // operates in the same coordinate space as the data points.
+    var dx = getSlideOffset(svg);
+    var adjustedMouseX = mouseX - dx;
+
+    // pts format: [svg_x, svg_y, value, timestamp_sec]
+    var best = pts[0], bestD = Infinity;
+    for (var i = 0; i < pts.length; i++) {
+      var d = Math.abs(pts[i][0] - adjustedMouseX);
+      if (d < bestD) { bestD = d; best = pts[i]; }
+    }
+
+    // Move hover dot — account for slide offset so it tracks the line
+    var dot = svg.querySelector('.hover-dot');
+    if (dot) {
+      dot.setAttribute('cx', best[0] + dx);
+      dot.setAttribute('cy', best[1]);
+    }
+
+    var valStr = fmtVal(best[2]) + (unit ? '\u00a0' + unit : '');
+    tip.innerHTML =
+      '<div style="font-size:10px;color:#71717a;margin-bottom:3px">' + fmtTime(best[3]) + '</div>' +
+      '<div style="font-size:12px;font-weight:600;color:#f4f4f5">' + valStr + '</div>';
+    tip.style.display = 'block';
+
+    var ptScreenX = rect.left + (best[0] + dx) * scaleX;
+    var tipW = tip.offsetWidth;
+    var tx = Math.max(4, Math.min(window.innerWidth - tipW - 4, ptScreenX - tipW / 2));
+    var ty = rect.top - tip.offsetHeight - 8;
+    if (ty < 4) ty = rect.bottom + 4;
+    tip.style.left = tx + 'px';
+    tip.style.top = ty + 'px';
+  });
+
+  document.addEventListener('mouseleave', function(e) {
+    if (e.target === document.documentElement) {
+      tip.style.display = 'none';
+      document.querySelectorAll('.hover-dot').forEach(function(dot) {
+        dot.setAttribute('cx', '-100'); dot.setAttribute('cy', '-100');
+      });
+    }
+  }, true);
+
+  document.addEventListener('mouseover', function(e) {
+    if (!e.target.closest('svg[data-pts]')) {
+      tip.style.display = 'none';
+      document.querySelectorAll('.hover-dot').forEach(function(dot) {
+        dot.setAttribute('cx', '-100'); dot.setAttribute('cy', '-100');
+      });
+    }
+  });
+
+  // Smooth sliding window animation.
+  // Each SVG has data-render-time (epoch sec when the server rendered it)
+  // and data-slide-rate (pixels per second = chart_width / window_sec).
+  // We translate the .chart-slide group left by elapsed * rate pixels each frame,
+  // creating a smooth slide effect between server-side ticks.
+  function slideCharts() {
+    var now = Date.now() / 1000;
+    document.querySelectorAll('svg[data-slide-rate]').forEach(function(svg) {
+      var renderTime = parseFloat(svg.getAttribute('data-render-time'));
+      var rate = parseFloat(svg.getAttribute('data-slide-rate'));
+      var g = svg.querySelector('.chart-slide');
+      if (g && renderTime && rate) {
+        var dx = -(now - renderTime) * rate;
+        g.setAttribute('transform', 'translate(' + dx + ',0)');
+      }
+    });
+    requestAnimationFrame(slideCharts);
+  }
+  requestAnimationFrame(slideCharts);
+})();
+</script>
