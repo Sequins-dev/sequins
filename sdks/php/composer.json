@@ -1,0 +1,34 @@
+{
+    "name": "sequins/otel",
+    "description": "OpenTelemetry distro for Sequins — zero-config observability for local development",
+    "type": "library",
+    "license": "MIT",
+    "version": "0.1.0",
+    "keywords": ["opentelemetry", "sequins", "observability", "otel", "tracing"],
+    "require": {
+        "php": ">=8.1",
+        "open-telemetry/sdk": "^1.0",
+        "open-telemetry/exporter-otlp": "^1.0",
+        "open-telemetry/transport-grpc": "^1.0",
+        "guzzlehttp/guzzle": "^7.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.0"
+    },
+    "suggest": {
+        "open-telemetry/opentelemetry-auto-psr18": "Auto-instruments PSR-18 HTTP clients (Guzzle, etc.)",
+        "open-telemetry/opentelemetry-auto-psr3": "Auto-instruments PSR-3 loggers",
+        "open-telemetry/opentelemetry-auto-psr15": "Auto-instruments PSR-15 middleware/request handlers",
+        "php-http/discovery": "Required by some auto-instrumentation packages for transport discovery"
+    },
+    "autoload": {
+        "psr-4": {
+            "Sequins\\Otel\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Sequins\\Otel\\Tests\\": "tests/"
+        }
+    }
+}
