@@ -6,6 +6,9 @@ import SequinsData
 @MainActor
 @Observable
 final class AppStateViewModel {
+    let preferences = AppPreferences()
+    var serviceDiscoveryState: ServiceDiscoveryState = .loading
+    var selectedSettingsTab: SettingsTab = .general
     // Environment management
     let environmentManager = EnvironmentManager()
 
@@ -107,6 +110,8 @@ final class AppStateViewModel {
     }
 
     func connectToEnvironment(_ environment: ConnectionEnvironment) {
+        selectedService = nil
+        serviceDiscoveryState = .loading
         dataSourceError = nil
         serverStatus = .starting
 
@@ -186,6 +191,16 @@ final class AppStateViewModel {
         serverStatus = .stopped
         connectToEnvironment(environment)
     }
+}
+
+enum ServiceDiscoveryState: Equatable {
+    case loading
+    case ready(hasServices: Bool)
+    case failed(String)
+}
+
+enum SettingsTab: Hashable {
+    case general, environments, healthRules
 }
 
 enum ServerStatus: Equatable {

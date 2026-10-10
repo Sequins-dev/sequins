@@ -31,6 +31,7 @@ struct MainWindow: View {
                 .navigationSplitViewColumnWidth(min: 160, ideal: 220, max: 300)
         } detail: {
             VStack(spacing: 0) {
+                WelcomeBanner()
                 // Expandable resource attributes panel (service tabs only)
                 if let service = appState.selectedService, appState.isServiceAttributesExpanded {
                     ResourceAttributesPanel(service: service)
@@ -221,55 +222,100 @@ struct DetailContentView: View {
 /// Empty state when no service is selected
 struct NoServiceSelectedView: View {
     @Environment(AppStateViewModel.self) private var appState
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(spacing: 20) {
-            Image(systemName: "sidebar.left")
-                .font(.system(size: 64))
-                .foregroundStyle(.secondary)
-
-            Text("Select a Service")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-
-            Text("Choose a service from the sidebar to view its telemetry data")
-                .font(.body)
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 300)
-
-            if case .running(let grpcPort, let httpPort) = appState.serverStatus {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Waiting for telemetry data...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    HStack(spacing: 16) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("gRPC")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                            Text("localhost:\(String(grpcPort))")
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("HTTP")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                            Text("localhost:\(String(httpPort))")
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+            switch appState.serverStatus {
+            case .starting:
+                ProgressView("Starting Sequins…")
+            case .stopped:
+                statusMessage("Connect an Environment", icon: "network", message: "Open Settings to connect a local or remote environment.")
+                Button("Open Environment Settings", action: openEnvironmentSettings)
+            case .error(let message):
+                failure(message)
+            case .running, .connected:
+                switch appState.serviceDiscoveryState {
+                case .loading:
+                    ProgressView("Loading services…")
+                case .failed(let message):
+                    failure(message)
+                case .ready(hasServices: true):
+                    statusMessage("Select a Service", icon: "sidebar.left", message: "Choose a service from the sidebar to view its telemetry data.")
+                case .ready(hasServices: false):
+                    gettingStarted
                 }
-                .padding()
-                .background(Color(nsColor: .controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
+        .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var gettingStarted: some View {
+        VStack(spacing: 20) {
+            if case .running(let grpcPort, let httpPort) = appState.serverStatus {
+                statusMessage("Send your first telemetry", icon: "antenna.radiowaves.left.and.right", message: "Sequins is ready to receive OpenTelemetry data. Point your application's exporter at one of these local endpoints. Services appear automatically when data arrives.")
+                VStack(alignment: .leading, spacing: 12) {
+                    endpoint("HTTP", value: "http://localhost:\(httpPort)")
+                    endpoint("gRPC", value: "http://localhost:\(grpcPort)")
+                    Divider()
+                    Text("For an OTLP HTTP/protobuf exporter:")
+                        .font(.caption).foregroundStyle(.secondary)
+                    let configuration = "export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:\(httpPort)\nexport OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf"
+                    Text(configuration)
+                        .font(.system(.caption, design: .monospaced))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                    Button("Copy exporter configuration") { copy(configuration) }
+                }
+                .padding(16)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                statusMessage("Waiting for remote telemetry", icon: "network", message: "No services are available in this environment. Send telemetry to your remote Sequins daemon and verify its connection settings.")
+                Button("Open Environment Settings", action: openEnvironmentSettings)
+            }
+            Link("OpenTelemetry instrumentation guide", destination: URL(string: "https://opentelemetry.io/docs/languages/")!)
+        }
+        .frame(maxWidth: 560)
+    }
+
+    private func statusMessage(_ title: String, icon: String, message: String) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: icon).font(.system(size: 48)).foregroundStyle(.secondary)
+            Text(title).font(.title2)
+            Text(message).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+    }
+
+    private func failure(_ message: String) -> some View {
+        VStack(spacing: 16) {
+            statusMessage("Couldn’t Load Telemetry", icon: "exclamationmark.triangle", message: message)
+            HStack {
+                Button("Retry") { appState.reconnect() }
+                Button("Open Environment Settings", action: openEnvironmentSettings)
+            }
+        }
+        .frame(maxWidth: 560)
+    }
+
+    private func endpoint(_ label: String, value: String) -> some View {
+        HStack {
+            Text(label).frame(width: 45, alignment: .leading)
+            Text(value).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+            Spacer()
+            Button("Copy \(label) endpoint") { copy(value) }
+        }
+    }
+
+    private func copy(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+    }
+
+    private func openEnvironmentSettings() {
+        appState.selectedSettingsTab = .environments
+        openSettings()
     }
 }
 

@@ -15,7 +15,9 @@ struct ServiceListView: View {
         @Bindable var appState = appState
 
         List(selection: $selectedServiceName) {
-            if isLoading {
+            if case .failed(let message) = appState.serviceDiscoveryState {
+                ContentUnavailableView("Couldn’t Load Services", systemImage: "exclamationmark.triangle", description: Text(message))
+            } else if isLoading {
                 ProgressView()
                     .frame(maxWidth: .infinity, alignment: .center)
             } else if services.isEmpty {
@@ -95,7 +97,16 @@ struct ServiceListView: View {
             liveStream?.cancel()
             liveStream = nil
         }
+        .onChange(of: liveStream?.errorMessage) { _, message in
+            if let message {
+                isLoading = false
+                appState.serviceDiscoveryState = .failed(message)
+            }
+        }
         .onChange(of: services) { _, newServices in
+            if !isLoading, liveStream != nil, liveStream?.errorMessage == nil {
+                appState.serviceDiscoveryState = .ready(hasServices: !newServices.isEmpty)
+            }
             // Auto-select first service if none selected
             if appState.selectedService == nil, let first = newServices.first {
                 selectedServiceName = first.name
@@ -118,7 +129,10 @@ struct ServiceListView: View {
         liveStream = nil
         resourceRows = []
         services = []
+        selectedServiceName = nil
         isLoading = true
+        appState.serviceDiscoveryState = .loading
+        let sourceId = appState.dataSourceId
 
         do {
             let stream = try dataSource.executeLiveSeQL(
@@ -126,12 +140,15 @@ struct ServiceListView: View {
 
             stream.onSchemaCallback = { _ in
                 Task { @MainActor in
+                    guard appState.dataSourceId == sourceId else { return }
                     self.isLoading = false
+                    appState.serviceDiscoveryState = .ready(hasServices: !services.isEmpty)
                 }
             }
 
             stream.onBatchCallback = { batch, _ in
                 Task { @MainActor in
+                    guard appState.dataSourceId == sourceId else { return }
                     self.resourceRows.append(contentsOf: self.parseRows(from: batch))
                     self.rebuildServices()
                 }
@@ -139,6 +156,7 @@ struct ServiceListView: View {
 
             stream.onDeltaCallback = { ops in
                 Task { @MainActor in
+                    guard appState.dataSourceId == sourceId else { return }
                     for op in ops {
                         switch op.type {
                         case .append:
@@ -162,6 +180,7 @@ struct ServiceListView: View {
         } catch {
             print("[ServiceListView] Failed to start live stream: \(error)")
             isLoading = false
+            appState.serviceDiscoveryState = .failed(error.localizedDescription)
         }
     }
 
