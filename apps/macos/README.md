@@ -8,23 +8,6 @@ Sequins is a local-first observability tool that provides an embedded OTLP endpo
 
 ## Features
 
-### Starting and closing Sequins
-
-Sequins opens its main window by default and always keeps an icon in the menu bar.
-Closing the window leaves the app running and telemetry collection active. Click
-the menu bar icon and choose **Open Sequins** to reopen it, or **Quit** to stop it.
-
-To start in the background, open **Settings → General** and turn off **Show main
-window when starting**. This preference applies the next time you open the app;
-it does not close an already-open window. Menu bar visibility is always enabled.
-
-On first use, the window explains background operation. Until services arrive,
-the local environment shows its configured OTLP endpoints and a copyable exporter
-configuration. For remote environments, check the daemon's connection settings
-and send telemetry to the daemon instead.
-
-### Telemetry views
-
 - **Two-Column Layout**: Service list sidebar with main content area
 - **Tab-Based Navigation**: Traces, Logs, Metrics, Profiles tabs along the top
 - **Traces View**: Table view of distributed traces with filtering
