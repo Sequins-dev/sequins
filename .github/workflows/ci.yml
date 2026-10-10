@@ -67,3 +67,7 @@ jobs:
       - name: Swift test
         working-directory: apps/macos/SequinsData
         run: xcrun swift test -Xswiftc -DSPM_BUILD
+
+      - name: Swift app build and unit tests
+        working-directory: apps/macos
+        run: xcrun swift test -Xswiftc -DSPM_BUILD

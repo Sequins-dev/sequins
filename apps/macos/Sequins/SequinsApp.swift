@@ -5,6 +5,7 @@ import SequinsData
 
 @main
 struct SequinsApp: App {
+    @NSApplicationDelegateAdaptor(SequinsAppDelegate.self) private var appDelegate
     @State private var appState: AppStateViewModel
     private let modelContainer: ModelContainer
 
@@ -36,20 +37,10 @@ struct SequinsApp: App {
         // print("🚀 SequinsApp: OTLP server starting on app launch")
 
         self._appState = State(initialValue: state)
+        appDelegate.appState = state
 
         // Set up notification service
         setupNotifications(appState: state)
-
-        // Demo/QA hook: auto-open the main window on launch when requested, so the
-        // menu-bar app can be driven headlessly. No-op unless the env var is set.
-        if let tabName = ProcessInfo.processInfo.environment["SEQUINS_AUTO_OPEN_WINDOW"] {
-            let tab = NavigationItem(rawValue: tabName) ?? .assistant
-            let launchState = state
-            DispatchQueue.main.async {
-                MainWindowController.shared.showWindow(appState: launchState, selectedTab: tab)
-                NSApp.activate(ignoringOtherApps: true)
-            }
-        }
     }
 
     private func setupNotifications(appState: AppStateViewModel) {
@@ -86,6 +77,7 @@ struct SequinsApp: App {
                 .environment(appState)
         } label: {
             MenuBarIconLabel()
+                .accessibilityLabel("Sequins")
         }
         .menuBarExtraStyle(.window)
 
@@ -95,6 +87,35 @@ struct SequinsApp: App {
                 .environment(appState)
         }
         #endif
+    }
+}
+
+@MainActor
+final class SequinsAppDelegate: NSObject, NSApplicationDelegate {
+    weak var appState: AppStateViewModel?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        openWindowIfRequested()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openWindowIfRequested()
+        return false
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false // Collection continues through the permanent menu bar app.
+    }
+
+    private func openWindowIfRequested() {
+        guard let appState else { return }
+        let environment = ProcessInfo.processInfo.environment
+        guard appState.preferences.shouldOpenMainWindow(environment: environment) else { return }
+        // Preserve the QA hook's tab selection and precedence over background mode.
+        let tab = environment["SEQUINS_AUTO_OPEN_WINDOW"].map {
+            NavigationItem(rawValue: $0) ?? .assistant
+        } ?? .health
+        MainWindowController.shared.showWindow(appState: appState, selectedTab: tab)
     }
 }
 

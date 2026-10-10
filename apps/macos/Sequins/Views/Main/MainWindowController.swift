@@ -13,6 +13,9 @@ final class MainWindowController {
     private init() {}
 
     func showWindow(appState: AppStateViewModel, selectedTab: NavigationItem = .health) {
+        if let window, window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
         if let existingWindow = window, existingWindow.isVisible {
             existingWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)

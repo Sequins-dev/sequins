@@ -22,6 +22,12 @@ let package = Package(
             path: "Sequins",
             exclude: ["Assets.xcassets"],
             swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "SequinsTests",
+            dependencies: ["Sequins"],
+            path: "SequinsTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]
 )

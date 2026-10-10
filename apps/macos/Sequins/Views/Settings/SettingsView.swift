@@ -4,7 +4,11 @@ struct SettingsView: View {
     @Environment(AppStateViewModel.self) private var appState
 
     var body: some View {
-        TabView {
+        @Bindable var appState = appState
+        TabView(selection: $appState.selectedSettingsTab) {
+            GeneralSettingsView()
+                .tabItem { Label("General", systemImage: "gearshape") }
+                .tag(SettingsTab.general)
             // Environments tab
             HSplitView {
                 // Environment list sidebar
@@ -18,14 +22,37 @@ struct SettingsView: View {
             .tabItem {
                 Label("Environments", systemImage: "network")
             }
+            .tag(SettingsTab.environments)
 
             // Health rules tab
             HealthRulesSettingsView()
                 .tabItem {
                     Label("Health Rules", systemImage: "heart.text.square")
                 }
+                .tag(SettingsTab.healthRules)
         }
         .frame(width: 700, height: 500)
+    }
+}
+
+private struct GeneralSettingsView: View {
+    @Environment(AppStateViewModel.self) private var appState
+
+    var body: some View {
+        @Bindable var preferences = appState.preferences
+        Form {
+            Section("Startup") {
+                Toggle("Show main window when starting", isOn: $preferences.showMainWindowOnLaunch)
+                    .toggleStyle(.checkbox)
+                Text("When disabled, Sequins opens in the background. Use the menu bar icon to open the main window.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Background operation") {
+                Text("Sequins always appears in the menu bar. Closing the main window keeps telemetry collection running. Choose Quit from the menu bar to stop Sequins.")
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 
