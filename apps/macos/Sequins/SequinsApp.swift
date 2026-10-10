@@ -95,6 +95,9 @@ final class SequinsAppDelegate: NSObject, NSApplicationDelegate {
     weak var appState: AppStateViewModel?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Access the selected environment's credential at launch so any Keychain
+        // permission prompt appears before the user opens the Assistant tab.
+        _ = appState?.assistantConfig()
         openWindowIfRequested()
     }
 
