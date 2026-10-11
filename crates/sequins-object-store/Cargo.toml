@@ -1,0 +1,21 @@
+[package]
+name = "sequins-object-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Shared object-store construction for Sequins storage tiers"
+
+[dependencies]
+object_store = { workspace = true }
+
+serde = { workspace = true, features = ["derive"] }
+url   = { workspace = true }
+
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt"] }
+bytes    = { workspace = true }

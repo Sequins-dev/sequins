@@ -72,34 +72,12 @@ impl Default for ColdTierConfig {
     }
 }
 
-/// Connection options for cloud object stores. All fields are optional; unset
-/// values fall back to the object-store provider's defaults (including the
-/// standard credential chain — instance profile, IRSA / workload identity).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct ObjectStoreConfig {
-    /// Region (e.g. `us-east-1`). Unset uses the provider default.
-    pub region: Option<String>,
-
-    /// Custom endpoint URL for S3-compatible stores (MinIO, Ceph RGW, a gateway).
-    pub endpoint: Option<String>,
-
-    /// Allow plain-HTTP endpoints. Required for a local MinIO served over http
-    /// (object stores reject non-https endpoints otherwise).
-    #[serde(default)]
-    pub allow_http: bool,
-
-    /// Force path-style addressing (`endpoint/bucket`) instead of virtual-hosted
-    /// (`bucket.endpoint`). Most S3-compatibles (MinIO) need path-style.
-    pub virtual_hosted_style: Option<bool>,
-
-    /// Static access key id. Prefer the credential chain (IRSA / instance
-    /// profile) in production; set this only for local/dev (e.g. MinIO).
-    pub access_key_id: Option<String>,
-
-    /// Static secret access key (paired with `access_key_id`).
-    pub secret_access_key: Option<String>,
-}
+/// Connection options for cloud object stores.
+///
+/// Defined in [`sequins_object_store`] and re-exported here so it can be shared
+/// with other subsystems that need their own bucket or prefix without depending
+/// on the cold tier.
+pub use sequins_object_store::ObjectStoreConfig;
 
 /// Companion index configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
