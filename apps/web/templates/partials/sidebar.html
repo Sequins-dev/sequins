@@ -1,0 +1,9 @@
+{% for svc in services %}
+<li>
+  <button class="service-item w-full text-left px-4 py-1.5 text-sm bg-transparent border-0 text-zinc-300 hover:bg-zinc-800 cursor-pointer truncate block"
+    data-class:active="$service==='{{ svc.resource_id | default('') }}'"
+    data-on:click="$service='{{ svc.resource_id | default('') }}'">
+    {{ svc.service_name | default(svc.resource_id) | default("unknown") }}
+  </button>
+</li>
+{% endfor %}
